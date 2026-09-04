@@ -51,6 +51,8 @@
 
 ## クイックスタート - Windows x64 ベータ
 
+**いちばん簡単な導入方法：** お使いの Codex にこのリポジトリをスキャンさせ、インストールから起動まで順番に案内してもらってください。
+
 1. [GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases) から
    `codex-watchdog-vX.Y.Z-windows-x64.zip` と `SHA256SUMS.txt` をダウンロードし、
    チェックサムを確認して ZIP 全体を展開します。Python は不要です。
