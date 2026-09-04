@@ -58,30 +58,29 @@
    完整解压。无需安装 Python。
 2. 如果要安装原生 Hook，请选择一个不含空格的固定解压路径。Git、带 Codex 的
    VS Code、Codex CLI 和 Windows OpenSSH 仍需单独安装。
-3. 在解压目录打开 PowerShell，先检查程序：
+3. 双击 `codex-watchdog.exe`。程序会创建或复用带版本标记的当前用户启动配置，
+   并启动前台监控。按 Ctrl-C 或关闭控制台窗口即可停止。
+4. 如需检查或使用高级选项，仍可打开 PowerShell：
 
    ```powershell
    .\codex-watchdog.exe --version
-   .\watchdog.ps1 -DryRun -NoDuo
+   .\watchdog.ps1 -DryRun
    ```
 
-4. 生成并检查 Hook 配置，然后进行保守安装：
+5. 生成并检查 Hook 配置，然后进行保守安装：
 
    ```powershell
-   .\codex-watchdog.exe --runtime "$PWD\.codex-watchdog" install-user-hooks
-   .\codex-watchdog.exe --runtime "$PWD\.codex-watchdog" install-user-hooks --install
+   .\codex-watchdog.exe install-user-hooks
+   .\codex-watchdog.exe install-user-hooks --install
    ```
 
    如果已有不同的 `hooks.json`，安装器会拒绝覆盖；请参考详细设置文档手动合并。
    随后在 Codex 中打开 `/hooks`，检查准确的定义并手动信任。
-5. 打开需要监控的 VS Code 工作区和 Codex 线程，然后运行：
 
-   ```powershell
-   .\watchdog.ps1 -NoDuo
-   ```
-
-   `-NoDuo` 只关闭可选的 PuTTY/Plink 共享连接回退；本地发现和普通的非交互式
-   OpenSSH 发现仍可使用。
+升级时，程序会自动复用兼容的启动配置、现有 WatchDog Hook 所引用的运行时，
+或相邻的最新旧版本运行时；不会复制或要求重新输入 Slack、Outlook、Duo、OAuth、
+工作区或通知设置。在完成新 Hook 的检查、替换并在 Codex 中重新信任之前，请保留
+旧版本目录。
 
 通知、Slack 回复转发、Outlook OAuth、Remote-SSH、Duo 回退和源码安装都是
 按需配置。需要时请阅读 [Windows 打包与安装说明](WINDOWS_PACKAGE.md)和

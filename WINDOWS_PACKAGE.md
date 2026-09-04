@@ -20,38 +20,71 @@ Extract the complete ZIP. If you will install the native Codex hooks, choose a
 permanent path without spaces because the current Windows Codex hook runner
 requires a quote-free command.
 
-From PowerShell in the extracted directory:
+Double-click `codex-watchdog.exe` to start the foreground monitor. The console
+stays open while WatchDog is running; press Ctrl-C or close it to stop.
+
+PowerShell remains available for inspection and advanced options:
 
 ```powershell
 .\codex-watchdog.exe --version
-.\watchdog.ps1 -DryRun -NoDuo
-.\watchdog.ps1 -NoDuo
+.\watchdog.ps1 -DryRun
+.\watchdog.ps1
 ```
 
 `watchdog.ps1` restores optional current-user DPAPI configuration and invokes
-the adjacent packaged executable. Runtime state defaults to `.codex-watchdog`
-beside the launcher and is never part of the release archive.
+the adjacent packaged executable. A no-argument executable launch performs this
+bootstrap automatically; argument-bearing CLI behavior remains available.
 
-The current beta executable is a console CLI rather than a one-click Windows
-application. Double-clicking `codex-watchdog.exe` without a command does not
-start the foreground loop, and double-clicking a `.ps1` file is not a reliable
-Windows launch experience. Until the saved-profile bootstrap is incorporated
-into the executable or an equivalent signed launcher, start `watchdog.ps1`
-from PowerShell or a shortcut that explicitly invokes it.
+The one-click launcher stores a non-secret, schema-versioned runtime pointer at
+`%LOCALAPPDATA%\CodexWatchdog\launcher-profile.json`. Resolution is
+deterministic: an existing valid profile wins; otherwise WatchDog checks an
+explicit `CODEX_WATCHDOG_RUNTIME`, one unique runtime referenced by recognizable
+installed WatchDog hooks, an adjacent runtime, and the newest unambiguous
+previous-release sibling. A fresh installation defaults to
+`%LOCALAPPDATA%\CodexWatchdog\runtime`. Malformed profiles, missing saved
+runtimes, and ambiguous hook/sibling results fail closed without overwriting or
+creating replacement state.
+
+Current-user Slack DPAPI files, Outlook environment/OAuth state, saved Duo
+configuration, notification state, workspace mappings, and audit history stay
+in their existing security boundaries. They are not copied into the release
+folder or rewritten during startup. A second foreground monitor for the same
+runtime is rejected by a process-lifetime lock.
+
+## Upgrade from v0.1.0
+
+1. Stop the old foreground WatchDog, but keep its extracted directory.
+2. Extract the new complete ZIP to its own permanent path.
+3. Double-click the new `codex-watchdog.exe`. With no prior launcher profile,
+   it recovers the old runtime from the installed WatchDog hooks or adjacent
+   previous release and records that path atomically.
+4. Confirm the existing local/remote workspaces and notification channels. No
+   unchanged Slack, Outlook, Duo, OAuth, runtime, or workspace setting should be
+   entered again.
+5. Existing hooks continue to invoke the old trusted executable. Keep that
+   directory until you deliberately render, review, install/merge, and trust
+   hooks for the new executable. Codex trust is an external security boundary
+   and cannot be transferred or fabricated by WatchDog.
+
+The previous runtime/profile is never deleted or overwritten by this upgrade,
+so stopping the new executable and starting the old launcher remains a rollback
+path.
 
 ## Native hook setup
 
-Render the exact hook document before installing it:
+After one-click startup has created/recovered the launcher profile, render the
+exact hook document before installing it. The packaged CLI automatically uses
+the same saved runtime when `--runtime` is omitted:
 
 ```powershell
-.\codex-watchdog.exe --runtime "$PWD\.codex-watchdog" install-user-hooks
+.\codex-watchdog.exe install-user-hooks
 ```
 
 The conservative installer writes only when `CODEX_HOME\hooks.json` is absent
 or already identical:
 
 ```powershell
-.\codex-watchdog.exe --runtime "$PWD\.codex-watchdog" install-user-hooks --install
+.\codex-watchdog.exe install-user-hooks --install
 ```
 
 It refuses to overwrite or merge a different existing hook file. Review and

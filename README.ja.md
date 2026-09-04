@@ -62,31 +62,32 @@
    チェックサムを確認して ZIP 全体を展開します。Python は不要です。
 2. ネイティブフックを導入する場合は、空白を含まない固定パスへ展開してください。
    Git、Codex を導入した VS Code、Codex CLI、Windows OpenSSH は別途必要です。
-3. 展開先で PowerShell を開き、パッケージを確認します。
+3. `codex-watchdog.exe` をダブルクリックします。バージョン付きのユーザー別
+   起動プロファイルが作成または再利用され、フォアグラウンド監視が始まります。
+   停止するには Ctrl-C を押すか、コンソールを閉じます。
+4. 確認や詳細オプションには引き続き PowerShell を利用できます。
 
    ```powershell
    .\codex-watchdog.exe --version
-   .\watchdog.ps1 -DryRun -NoDuo
+   .\watchdog.ps1 -DryRun
    ```
 
-4. ネイティブ Codex フックを生成して内容を確認し、安全な方法でインストールします。
+5. ネイティブ Codex フックを生成して内容を確認し、安全な方法でインストールします。
 
    ```powershell
-   .\codex-watchdog.exe --runtime "$PWD\.codex-watchdog" install-user-hooks
-   .\codex-watchdog.exe --runtime "$PWD\.codex-watchdog" install-user-hooks --install
+   .\codex-watchdog.exe install-user-hooks
+   .\codex-watchdog.exe install-user-hooks --install
    ```
 
    異なる `hooks.json` がすでに存在する場合、インストーラーは上書きしません。
    詳細ガイドに従って手動で統合してください。その後 Codex で `/hooks` を開き、
    正確な定義を確認して手動で信頼します。
-5. 監視したい VS Code ワークスペースと Codex スレッドを開き、実行します。
 
-   ```powershell
-   .\watchdog.ps1 -NoDuo
-   ```
-
-   `-NoDuo` が無効にするのは、任意機能である PuTTY／Plink 共有接続フォールバック
-   だけです。ローカル検出と通常の非対話 OpenSSH 検出は引き続き利用できます。
+アップグレード時には、互換性のある起動プロファイル、既存の WatchDog フックが
+参照するランタイム、または隣接する最新の旧バージョンのランタイムが自動的に
+再利用されます。Slack、Outlook、Duo、OAuth、ワークスペース、通知設定のコピーや
+再入力は不要です。新しいフックを確認・置換し、Codex で信頼するまでは旧バージョン
+のディレクトリを残してください。
 
 通知、Slack 返信中継、Outlook OAuth、Remote-SSH、Duo フォールバック、ソース
 インストールは必要な場合だけ設定します。詳しくは

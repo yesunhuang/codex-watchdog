@@ -10,8 +10,16 @@ $ErrorActionPreference = "Stop"
 
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $pyproject = Join-Path $repoRoot "pyproject.toml"
+$applicationIcon = Join-Path $repoRoot "images\codex-watchdog.ico"
+$iconVerifier = Join-Path $repoRoot "tools\verify_windows_executable_icon.py"
 Push-Location $repoRoot
 try {
+    if (-not (Test-Path -LiteralPath $applicationIcon -PathType Leaf)) {
+        throw "The approved Windows application icon is missing: $applicationIcon"
+    }
+    if (-not (Test-Path -LiteralPath $iconVerifier -PathType Leaf)) {
+        throw "The Windows executable icon verifier is missing: $iconVerifier"
+    }
     $pyprojectText = Get-Content -Raw -LiteralPath $pyproject
     $projectMatch = [regex]::Match(
         $pyprojectText,
@@ -80,6 +88,7 @@ try {
         "--onefile",
         "--console",
         "--name", "codex-watchdog",
+        "--icon", $applicationIcon,
         "--paths", (Join-Path $repoRoot "src"),
         "--distpath", $binaryDirectory,
         "--workpath", $workDirectory,
@@ -99,6 +108,15 @@ try {
     $executable = Join-Path $binaryDirectory "codex-watchdog.exe"
     if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
         throw "PyInstaller did not produce codex-watchdog.exe."
+    }
+    $iconVerification = & $Python $iconVerifier `
+        --executable $executable --icon $applicationIcon
+    if ($LASTEXITCODE -ne 0) {
+        throw "The packaged executable does not contain the approved application icon."
+    }
+    $iconResult = $iconVerification | ConvertFrom-Json
+    if ($iconResult.status -ne "verified") {
+        throw "Unexpected executable icon verification result: $($iconResult.status)"
     }
     $reportedVersion = (& $executable --version | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $reportedVersion -ne "codex-watchdog $version") {
@@ -128,6 +146,7 @@ try {
     New-Item -ItemType Directory -Path $packageImages -Force | Out-Null
     foreach ($name in @(
         "parrotDogLogo.png",
+        "codex-watchdog.ico",
         "watchdog_workflow_en.png",
         "parrot_workflow_en.png"
     )) {
@@ -164,6 +183,9 @@ try {
         executable = Join-Path $packageDirectory "codex-watchdog.exe"
         executable_bytes = (Get-Item -LiteralPath (Join-Path $packageDirectory "codex-watchdog.exe")).Length
         executable_sha256 = (Get-FileHash -LiteralPath (Join-Path $packageDirectory "codex-watchdog.exe") -Algorithm SHA256).Hash.ToLowerInvariant()
+        embedded_icon = $iconResult.status
+        embedded_icon_sha256 = $iconResult.icon_sha256
+        embedded_icon_sizes = @($iconResult.sizes)
         package_directory = $packageDirectory
         zip = $zipPath
         zip_bytes = (Get-Item -LiteralPath $zipPath).Length

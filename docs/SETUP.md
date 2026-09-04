@@ -268,6 +268,23 @@ optional reply-relay credentials described below:
 .\watchdog.ps1
 ```
 
+In the packaged Windows release, double-clicking `codex-watchdog.exe` with no
+arguments performs that same bootstrap and starts the foreground loop. It
+stores only a schema-versioned, non-secret runtime pointer in
+`%LOCALAPPDATA%\CodexWatchdog\launcher-profile.json`; Slack/Outlook/Duo/OAuth
+material remains in its existing current-user store. On a v0.1.0 upgrade, the
+launcher can recover the compatible runtime from existing WatchDog hooks or an
+adjacent previous-release directory and writes the profile atomically. An
+invalid profile, a missing saved runtime, or multiple hook runtimes fails closed
+without silently starting empty state.
+
+Packaged CLI commands also reuse the saved runtime automatically unless an
+explicit `--runtime` is supplied. Existing v0.1.0 hooks keep using their old
+trusted executable, so retain that release directory until new hook definitions
+are reviewed, installed or manually merged, and trusted through Codex `/hooks`.
+That fresh trust is required by the changed executable identity; notification
+and remote settings do not need to be entered again.
+
 Useful test and filtering forms are:
 
 ```powershell

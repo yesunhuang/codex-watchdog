@@ -65,38 +65,33 @@ watches, wakes, relays, and notifies without becoming another AI agent.
 2. If you will install native hooks, use a permanent extraction path without
    spaces. Git, VS Code with Codex, Codex CLI, and Windows OpenSSH remain
    external prerequisites.
-3. Open PowerShell in the extracted directory and check the package:
+3. Double-click `codex-watchdog.exe`. It creates or reuses a versioned
+   current-user launcher profile and starts the foreground monitor. Press
+   Ctrl-C or close its console window to stop it.
+4. PowerShell remains available for inspection and advanced options:
 
    ```powershell
    .\codex-watchdog.exe --version
-   .\watchdog.ps1 -DryRun -NoDuo
+   .\watchdog.ps1 -DryRun
    ```
 
-4. Render, review, and conservatively install the native Codex hooks:
+5. Render, review, and conservatively install the native Codex hooks:
 
    ```powershell
-   .\codex-watchdog.exe --runtime "$PWD\.codex-watchdog" install-user-hooks
-   .\codex-watchdog.exe --runtime "$PWD\.codex-watchdog" install-user-hooks --install
+   .\codex-watchdog.exe install-user-hooks
+   .\codex-watchdog.exe install-user-hooks --install
    ```
 
    If another `hooks.json` already exists, the installer refuses to overwrite
    it; follow the detailed setup guide to merge it manually. In Codex, open
    `/hooks`, inspect the exact definitions, and trust them.
-5. Open the VS Code workspaces and Codex threads you want to monitor, then run:
-
-   ```powershell
-   .\watchdog.ps1 -NoDuo
-   ```
-
-   `-NoDuo` disables only the optional PuTTY/Plink shared-connection fallback;
-   normal local and non-interactive OpenSSH discovery remain available.
 
 > [!IMPORTANT]
-> The current beta executable is a command-line engine, not a one-click Windows
-> application. Double-clicking `codex-watchdog.exe` without a subcommand does
-> not start continuous monitoring. Use `watchdog.ps1`, which restores the saved
-> current-user configuration and invokes the packaged executable. A native
-> one-click launcher remains an open packaging requirement.
+> An upgrade automatically reuses a compatible launcher profile, the runtime
+> referenced by existing WatchDog hooks, or the newest adjacent previous-release
+> runtime. It does not copy or re-enter Slack, Outlook, Duo, OAuth, workspace, or
+> notification state. Keep the previous release directory until any hooks that
+> invoke its executable have been reviewed, replaced, and trusted in Codex.
 
 Notifications, Slack reply relay, Outlook OAuth, Remote-SSH, Duo fallback, and
 source installation are opt-in. See the [Windows package guide](WINDOWS_PACKAGE.md)

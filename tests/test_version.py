@@ -18,7 +18,7 @@ def _pyproject_version() -> str:
 
 
 def test_package_version_comes_from_pyproject() -> None:
-    assert __version__ == _pyproject_version() == "0.1.0"
+    assert __version__ == _pyproject_version() == "0.2.0"
 
 
 def test_cli_version_matches_project(capsys: pytest.CaptureFixture[str]) -> None:

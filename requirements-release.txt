@@ -1,4 +1,4 @@
-# Resolved on Windows x64 with CPython 3.9.12 for the v0.1.0 beta recipe.
+# Resolved on Windows x64 with CPython 3.9.12 for the v0.2.0 beta recipe.
 # Bootstrap pip==26.0.1, install this file, then install the project with:
 # python -m pip install --no-deps --no-build-isolation .
 altgraph==0.17.5

@@ -11,6 +11,7 @@ from codex_watchdog import notifications
 from codex_watchdog import outlook_oauth
 from codex_watchdog.models import sha256_text
 from codex_watchdog.service import RunOnceService
+from codex_watchdog.storage import FileLock
 from codex_watchdog.workspace_registry import WorkspaceRegistry
 
 
@@ -146,6 +147,30 @@ def test_run_foreground_passes_interval_and_jsonl_emitter(
     assert json.loads(capsys.readouterr().out) == {
         "cycle_id": "cycle-1",
         "status": "completed",
+    }
+
+
+def test_run_foreground_rejects_second_monitor_for_same_runtime(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeMvpService:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        @staticmethod
+        def run(**_kwargs):
+            raise AssertionError("duplicate foreground service must not start")
+
+    monkeypatch.setattr(cli, "MvpWatchdogService", FakeMvpService)
+    runtime = tmp_path / "runtime"
+    with FileLock(runtime / "locks" / "foreground-run.lock"):
+        code = cli.main(["--runtime", str(runtime), "run"])
+
+    assert code == 1
+    assert json.loads(capsys.readouterr().out) == {
+        "reason": "foreground_run_lock_held",
+        "runtime": str(runtime.resolve()),
+        "status": "already_running",
     }
 
 

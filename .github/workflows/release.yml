@@ -127,6 +127,14 @@ jobs:
         run: |
           .\scripts\build_windows_release.ps1 -Python (Get-Command python).Source -OutputDirectory dist
 
+      - name: Verify embedded application icon
+        if: steps.version.outputs.should_release == 'true'
+        shell: pwsh
+        run: |
+          python .\tools\verify_windows_executable_icon.py `
+            --executable ".\dist\codex-watchdog-v${{ steps.version.outputs.version }}-windows-x64\codex-watchdog.exe" `
+            --icon ".\images\codex-watchdog.ico"
+
       - name: Test package without Python on PATH
         if: steps.version.outputs.should_release == 'true'
         shell: pwsh

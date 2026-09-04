@@ -20,7 +20,7 @@ from .queue_wake import QueueWakeDispatcher
 from .service import RunOnceService
 from .slack_mapping import SlackRelayTarget
 from .stop_hook import HookSettings, run_hook
-from .storage import InstructionStore
+from .storage import FileLock, InstructionStore, StoreBusyError
 from .workspace_discovery import EffectiveWorkspaceCatalog
 from .workspace_registry import REGISTRY_SCHEMA_VERSION, WorkspaceRegistry
 
@@ -509,12 +509,29 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 flush=True,
             )
             return 0 if result.ok else 1
-        return service.run(
-            interval_seconds=args.interval,
-            emit=lambda value: print(
-                json.dumps(value, ensure_ascii=False, sort_keys=True), flush=True
-            ),
-        )
+        try:
+            with FileLock(args.runtime / "locks" / "foreground-run.lock"):
+                return service.run(
+                    interval_seconds=args.interval,
+                    emit=lambda value: print(
+                        json.dumps(value, ensure_ascii=False, sort_keys=True),
+                        flush=True,
+                    ),
+                )
+        except StoreBusyError:
+            print(
+                json.dumps(
+                    {
+                        "status": "already_running",
+                        "runtime": str(args.runtime),
+                        "reason": "foreground_run_lock_held",
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+            return 1
 
     dispatcher = QueueWakeDispatcher(
         args.runtime,

@@ -13,11 +13,15 @@ $ErrorActionPreference = "Stop"
 $package = [IO.Path]::GetFullPath($PackageDirectory)
 $executable = Join-Path $package "codex-watchdog.exe"
 $launcher = Join-Path $package "watchdog.ps1"
+$icon = Join-Path $package "images\codex-watchdog.ico"
 if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
     throw "Packaged executable is missing: $executable"
 }
 if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) {
     throw "Packaged launcher is missing: $launcher"
+}
+if (-not (Test-Path -LiteralPath $icon -PathType Leaf)) {
+    throw "Packaged approved icon is missing: $icon"
 }
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("codex-watchdog-package-test-" + [guid]::NewGuid().ToString("N"))
@@ -34,7 +38,17 @@ $environmentNames = @(
     "CODEX_WATCHDOG_SLACK_APP_TOKEN",
     "CODEX_WATCHDOG_SLACK_CHANNEL_ID",
     "CODEX_WATCHDOG_SLACK_ALLOWED_USER_IDS",
-    "CODEX_WATCHDOG_SMTP_PASSWORD"
+    "CODEX_WATCHDOG_SMTP_AUTH",
+    "CODEX_WATCHDOG_OUTLOOK_CLIENT_ID",
+    "CODEX_WATCHDOG_SMTP_HOST",
+    "CODEX_WATCHDOG_SMTP_PORT",
+    "CODEX_WATCHDOG_SMTP_SECURITY",
+    "CODEX_WATCHDOG_SMTP_USERNAME",
+    "CODEX_WATCHDOG_SMTP_FROM",
+    "CODEX_WATCHDOG_SMTP_TO",
+    "CODEX_WATCHDOG_NOTIFICATION_TIMEOUT_SECONDS",
+    "CODEX_WATCHDOG_SMTP_PASSWORD",
+    "CODEX_WATCHDOG_PACKAGE_TEST_ONCE"
 )
 foreach ($name in $environmentNames) {
     $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
@@ -109,6 +123,95 @@ try {
     if ($dryRun.runner -ne "packaged_executable") {
         throw "Packaged launcher did not select codex-watchdog.exe."
     }
+    $legacyRuntime = Join-Path $testRoot "legacy-v0.1.0-runtime"
+    New-Item -ItemType Directory -Path $legacyRuntime -Force | Out-Null
+    New-Item -ItemType Directory -Path $env:CODEX_HOME -Force | Out-Null
+    $legacyHooks = [pscustomobject]@{
+        hooks = [pscustomobject]@{
+            Stop = @([pscustomobject]@{
+                hooks = @([pscustomobject]@{
+                    commandWindows = "C:\legacy\codex-watchdog.exe --runtime `"$legacyRuntime`" hook --grace-seconds 30"
+                })
+            })
+        }
+    }
+    $legacyHooks | ConvertTo-Json -Depth 8 | Set-Content `
+        -LiteralPath (Join-Path $env:CODEX_HOME "hooks.json") -Encoding UTF8
+    $savedConfigRoot = Join-Path $env:LOCALAPPDATA "CodexWatchdog"
+    New-Item -ItemType Directory -Path $savedConfigRoot -Force | Out-Null
+    $testWebhook = "https://hooks.slack.com/services/T00000000/B00000000/package-test-secret"
+    $testBotToken = "xoxb-package-test-secret"
+    $testAppToken = "xapp-package-test-secret"
+    [pscredential]::new(
+        "slack-webhook",
+        (ConvertTo-SecureString $testWebhook -AsPlainText -Force)
+    ) | Export-Clixml -LiteralPath (Join-Path $savedConfigRoot "slack-webhook.clixml")
+    [pscredential]::new(
+        "slack-bot-token",
+        (ConvertTo-SecureString $testBotToken -AsPlainText -Force)
+    ) | Export-Clixml -LiteralPath (Join-Path $savedConfigRoot "slack-bot-token.clixml")
+    [pscredential]::new(
+        "slack-app-token",
+        (ConvertTo-SecureString $testAppToken -AsPlainText -Force)
+    ) | Export-Clixml -LiteralPath (Join-Path $savedConfigRoot "slack-app-token.clixml")
+    [pscustomobject][ordered]@{
+        schema_version = 1
+        channel_id = "C12345678"
+        allowed_user_ids = @("U12345678")
+    } | ConvertTo-Json | Set-Content `
+        -LiteralPath (Join-Path $savedConfigRoot "slack-relay.json") -Encoding UTF8
+    $testPlink = Join-Path $testRoot "plink.exe"
+    Set-Content -LiteralPath $testPlink -Value "placeholder" -Encoding ASCII
+    [pscustomobject][ordered]@{
+        schema_version = 1
+        target = "package-test@example.invalid"
+        plink_path = $testPlink
+    } | ConvertTo-Json | Set-Content `
+        -LiteralPath (Join-Path $savedConfigRoot "duo-fallback.json") -Encoding UTF8
+    $env:CODEX_WATCHDOG_SMTP_AUTH = "outlook_oauth2"
+    $env:CODEX_WATCHDOG_OUTLOOK_CLIENT_ID = "00000000-0000-4000-8000-000000000000"
+    $env:CODEX_WATCHDOG_SMTP_HOST = "smtp-mail.outlook.com"
+    $env:CODEX_WATCHDOG_SMTP_PORT = "587"
+    $env:CODEX_WATCHDOG_SMTP_SECURITY = "starttls"
+    $env:CODEX_WATCHDOG_SMTP_USERNAME = "package-test@example.invalid"
+    $env:CODEX_WATCHDOG_SMTP_FROM = "package-test@example.invalid"
+    $env:CODEX_WATCHDOG_SMTP_TO = "package-test@example.invalid"
+    $env:CODEX_WATCHDOG_NOTIFICATION_TIMEOUT_SECONDS = "15"
+    $env:CODEX_WATCHDOG_PACKAGE_TEST_ONCE = "1"
+    $oneClickOutput = & $executable
+    if ($LASTEXITCODE -ne 0) {
+        throw "Packaged no-argument one-click startup failed."
+    }
+    $profilePath = Join-Path $env:LOCALAPPDATA "CodexWatchdog\launcher-profile.json"
+    if (-not (Test-Path -LiteralPath $profilePath -PathType Leaf)) {
+        throw "One-click startup did not persist a launcher profile."
+    }
+    $profile = Get-Content -LiteralPath $profilePath -Raw | ConvertFrom-Json
+    if (
+        $profile.schema_version -ne 1 -or
+        [IO.Path]::GetFullPath([string]$profile.runtime_path) -ne [IO.Path]::GetFullPath($legacyRuntime)
+    ) {
+        throw "One-click upgrade did not preserve the previous release runtime."
+    }
+    $oneClickText = $oneClickOutput | Out-String
+    if ($oneClickText -notmatch "runner\s*:\s*packaged_executable") {
+        throw "One-click startup did not use the packaged executable bootstrap."
+    }
+    foreach ($expected in @(
+        "slack\s*:\s*encrypted_store",
+        "slack_reply\s*:\s*encrypted_store",
+        "smtp_configured\s*:\s*True",
+        "duo_fallback\s*:\s*saved_config"
+    )) {
+        if ($oneClickText -notmatch $expected) {
+            throw "One-click upgrade did not reuse expected saved configuration: $expected"
+        }
+    }
+    foreach ($secret in @($testWebhook, $testBotToken, $testAppToken)) {
+        if ($oneClickText.IndexOf($secret, [StringComparison]::Ordinal) -ge 0) {
+            throw "One-click upgrade exposed a saved Slack secret."
+        }
+    }
     [pscustomobject][ordered]@{
         status = "passed"
         version = $versionOutput
@@ -118,6 +221,8 @@ try {
         one_cycle_workspace_count = $once.workspace_count
         packaged_hook_install = $hookInstall.status
         launcher_runner = $dryRun.runner
+        one_click_upgrade_runtime = [string]$profile.runtime_path
+        one_click_saved_configuration = "reused_without_secret_output"
     } | ConvertTo-Json -Compress
 } finally {
     foreach ($name in $environmentNames) {
