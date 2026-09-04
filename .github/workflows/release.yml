@@ -80,6 +80,7 @@ jobs:
           "version=$current" >> $env:GITHUB_OUTPUT
           "tag=$tag" >> $env:GITHUB_OUTPUT
           Write-Host "Version changed from '$previous' to '$current'; release is eligible."
+          exit 0
 
       - name: Install pinned release environment
         if: steps.version.outputs.should_release == 'true'
