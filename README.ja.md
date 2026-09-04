@@ -32,6 +32,10 @@
   担当します。
 - **GitHub は永続的な管理・レビュープレーン。** コメント、コミット、進捗報告に
   よって、端末や時間をまたいで文脈を残します。
+- **管理側には依存せず、実行側は現状 Codex 固有です。** GitHub に永続的な指示を
+  書けるなら、管理側は人、ChatGPT、別のエージェント、あるいは自動化スクリプトでも
+  構いません。一方、現在の実行側は Codex の正確なスレッドキュー、Hooks、
+  rollout／完了イベントの仕組みに依存しています。
 - **Slack は素早く認証された中継プレーン。** 通知と許可された短い返信に使い、
   永続的なプロジェクト履歴の代わりにはしません。
 - **余分な AI エージェントや過剰なオーケストレーションを増やさない。** WatchDog
@@ -92,15 +96,16 @@
 ## 典型的な流れ
 
 ```text
-human / ChatGPT -> GitHub -> WatchDog -> 正確な Codex スレッド
-                 進捗/報告 <- Codex -> 通知
+人 / manager agent -> GitHub -> WatchDog -> 正確な Codex スレッド
+                    進捗/報告 <- Codex -> 通知
 
 Codex -> Parrot Dog (Slack) -> 人 -> Parrot Dog -> 正確な Codex スレッド
 ```
 
-人または ChatGPT が GitHub に永続的な指示を残し、WatchDog が更新を検知して
-既存スレッドを起こします。Codex が作業と Git 操作、進捗報告を担当し、WatchDog
-が結果を通知します。短い判断が必要なときは Parrot Dog が Slack で往復を中継します。
+人、ChatGPT、別のエージェント、または自動化が GitHub に永続的な指示を残せます。
+WatchDog が更新を検知して既存スレッドを起こし、Codex が作業と Git 操作、進捗報告を
+担当します。WatchDog はその結果を通知し、短い判断が必要なときは Parrot Dog が
+Slack で往復を中継します。
 
 ## AI 開発に関する宣言
 
