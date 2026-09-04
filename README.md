@@ -179,7 +179,25 @@ Important limitations:
 See [architecture.md](architecture.md) and the latest report under
 `doc/Progress/` for the exact evidence and feasibility decision.
 
-## Requirements
+## Windows x64 beta (no Python required)
+
+Download the versioned Windows ZIP from [GitHub Releases][releases], verify it
+against the published `SHA256SUMS.txt`, and extract the complete directory. The
+beta contains a one-file `codex-watchdog.exe`; users do not need Python, pip, a
+virtual environment, or this source checkout.
+
+```powershell
+.\codex-watchdog.exe --version
+.\watchdog.ps1 -DryRun -NoDuo
+.\watchdog.ps1 -NoDuo
+```
+
+Git, VS Code with Codex, Codex CLI, and Windows OpenSSH remain external
+prerequisites. PuTTY/Plink remains optional for the Duo shared-connection
+fallback. They are not bundled. See [WINDOWS_PACKAGE.md](WINDOWS_PACKAGE.md)
+for package layout, native hook installation, and credential boundaries.
+
+## Source checkout requirements
 
 - Python 3.9 or newer
 - pytest for the test suite
@@ -236,9 +254,10 @@ Start the foreground loop at the five-minute default cadence:
 codex-watchdog run --interval 300
 ```
 
-On Windows, the root-level launcher finds this checkout automatically and also
-restores the DPAPI-encrypted Slack webhook and optional reply-relay credentials
-described below:
+On Windows, the root-level launcher prefers an adjacent packaged
+`codex-watchdog.exe`. In a developer source checkout it falls back to the local
+Python entry point. Both paths restore the DPAPI-encrypted Slack webhook and
+optional reply-relay credentials described below:
 
 ```powershell
 .\watchdog.ps1
@@ -759,6 +778,7 @@ returns and audits `local_audit` rather than failing the entire workspace cycle.
 [slack-bolt-socket-mode]: https://docs.slack.dev/tools/bolt-python/concepts/socket-mode/
 [slack-chat-post-message]: https://docs.slack.dev/reference/methods/chat.postMessage
 [powershell-export-clixml]: https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/export-clixml
+[releases]: https://github.com/yesunhuang/codex-watchdog/releases
 
 ## Run the tests
 
@@ -768,6 +788,20 @@ From the repository root:
 python -m pytest
 python -m compileall -q src tools tests
 ```
+
+### Versioned Windows release automation
+
+`pyproject.toml` is the single authoritative SemVer source. Ordinary source
+commits do not create releases. A version change on `main` runs the pinned
+Windows release workflow: source tests, compilation and version consistency,
+a checksum-verified Gitleaks full-history scan, the PyInstaller x64 build, and
+the restricted no-Python package smoke test. Only then does it create the
+matching `vX.Y.Z` prerelease. An existing tag or release is a hard failure and
+is never overwritten.
+
+The exact environment is recorded in `requirements-release.txt`; the reusable
+local recipe is `scripts/build_windows_release.ps1`, followed by
+`scripts/test_windows_package.ps1`.
 
 The acceptance probes make model calls and should be run deliberately:
 
@@ -791,7 +825,19 @@ The repository intentionally does not install a live project
 deployment is one reviewed user hook at `CODEX_HOME/hooks.json` in each Codex
 environment (local Windows and Remote-SSH have separate environments).
 
-Render the exact user-hook document before installing it:
+From the extracted Windows beta, render or conservatively install a hook that
+invokes only the packaged executable:
+
+```powershell
+.\codex-watchdog.exe --runtime "$PWD\.codex-watchdog" install-user-hooks
+.\codex-watchdog.exe --runtime "$PWD\.codex-watchdog" install-user-hooks --install
+```
+
+Keep the extracted executable and runtime in permanent paths without spaces;
+the current Windows hook runner requires a quote-free command. The packaged
+installer does not require Python.
+
+For a developer source checkout, render the exact user-hook document with:
 
 ```powershell
 python tools\install_user_hooks.py --runtime .codex-watchdog

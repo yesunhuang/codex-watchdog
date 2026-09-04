@@ -157,13 +157,25 @@ function Test-PlinkUpstreamReady {
 }
 
 $repoRoot = $PSScriptRoot
-$launcher = Join-Path $repoRoot "tools\codex_watchdog.py"
-if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) {
-    throw "Watchdog launcher is missing: $launcher"
+$packagedExecutable = Join-Path $repoRoot "codex-watchdog.exe"
+$watchdogPrefixArguments = @()
+if (Test-Path -LiteralPath $packagedExecutable -PathType Leaf) {
+    $watchdogRunner = $packagedExecutable
+    $watchdogRunnerSource = "packaged_executable"
+} else {
+    $launcher = Join-Path $repoRoot "tools\codex_watchdog.py"
+    if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) {
+        throw (
+            "Codex WatchDog is incomplete: expected codex-watchdog.exe or " +
+            "the source-checkout launcher at $launcher"
+        )
+    }
+    $python = Get-Command python -CommandType Application -ErrorAction Stop |
+        Select-Object -First 1
+    $watchdogRunner = $python.Source
+    $watchdogPrefixArguments = @($launcher)
+    $watchdogRunnerSource = "python_source_checkout"
 }
-
-$python = Get-Command python -CommandType Application -ErrorAction Stop |
-    Select-Object -First 1
 $runtimePath = if ([IO.Path]::IsPathRooted($Runtime)) {
     [IO.Path]::GetFullPath($Runtime)
 } else {
@@ -367,7 +379,6 @@ $smtpConfigured = (
 )
 
 $arguments = @(
-    $launcher,
     "--runtime",
     $runtimePath,
     "run",
@@ -399,6 +410,7 @@ $summary = [pscustomobject][ordered]@{
     slack_reply = $slackRelaySource
     smtp_configured = $smtpConfigured
     duo_fallback = $duoSource
+    runner = $watchdogRunnerSource
 }
 
 if ($DryRun) {
@@ -412,8 +424,11 @@ if ($SlackRelayTest) {
     }
     $testId = "slack-relay-" + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     $summary | Format-List | Out-Host
-    & $python.Source $launcher --runtime $runtimePath slack-relay-test `
-        --id $testId --workspace $SlackRelayWorkspace
+    $relayArguments = @($watchdogPrefixArguments) + @(
+        "--runtime", $runtimePath, "slack-relay-test",
+        "--id", $testId, "--workspace", $SlackRelayWorkspace
+    )
+    & $watchdogRunner @relayArguments
     if ($LASTEXITCODE -ne 0) {
         throw "Slack relay test exited with code $LASTEXITCODE."
     }
@@ -423,7 +438,6 @@ if ($SlackRelayTest) {
 $duoWorkspaceOpen = $false
 if ($null -ne $resolvedPlink -and -not $ManualOnly) {
     $discoveryArguments = @(
-        $launcher,
         "--runtime",
         $runtimePath,
         "workspace-discover"
@@ -433,7 +447,8 @@ if ($null -ne $resolvedPlink -and -not $ManualOnly) {
             $discoveryArguments += @("--exclude", $item)
         }
     }
-    $discoveryOutput = & $python.Source @discoveryArguments
+    $discoveryInvokeArguments = @($watchdogPrefixArguments) + $discoveryArguments
+    $discoveryOutput = & $watchdogRunner @discoveryInvokeArguments
     if ($LASTEXITCODE -notin @(0, 1)) {
         throw "Workspace discovery failed before the Duo fallback bootstrap."
     }
@@ -483,7 +498,8 @@ if ($duoWorkspaceOpen) {
 }
 
 $summary | Format-List | Out-Host
-& $python.Source @arguments
+$invokeArguments = @($watchdogPrefixArguments) + $arguments
+& $watchdogRunner @invokeArguments
 if ($LASTEXITCODE -ne 0) {
     throw "Codex Watchdog exited with code $LASTEXITCODE."
 }

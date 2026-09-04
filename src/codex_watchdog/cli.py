@@ -6,6 +6,13 @@ from pathlib import Path
 import sys
 from typing import Optional, Sequence
 
+from . import __version__
+from .hook_config import (
+    build_packaged_hooks_document,
+    install_hooks,
+    installation_result,
+    render_hooks_document,
+)
 from .models import sha256_text, validate_instruction_id
 from .mvp_service import MvpWatchdogService
 from .notifications import EnvironmentNotifier, NotificationConfig, NotificationEvent
@@ -41,6 +48,9 @@ def _safe_id(value: str) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="codex-watchdog")
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {__version__}"
+    )
     parser.add_argument("--runtime", type=_path, default=_path(".codex-watchdog"))
     parser.add_argument(
         "--codex-home", type=_path, help="exact Codex home shared with queue state"
@@ -181,6 +191,19 @@ def build_parser() -> argparse.ArgumentParser:
         "outlook-login",
         help="authorize personal Outlook SMTP using a one-time Microsoft device code",
     )
+    user_hooks = commands.add_parser(
+        "install-user-hooks",
+        help="render or conservatively install hooks that invoke the packaged executable",
+    )
+    user_hooks.add_argument("--grace-seconds", type=float, default=600.0)
+    user_hooks.add_argument("--poll-seconds", type=float, default=0.5)
+    user_hooks.add_argument("--test-mode", action="store_true", help=argparse.SUPPRESS)
+    user_hooks.add_argument("--executable", type=_path, help=argparse.SUPPRESS)
+    user_hooks.add_argument(
+        "--install",
+        action="store_true",
+        help="write hooks.json only when it is missing or already equivalent",
+    )
     return parser
 
 
@@ -193,6 +216,44 @@ def _prompt(message: Optional[str], prompt_file: Optional[Path]) -> str:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "install-user-hooks":
+        executable = args.executable
+        if executable is None:
+            if not getattr(sys, "frozen", False):
+                print(
+                    json.dumps(
+                        {
+                            "status": "packaged_executable_required",
+                            "reason": (
+                                "use tools/install_user_hooks.py for a source checkout"
+                            ),
+                        },
+                        sort_keys=True,
+                    )
+                )
+                return 1
+            executable = Path(sys.executable).resolve()
+        document = build_packaged_hooks_document(
+            executable,
+            args.runtime,
+            args.grace_seconds,
+            args.poll_seconds,
+            args.test_mode,
+        )
+        rendered = render_hooks_document(document)
+        if not args.install:
+            sys.stdout.write(rendered)
+            return 0
+        codex_home = args.codex_home or _path("~/.codex")
+        status, path = install_hooks(codex_home, document)
+        print(
+            json.dumps(
+                installation_result(status, path, rendered),
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return 0
     if args.command == "hook":
         return run_hook(
             HookSettings(
@@ -272,7 +333,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             WorkspaceRegistry(args.runtime)
             if args.manual_only
             else EffectiveWorkspaceCatalog(
-                args.runtime, codex_home=args.codex_home, exclude=args.exclude,
+                args.runtime,
+                codex_home=args.codex_home,
+                exclude=args.exclude,
             )
         )
         result = RunOnceService(args.runtime, registry=registry).run_once()
@@ -326,7 +389,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if len(matches) != 1:
             print(
                 json.dumps(
-                    {"status": "workspace_ambiguous", "match_count": len(matches),},
+                    {
+                        "status": "workspace_ambiguous",
+                        "match_count": len(matches),
+                    },
                     sort_keys=True,
                 )
             )
@@ -459,7 +525,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         receipt = dispatcher.observe_delivery(args.id, queue_database=args.queue_db)
     elif args.command == "queue":
         receipt = dispatcher.dispatch(
-            args.thread, args.id, _prompt(args.message, args.prompt_file), args.source,
+            args.thread,
+            args.id,
+            _prompt(args.message, args.prompt_file),
+            args.source,
         )
     elif args.command == "queue-remote-update":
         receipt = dispatcher.dispatch_remote_update(

@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools==82.0.1", "wheel==0.48.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "codex-watchdog"
-version = "0.0.1"
+version = "0.1.0"
 description = "Deterministic Codex hooks, same-thread wake, and Git sensor"
 readme = "README.md"
 license = { file = "LICENSE" }
