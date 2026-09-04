@@ -1,0 +1,32 @@
+{
+  "description": "Codex watchdog hook PoC. Replace both absolute paths before installing; Windows paths must be space-free while the current hook runner requires quote-free commands.",
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /ABSOLUTE/PATH/LocalCodexWatchDog/tools/codex_watchdog_hook.py --runtime /ABSOLUTE/PATH/LocalCodexWatchDog/.codex-watchdog hook",
+            "commandWindows": "C:\\ABSOLUTE\\PATH\\python.exe C:\\ABSOLUTE\\PATH\\LocalCodexWatchDog\\tools\\codex_watchdog_hook.py --runtime C:\\ABSOLUTE\\PATH\\LocalCodexWatchDog\\.codex-watchdog hook",
+            "timeout": 5,
+            "statusMessage": "Recording pre-routing approval event"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /ABSOLUTE/PATH/LocalCodexWatchDog/tools/codex_watchdog_hook.py --runtime /ABSOLUTE/PATH/LocalCodexWatchDog/.codex-watchdog hook --grace-seconds 600",
+            "commandWindows": "C:\\ABSOLUTE\\PATH\\python.exe C:\\ABSOLUTE\\PATH\\LocalCodexWatchDog\\tools\\codex_watchdog_hook.py --runtime C:\\ABSOLUTE\\PATH\\LocalCodexWatchDog\\.codex-watchdog hook --grace-seconds 600",
+            "timeout": 1260,
+            "statusMessage": "Waiting briefly for a watchdog instruction"
+          }
+        ]
+      }
+    ]
+  }
+}

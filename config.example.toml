@@ -1,0 +1,53 @@
+# Reference only: the checkpoint-5 MVP currently takes service controls from
+# CLI flags and notification credentials from environment variables.
+
+[hook]
+# Production range: 300-1200 seconds. The initial default is 10 minutes.
+grace_seconds = 600
+poll_seconds = 0.5
+runtime = ".codex-watchdog"
+
+[service]
+# Launch: codex-watchdog run --interval 300
+# One cycle: codex-watchdog run --once
+# Explicit dogfood/recovery only: add --replay-latest-stop
+interval_seconds = 300
+foreground = true
+
+[tracking]
+# The current CLI equivalent is repeatable: --exclude scratch --exclude test-repo
+# Exact repository names, canonical paths, and VS Code workspace URIs are accepted.
+exclude = []
+
+[long_wake]
+# Experimental Codex 0.151 queue adapter. A successful CLI exit acknowledges
+# enqueue only; see the checkpoint report for the exact same-thread probe scope.
+adapter = "codex_queue"
+
+[notifications]
+# Delivery order is Slack, SMTP, opt-in Windows msg.exe, then local audit.
+# Store secrets in the environment only; do not add credential values here.
+slack_webhook_env = "CODEX_WATCHDOG_SLACK_WEBHOOK_URL"
+slack_bot_token_env = "CODEX_WATCHDOG_SLACK_BOT_TOKEN"
+slack_app_token_env = "CODEX_WATCHDOG_SLACK_APP_TOKEN"
+slack_channel_id_env = "CODEX_WATCHDOG_SLACK_CHANNEL_ID"
+slack_allowed_user_ids_env = "CODEX_WATCHDOG_SLACK_ALLOWED_USER_IDS"
+smtp_host_env = "CODEX_WATCHDOG_SMTP_HOST"
+smtp_port_env = "CODEX_WATCHDOG_SMTP_PORT"
+smtp_username_env = "CODEX_WATCHDOG_SMTP_USERNAME"
+smtp_password_env = "CODEX_WATCHDOG_SMTP_PASSWORD"
+smtp_from_env = "CODEX_WATCHDOG_SMTP_FROM"
+smtp_to_env = "CODEX_WATCHDOG_SMTP_TO"
+smtp_security_env = "CODEX_WATCHDOG_SMTP_SECURITY"
+smtp_auth_env = "CODEX_WATCHDOG_SMTP_AUTH"
+outlook_client_id_env = "CODEX_WATCHDOG_OUTLOOK_CLIENT_ID"
+windows_msg_opt_in_env = "CODEX_WATCHDOG_WINDOWS_MSG"
+windows_msg_target_env = "CODEX_WATCHDOG_WINDOWS_MSG_TARGET"
+timeout_seconds_env = "CODEX_WATCHDOG_NOTIFICATION_TIMEOUT_SECONDS"
+
+# SMTP auth defaults to the existing password/anonymous behavior. Personal
+# Outlook/Hotmail uses outlook_oauth2 with its nonsecret Entra public-client ID;
+# the refresh-capable token cache is OS-encrypted and is never stored here.
+# SMTP security accepts starttls (default), ssl, or plain. Windows msg.exe is
+# disabled unless CODEX_WATCHDOG_WINDOWS_MSG is explicitly true; its target
+# defaults to the current USERNAME.
