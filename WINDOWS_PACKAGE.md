@@ -57,8 +57,9 @@ change requires renewed trust.
 The archive contains no Slack, Outlook, SSH, Git, Codex, or machine-specific
 configuration. Supply notification environment variables at runtime or use the
 documented current-user DPAPI setup. `setup-slack-relay.ps1` stores Slack relay
-tokens for only the current Windows user. See the main `README.md` for Outlook,
-Slack, remote-workspace, and Duo configuration.
+tokens for only the current Windows user. See
+[`docs/SETUP.md`](docs/SETUP.md) for Outlook, Slack, remote-workspace, and Duo
+configuration.
 
 Verify `SHA256SUMS.txt` after extraction. Dependency versions, declared
 licenses, and copied license texts are under `THIRD_PARTY_LICENSES`.
