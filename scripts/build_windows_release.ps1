@@ -120,11 +120,18 @@ try {
         "LICENSE",
         "SECURITY.md",
         "THIRD_PARTY_NOTICES.md",
-        "ASSETS.md",
-        "Shiro.png",
-        "principleManga.png"
+        "ASSETS.md"
     )) {
         Copy-Item -LiteralPath (Join-Path $repoRoot $name) -Destination $packageDirectory
+    }
+    $packageImages = Join-Path $packageDirectory "images"
+    New-Item -ItemType Directory -Path $packageImages -Force | Out-Null
+    foreach ($name in @(
+        "parrotDogLogo.png",
+        "watchdog_workflow_en.png",
+        "parrot_workflow_en.png"
+    )) {
+        Copy-Item -LiteralPath (Join-Path $repoRoot "images\$name") -Destination $packageImages
     }
     & $Python (Join-Path $repoRoot "tools\generate_dependency_licenses.py") `
         --output (Join-Path $packageDirectory "THIRD_PARTY_LICENSES") `

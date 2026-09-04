@@ -3,7 +3,7 @@
 [Back to the project README](../README.md)
 
 <p align="center">
-  <img src="../Shiro.png" alt="Shiro, the Codex Watchdog icon" width="240">
+  <img src="../images/parrotDogLogo.png" alt="Codex WatchDog and Parrot Dog logo" width="320">
 </p>
 
 This page preserves the detailed source-install, notification, hook,
@@ -17,7 +17,9 @@ the main README.
 > endorsed by, or sponsored by OpenAI, Microsoft, GitHub, Slack, or their
 > respective affiliates. Product names and marks belong to their owners.
 
-![WatchDog workflow: discuss the task, publish a GitHub comment, detect the update, wake Codex, run the task, and notify the user](../principleManga.png)
+![WatchDog workflow: discuss the task, publish a GitHub comment, detect the update, wake Codex, run the task, and notify the user](../images/watchdog_workflow_en.png)
+
+![Parrot Dog workflow: Codex asks for help, Slack relays the message, the human replies, and Codex continues](../images/parrot_workflow_en.png)
 
 ## Vibe coding and AI development declaration
 

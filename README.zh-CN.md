@@ -1,17 +1,25 @@
 # Codex WatchDog
 
 <p align="center">
-  <a href="README.md">English</a> | <strong>中文</strong>
+  <a href="README.md">English</a> | <strong>中文</strong> | <a href="README.ja.md">日本語</a>
 </p>
 
 <p align="center">
-  <img src="Shiro.png" alt="Codex WatchDog 吉祥物 Shiro" width="240">
+  <img src="images/parrotDogLogo.png" alt="Codex WatchDog 与 Parrot Dog 标志" width="320">
 </p>
 
 一个面向现有 VS Code Codex 会话的轻量、确定性看门狗：负责观察、唤醒、
 转发与通知，但不会变成另一个 AI agent。
 
-![WatchDog 工作流程：讨论任务，在 GitHub 发布指令，检测更新，唤醒 Codex，执行任务并通知用户](principleManga.png)
+## 工作流程一览
+
+### WatchDog：持久的 GitHub 循环
+
+![WatchDog 工作流程：讨论任务，在 GitHub 发布指令，检测更新，唤醒 Codex，执行任务并通知用户](images/watchdog_workflow_cn.png)
+
+### Parrot Dog：快捷的 Slack 双向中转
+
+![Parrot Dog 工作流程：Codex 请求帮助，Slack 转达消息，用户回复，然后 Codex 继续工作](images/parrot_workflow_cn.png)
 
 ## 设计理念
 
@@ -79,6 +87,8 @@
 ```text
 human / ChatGPT -> GitHub -> WatchDog -> 准确的 Codex 线程
                  进度/报告 <- Codex -> 通知
+
+Codex -> Parrot Dog（Slack）-> 人 -> Parrot Dog -> 准确的 Codex 线程
 ```
 
 人或 ChatGPT 在 GitHub 留下持久指令；WatchDog 发现变化并为现有线程按门铃；

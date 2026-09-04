@@ -1,17 +1,25 @@
 # Codex WatchDog
 
 <p align="center">
-  <strong>English</strong> | <a href="README.zh-CN.md">中文</a>
+  <strong>English</strong> | <a href="README.zh-CN.md">中文</a> | <a href="README.ja.md">日本語</a>
 </p>
 
 <p align="center">
-  <img src="Shiro.png" alt="Shiro, the Codex WatchDog mascot" width="240">
+  <img src="images/parrotDogLogo.png" alt="Codex WatchDog and Parrot Dog logo" width="320">
 </p>
 
 A lightweight, deterministic watchdog for existing VS Code Codex sessions: it
 watches, wakes, relays, and notifies without becoming another AI agent.
 
-![WatchDog workflow: discuss the task, publish a GitHub comment, detect the update, wake Codex, run the task, and notify the user](principleManga.png)
+## Workflows at a glance
+
+### WatchDog: the durable GitHub loop
+
+![WatchDog workflow: discuss the task, publish a GitHub comment, detect the update, wake Codex, run the task, and notify the user](images/watchdog_workflow_en.png)
+
+### Parrot Dog: the quick Slack relay
+
+![Parrot Dog workflow: Codex asks for help, Slack relays the message, the human replies, and Codex continues](images/parrot_workflow_en.png)
 
 ## Design philosophy
 
@@ -86,6 +94,8 @@ and [detailed setup and operations](docs/SETUP.md) when you need them.
 ```text
 human / ChatGPT -> GitHub -> WatchDog -> exact Codex thread
                  progress/report <- Codex -> notification
+
+Codex -> Parrot Dog (Slack) -> human -> Parrot Dog -> exact Codex thread
 ```
 
 The human or ChatGPT leaves durable direction on GitHub. WatchDog notices the
