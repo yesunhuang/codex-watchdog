@@ -31,6 +31,10 @@ watches, wakes, relays, and notifies without becoming another AI agent.
   pulls, merges, rebases, resets, checks out, or pushes.
 - **GitHub is the durable management and review plane.** Comments, commits, and
   progress reports preserve context across machines and time.
+- **Manager-agnostic, Codex-specific.** The management side is intentionally
+  replaceable: any human, agent, or automation that can write durable direction
+  to GitHub can drive WatchDog. The execution side currently depends on Codex's
+  exact-thread queue, hooks, and rollout/completion contracts.
 - **Slack is the quick authenticated relay plane.** It is for notifications and
   short allowlisted replies, not durable project history.
 - **No extra agent and no unnecessary orchestration.** WatchDog routes evidence
@@ -101,15 +105,16 @@ and [detailed setup and operations](docs/SETUP.md) when you need them.
 ## Typical workflow
 
 ```text
-human / ChatGPT -> GitHub -> WatchDog -> exact Codex thread
-                 progress/report <- Codex -> notification
+human / manager agent -> GitHub -> WatchDog -> exact Codex thread
+                        progress/report <- Codex -> notification
 
 Codex -> Parrot Dog (Slack) -> human -> Parrot Dog -> exact Codex thread
 ```
 
-The human or ChatGPT leaves durable direction on GitHub. WatchDog notices the
-change and rings the doorbell for the existing thread. Codex owns the work and
-Git operations, writes the progress record, and WatchDog reports the outcome.
+A human, ChatGPT, another agent, or automation can leave durable direction on
+GitHub. WatchDog notices the change and rings the doorbell for the existing
+thread. Codex owns the work and Git operations, writes the progress record, and
+WatchDog reports the outcome.
 
 ## AI development declaration
 
