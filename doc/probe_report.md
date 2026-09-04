@@ -2,7 +2,8 @@
 
 > Historical checkpoint-1 evidence. The checkpoint-2 work discovered and
 > live-probed native Hooks plus the experimental first-party `codex queue`
-> mechanism. See `architecture.md` and the latest file under `doc/Progress/`
+> mechanism. See [architecture.md](architecture.md) and the latest file under
+> [`Progress/`](Progress/)
 > for the current decision. The shim recommendation below is no longer the
 > preferred next step.
 

@@ -180,7 +180,7 @@ Important limitations:
   credentials are read directly from environment variables and must not be
   written into that file.
 
-See [architecture.md](../architecture.md) and the latest report under
+See [architecture.md](../doc/architecture.md) and the latest report under
 [`doc/Progress/`](../doc/Progress/) for the exact evidence and feasibility
 decision.
 

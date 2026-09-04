@@ -119,9 +119,9 @@ Codex -> Parrot Dog (Slack) -> 人 -> Parrot Dog -> 正確な Codex スレッド
 - [Windows パッケージと初回セットアップ](WINDOWS_PACKAGE.md)
 - [詳細なセットアップと運用](docs/SETUP.md)
 - [セキュリティポリシーと運用境界](SECURITY.md)
-- [アーキテクチャ決定](architecture.md)
+- [アーキテクチャ決定](doc/architecture.md)
 - [画像の出典](ASSETS.md)と[サードパーティ通知](THIRD_PARTY_NOTICES.md)
-- [実装計画](codex_watchdog_implementation_plan.md)
+- [実装計画](doc/codex_watchdog_implementation_plan.md)
 - [Dogfooding と開発履歴](doc/Progress/)
 
 > [!NOTE]

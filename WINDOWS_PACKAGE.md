@@ -32,6 +32,13 @@ From PowerShell in the extracted directory:
 the adjacent packaged executable. Runtime state defaults to `.codex-watchdog`
 beside the launcher and is never part of the release archive.
 
+The current beta executable is a console CLI rather than a one-click Windows
+application. Double-clicking `codex-watchdog.exe` without a command does not
+start the foreground loop, and double-clicking a `.ps1` file is not a reliable
+Windows launch experience. Until the saved-profile bootstrap is incorporated
+into the executable or an equivalent signed launcher, start `watchdog.ps1`
+from PowerShell or a shortcut that explicitly invokes it.
+
 ## Native hook setup
 
 Render the exact hook document before installing it:

@@ -85,6 +85,13 @@ watches, wakes, relays, and notifies without becoming another AI agent.
    `-NoDuo` disables only the optional PuTTY/Plink shared-connection fallback;
    normal local and non-interactive OpenSSH discovery remain available.
 
+> [!IMPORTANT]
+> The current beta executable is a command-line engine, not a one-click Windows
+> application. Double-clicking `codex-watchdog.exe` without a subcommand does
+> not start continuous monitoring. Use `watchdog.ps1`, which restores the saved
+> current-user configuration and invokes the packaged executable. A native
+> one-click launcher remains an open packaging requirement.
+
 Notifications, Slack reply relay, Outlook OAuth, Remote-SSH, Duo fallback, and
 source installation are opt-in. See the [Windows package guide](WINDOWS_PACKAGE.md)
 and [detailed setup and operations](docs/SETUP.md) when you need them.
@@ -121,9 +128,10 @@ inspectable, and not presented as conventional human-only development.
 - [Windows package and first-time setup](WINDOWS_PACKAGE.md)
 - [Detailed setup and operations](docs/SETUP.md)
 - [Security policy and operational boundary](SECURITY.md)
-- [Architecture decision](architecture.md)
+- [Architecture decision](doc/architecture.md)
 - [Asset provenance](ASSETS.md) and [third-party notices](THIRD_PARTY_NOTICES.md)
-- [Implementation plan](codex_watchdog_implementation_plan.md)
+- [Implementation plan](doc/codex_watchdog_implementation_plan.md)
+- [Historical feasibility probe](doc/probe_report.md)
 - [Dogfooding and development history](doc/Progress/)
 
 > [!NOTE]

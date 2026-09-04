@@ -110,9 +110,9 @@ Codex 负责实际工作和 Git 操作、写入进度记录，WatchDog 再发送
 - [Windows 打包与首次设置](WINDOWS_PACKAGE.md)
 - [详细设置与运行](docs/SETUP.md)
 - [安全策略与运行边界](SECURITY.md)
-- [架构决策](architecture.md)
+- [架构决策](doc/architecture.md)
 - [图片来源](ASSETS.md)与[第三方声明](THIRD_PARTY_NOTICES.md)
-- [实现计划](codex_watchdog_implementation_plan.md)
+- [实现计划](doc/codex_watchdog_implementation_plan.md)
 - [Dogfooding 与开发历史](doc/Progress/)
 
 > [!NOTE]

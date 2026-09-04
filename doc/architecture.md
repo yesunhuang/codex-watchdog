@@ -252,8 +252,8 @@ remains as compatibility fallback for layouts that store the cache remotely.
 
 This disproves the Phase-0 assumption that every external courier needs access
 to the IDE-owned stdio connection. It does not yet prove delivery to a
-Remote-SSH thread. `probe_report.md` is retained as historical Phase-0 evidence,
-not as the current recommendation.
+Remote-SSH thread. [probe_report.md](probe_report.md) is retained as historical
+Phase-0 evidence, not as the current recommendation.
 
 ## Short-stop protocol
 

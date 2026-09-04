@@ -1462,11 +1462,12 @@ Produce:
 
 ```text
 README.md
-architecture.md
+doc/architecture.md
+doc/codex_watchdog_implementation_plan.md
+doc/probe_report.md
 config.example.toml
 src/...
 tests/...
-probe_report.md
 ```
 
 Documentation should include:
