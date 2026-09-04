@@ -48,6 +48,8 @@
 
 ## 快速开始 - Windows x64 Beta
 
+**超简单安装运行：** 让你的 Codex 扫描本仓库，并一步步引导你完成安装和启动。
+
 1. 从 [GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases)
    下载 `codex-watchdog-vX.Y.Z-windows-x64.zip` 和 `SHA256SUMS.txt`，校验后
    完整解压。无需安装 Python。
