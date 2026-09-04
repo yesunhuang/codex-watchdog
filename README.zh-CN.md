@@ -30,6 +30,9 @@
   提交、拉取、合并、变基和推送都由 Codex 负责。
 - **GitHub 是持久的管理与审阅平面。** 评论、提交和进度报告可以跨机器、跨时间
   保留完整上下文。
+- **上游 manager 无关、下游当前 Codex 特定。** 管理端是可替换的：只要能把持久指令
+  写进 GitHub，就可以是人、ChatGPT、其他 agent 或自动化脚本。当前执行端则依赖
+  Codex 的准确线程队列、Hooks 与 rollout/完成事件等具体机制。
 - **Slack 是快速且经过认证的转发平面。** 它适合通知和短回复，不代替持久的项目
   记录。
 - **不增加额外 AI agent，也不过度编排。** WatchDog 把证据和指令送回准确的
@@ -87,14 +90,15 @@
 ## 典型工作流
 
 ```text
-human / ChatGPT -> GitHub -> WatchDog -> 准确的 Codex 线程
-                 进度/报告 <- Codex -> 通知
+人 / manager agent -> GitHub -> WatchDog -> 准确的 Codex 线程
+                    进度/报告 <- Codex -> 通知
 
 Codex -> Parrot Dog（Slack）-> 人 -> Parrot Dog -> 准确的 Codex 线程
 ```
 
-人或 ChatGPT 在 GitHub 留下持久指令；WatchDog 发现变化并为现有线程按门铃；
-Codex 负责实际工作和 Git 操作、写入进度记录，WatchDog 再发送结果通知。
+人、ChatGPT、其他 agent 或自动化都可以在 GitHub 留下持久指令；WatchDog 发现变化
+并为现有线程按门铃；Codex 负责实际工作和 Git 操作、写入进度记录，WatchDog 再发送
+结果通知。
 
 ## AI 开发声明
 
