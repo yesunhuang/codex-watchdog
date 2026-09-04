@@ -34,6 +34,7 @@ When a proposed feature or packaging change conflicts with these rules, stop and
 
 - `pyproject.toml` is the canonical application version source unless the architecture explicitly changes.
 - Do not overwrite an existing release/tag to hide a packaging or migration error; publish a new version.
+- Every Windows release executable must embed the approved Codex WatchDog application icon in the executable itself. Shipping the PNG/logo beside the EXE or merely including it in the ZIP does not satisfy this requirement. Release acceptance must verify the built Windows executable contains the intended icon resource.
 - Public release artifacts must not contain local runtime state, credentials, private paths, private hostnames, or development-repository history.
 - Maintain the private development/control repository separately from the sanitized public product repository.
 - Prefer real dogfood evidence and minimal fixes over speculative hardening. Keep "repairing the tire while driving" compatible with the invariants above.
