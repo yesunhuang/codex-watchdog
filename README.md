@@ -53,6 +53,8 @@ watches, wakes, relays, and notifies without becoming another AI agent.
 
 ## Quick start - Windows x64 beta
 
+**Ultra-easy setup:** ask your local Codex to scan this repository and guide you through installation and startup step by step.
+
 1. Download `codex-watchdog-vX.Y.Z-windows-x64.zip` and
    `SHA256SUMS.txt` from [GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases),
    verify the checksum, and extract the complete ZIP. Python is not required.
