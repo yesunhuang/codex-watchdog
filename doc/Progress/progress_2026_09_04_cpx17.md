@@ -111,3 +111,67 @@ Important constraints: keep WatchDog lightweight; no Postgres/Redis/message brok
 Please first audit the current codebase against these requirements, then implement the highest-value cross-platform path incrementally. Add tests for every new platform abstraction and document what is genuinely verified versus what still requires real-machine E2E validation.
 
 At the end, write a new progress report summarizing architecture changes, files changed, CI coverage, Windows regression status, Linux status, macOS status, remaining real-machine validation needed, and any fragile VS Code/Codex assumptions.
+
+## comment — development handoff
+
+Please also create a **self-contained development handoff document** because this Codex thread may be replaced soon. The goal is that a fresh Codex thread can continue development safely without depending on any conversational context from this thread.
+
+Please put the handoff in a durable repository document (for example `doc/DEVELOPMENT_HANDOFF.md`; choose a better existing location/name if the repository already has a convention). Keep it concise enough to be usable, but complete enough that a new thread can resume work without reconstructing the project history from all progress reports.
+
+The handoff should include at least:
+
+1. **Project purpose and architectural model**
+   - what WatchDog does and intentionally does not do;
+   - the lightweight control-plane philosophy;
+   - the boundary between WatchDog, Codex workers, Git, Slack, SSH, and remote execution;
+   - important architectural invariants such as fail-closed behavior, no domain reasoning/LLM dependency, and avoiding automatic Git actions that belong to Codex.
+
+2. **Current repository state**
+   - current release/version and relevant branches if applicable;
+   - the major implemented capabilities;
+   - important recent changes, especially thread discovery/wake behavior, Windows packaging/launcher behavior, remote support, and the new macOS/Linux work requested above;
+   - what is considered stable/reference behavior versus experimental/beta behavior.
+
+3. **Code map**
+   - the important modules/files and their responsibilities;
+   - where routing, dispatch/persistence, workspace/thread discovery, Git observation, Slack handling, queue wake, SSH/remote logic, launchers, tests, CI, and release tooling live;
+   - any duplicated or fragile local/remote protocol logic that a new thread should be careful about.
+
+4. **State and safety semantics**
+   - instruction IDs / idempotency expectations;
+   - delivered vs uncertain/rejected/dispatching semantics as currently implemented;
+   - restart/recovery behavior;
+   - thread/workspace ownership assumptions;
+   - privacy/security boundaries and credential-storage rules.
+
+5. **Known fragile assumptions / technical debt**
+   - dependencies on VS Code/Codex internal state, logs, SQLite schemas, paths, or CLI output;
+   - platform-specific assumptions;
+   - any known bugs or architecture smells still open;
+   - explicitly mention anything that must not be "simplified" without understanding why it exists.
+
+6. **Testing and verification**
+   - how to run the core tests;
+   - Windows regression checks and package/release checks;
+   - current CI behavior;
+   - how future Linux/macOS verification should be interpreted (CI verified vs native probe verified vs E2E verified);
+   - any manual tests that cannot yet be reproduced in CI.
+
+7. **Development/release workflow**
+   - how progress reports and `## comment` instructions are used;
+   - how to make incremental changes without unrelated refactors;
+   - version/release procedure and important publication/security gates;
+   - where a new Codex thread should write its next progress report.
+
+8. **Immediate next actions**
+   - the cross-platform/macOS/Linux task from the previous comment;
+   - `doctor` / privacy-safe diagnostic export;
+   - normal PR/push cross-platform CI;
+   - any higher-priority unresolved correctness/reliability issue you identify during the handoff audit.
+
+9. **Resume checklist for a new Codex thread**
+   Give a short ordered checklist such as: read the handoff, inspect latest progress report/comments, verify repo/branch/status, run baseline tests, verify current release assumptions, then continue only the highest-priority open task.
+
+Please derive the document from the **actual current code and repository state**, not only from old progress reports. Do not include secrets, personal machine details, private hosts, conversation contents, or stale information. If an old progress report conflicts with current code, document the current code as authoritative and note the discrepancy only if it matters.
+
+After creating/updating the handoff document, mention its exact path in the next progress report so a replacement thread can be pointed to it immediately.
