@@ -77,3 +77,37 @@ confirmed:
 Once those gates pass, a final clean clone should be rescanned and tested before
 changing visibility. No executable or release artifact is built in this
 checkpoint.
+
+## comment
+
+Please work on adding **macOS and Linux support to Codex WatchDog**, while preserving the current lightweight architecture and existing Windows behavior.
+
+The goal is not to blindly port every Windows-specific implementation. First audit the current platform-dependent surface and determine the cleanest minimal architecture for cross-platform support.
+
+Main requirements:
+
+1. Keep the core platform-independent. Routing, dispatch state, Git observation, persistence, Slack/event logic, etc. should remain shared. Isolate genuinely platform-specific behavior behind small adapters/interfaces rather than scattering OS conditionals throughout the core.
+
+2. Audit and isolate the main platform-specific areas, especially VS Code user-data/workspace discovery, `code --status` and live-window discovery, Codex executable/extension discovery, filesystem locking/atomic persistence, credential storage, launcher/background-service behavior, and packaging/install paths. Reuse existing POSIX support instead of rewriting working code.
+
+3. Add normal PR/push cross-platform CI independent of the release workflow, at least on `windows-latest`, `ubuntu-latest`, and `macos-latest`. Run the shared test suite, compile checks, CLI/version smoke tests, and platform-adapter tests on all applicable platforms. Ordinary code changes should be covered; do not rely only on the Windows release workflow.
+
+4. For Linux, separate if useful: (a) Linux as a remote execution target and (b) Linux as a local desktop host. We have access to real remote Linux machines, so remote/CLI behavior can later be validated there. Do not block useful Linux support merely because Linux-desktop GUI E2E testing is initially unavailable.
+
+5. For macOS, use GitHub-hosted macOS runners for native OS testing. Initial macOS support may remain preview/beta until live VS Code/Codex behavior is validated on a real Mac. Prefer modern Apple Silicon support first if packaging architecture choices are needed; do not add legacy Intel complexity unless cheap.
+
+6. Implement a cross-platform `codex-watchdog doctor` diagnostic capability. It should be read-only and report platform/architecture, VS Code CLI and user-data discovery, Codex extension/executable and home/state availability, workspace-storage readability, live-window discovery where supported, current-thread resolution where supported, queue/wake capability, and a useful PASS/PARTIAL/FAIL result with reasons.
+
+Also consider `codex-watchdog doctor --export`, producing a small privacy-safe JSON that a macOS tester can send back. The export must not include conversation contents, tokens/secrets, Slack credentials, usernames, raw home paths, SSH hosts, repository contents, or Codex message contents. Normalize/redact paths and identifiers as needed.
+
+7. Be conservative about support claims. Distinguish CI-verified, native-probe-verified, and full-E2E-verified support. Do not claim full macOS support merely because unit tests pass on `macos-latest`.
+
+8. Preserve Windows as the reference implementation. Cross-platform refactoring must not regress workspace/thread discovery, wake delivery, persistence/idempotency, Slack behavior, or current Windows packaging/launcher behavior.
+
+Architecture preference is conceptually: a shared core for routing/dispatch/storage/events, thin platform adapters for Windows/Linux/macOS, and integrations for VS Code/Codex/Git/Slack/SSH. This is guidance, not a request for a large rewrite. Prefer the smallest refactor that establishes clean platform boundaries.
+
+Important constraints: keep WatchDog lightweight; no Postgres/Redis/message broker/container stack; no LLM dependency; do not turn the remote helper into a second independent WatchDog; avoid unrelated refactors; prefer incremental test-backed changes; and when upstream VS Code/Codex behavior is uncertain, fail closed and expose a useful diagnostic instead of guessing.
+
+Please first audit the current codebase against these requirements, then implement the highest-value cross-platform path incrementally. Add tests for every new platform abstraction and document what is genuinely verified versus what still requires real-machine E2E validation.
+
+At the end, write a new progress report summarizing architecture changes, files changed, CI coverage, Windows regression status, Linux status, macOS status, remaining real-machine validation needed, and any fragile VS Code/Codex assumptions.
