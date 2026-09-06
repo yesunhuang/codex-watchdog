@@ -456,26 +456,26 @@ class CodexSessionResolver:
             return SessionResolution(
                 "unresolved", None, None, "vscode_codex_log_unavailable"
             )
-        if window_state_database is None:
-            return SessionResolution(
-                "unresolved", None, None, "vscode_session_cache_unavailable"
-            )
-        window_sessions = self.window_session_candidates(window_state_database)
-        if window_sessions is None:
-            return SessionResolution(
-                "unresolved", None, None, "vscode_session_cache_unavailable"
-            )
-        if not window_sessions:
-            return SessionResolution("unresolved", None, None, "no_window_codex_thread")
+        window_sessions = (
+            self.window_session_candidates(window_state_database)
+            if window_state_database is not None
+            else None
+        )
         identities = {_path_identity(path) for path in paths}
         database_candidates, database_status = self._database_candidates(
-            identities, codex_log, window_sessions
+            identities, codex_log
         )
         if len(database_candidates) == 1:
+            session_id = next(iter(database_candidates))
+            source = (
+                "codex_state_vscode_window_cache_owner"
+                if window_sessions is not None and session_id in window_sessions
+                else "codex_state_vscode_live_owner"
+            )
             return SessionResolution(
                 "resolved",
-                next(iter(database_candidates)),
-                "codex_state_vscode_window_cache_owner",
+                session_id,
+                source,
                 None,
             )
         if len(database_candidates) > 1:
@@ -483,11 +483,14 @@ class CodexSessionResolver:
                 "unresolved", None, None, "ambiguous_loaded_threads"
             )
 
-        reason = (
-            "codex_state_unavailable"
-            if database_status == "unavailable"
-            else "no_loaded_vscode_thread"
-        )
+        if window_sessions is None:
+            reason = "vscode_session_cache_unavailable"
+        elif not window_sessions:
+            reason = "no_window_codex_thread"
+        elif database_status == "unavailable":
+            reason = "codex_state_unavailable"
+        else:
+            reason = "no_loaded_vscode_thread"
         return SessionResolution("unresolved", None, None, reason)
 
     @staticmethod
@@ -550,7 +553,7 @@ class CodexSessionResolver:
         return candidates
 
     def _database_candidates(
-        self, identities: set[str], codex_log: Path, window_sessions: set[str],
+        self, identities: set[str], codex_log: Path,
     ) -> Tuple[set[str], str]:
         database = self.codex_home / "state_5.sqlite"
         if not database.is_file():
@@ -580,8 +583,6 @@ class CodexSessionResolver:
                 for raw_session_id, raw_cwd in rows:
                     session_id = _canonical_session_id(raw_session_id)
                     if session_id is None or not isinstance(raw_cwd, str):
-                        continue
-                    if session_id not in window_sessions:
                         continue
                     try:
                         cwd_identity = _path_identity(Path(raw_cwd))

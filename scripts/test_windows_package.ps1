@@ -123,22 +123,22 @@ try {
     if ($dryRun.runner -ne "packaged_executable") {
         throw "Packaged launcher did not select codex-watchdog.exe."
     }
-    $legacyRuntime = Join-Path $testRoot "legacy-v0.1.0-runtime"
-    New-Item -ItemType Directory -Path $legacyRuntime -Force | Out-Null
+    $previousRuntime = Join-Path $testRoot "previous-v0.2.0-runtime"
+    New-Item -ItemType Directory -Path $previousRuntime -Force | Out-Null
     New-Item -ItemType Directory -Path $env:CODEX_HOME -Force | Out-Null
-    $legacyHooks = [pscustomobject]@{
-        hooks = [pscustomobject]@{
-            Stop = @([pscustomobject]@{
-                hooks = @([pscustomobject]@{
-                    commandWindows = "C:\legacy\codex-watchdog.exe --runtime `"$legacyRuntime`" hook --grace-seconds 30"
-                })
-            })
-        }
-    }
-    $legacyHooks | ConvertTo-Json -Depth 8 | Set-Content `
-        -LiteralPath (Join-Path $env:CODEX_HOME "hooks.json") -Encoding UTF8
     $savedConfigRoot = Join-Path $env:LOCALAPPDATA "CodexWatchdog"
     New-Item -ItemType Directory -Path $savedConfigRoot -Force | Out-Null
+    $profilePath = Join-Path $savedConfigRoot "launcher-profile.json"
+    [pscustomobject][ordered]@{
+        schema_version = 1
+        runtime_path = [IO.Path]::GetFullPath($previousRuntime)
+        discovered_from = "codex_hooks"
+        created_by_version = "0.2.0"
+        created_at = "2026-09-04T00:00:00Z"
+        future_nonconflicting_key = [pscustomobject]@{ preserve = $true }
+    } | ConvertTo-Json -Depth 4 | Set-Content `
+        -LiteralPath $profilePath -Encoding UTF8
+    $profileBefore = Get-Content -LiteralPath $profilePath -Raw
     $testWebhook = "https://hooks.slack.com/services/T00000000/B00000000/package-test-secret"
     $testBotToken = "xoxb-package-test-secret"
     $testAppToken = "xapp-package-test-secret"
@@ -182,16 +182,18 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Packaged no-argument one-click startup failed."
     }
-    $profilePath = Join-Path $env:LOCALAPPDATA "CodexWatchdog\launcher-profile.json"
     if (-not (Test-Path -LiteralPath $profilePath -PathType Leaf)) {
-        throw "One-click startup did not persist a launcher profile."
+        throw "One-click startup removed the previous release launcher profile."
     }
     $profile = Get-Content -LiteralPath $profilePath -Raw | ConvertFrom-Json
     if (
         $profile.schema_version -ne 1 -or
-        [IO.Path]::GetFullPath([string]$profile.runtime_path) -ne [IO.Path]::GetFullPath($legacyRuntime)
+        [IO.Path]::GetFullPath([string]$profile.runtime_path) -ne [IO.Path]::GetFullPath($previousRuntime)
     ) {
         throw "One-click upgrade did not preserve the previous release runtime."
+    }
+    if ((Get-Content -LiteralPath $profilePath -Raw) -cne $profileBefore) {
+        throw "One-click upgrade rewrote the compatible previous release profile."
     }
     $oneClickText = $oneClickOutput | Out-String
     if ($oneClickText -notmatch "runner\s*:\s*packaged_executable") {

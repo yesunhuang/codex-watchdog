@@ -107,6 +107,7 @@ def make_discovery(
     *,
     registry: WorkspaceRegistry = None,
     exclude=(),
+    owner_probe=None,
 ) -> VSCodeWorkspaceDiscovery:
     runtime = tmp_path / "runtime"
     codex_home = tmp_path / ".codex"
@@ -116,7 +117,11 @@ def make_discovery(
         runtime,
         codex_home,
         lock_probe=lock_probe,
-        owner_probe=lambda _path, _session_id: True,
+        owner_probe=(
+            owner_probe
+            if owner_probe is not None
+            else lambda _path, _session_id: True
+        ),
     )
     return VSCodeWorkspaceDiscovery(
         runtime,
@@ -181,6 +186,24 @@ def test_two_held_user_threads_for_same_exact_cwd_fail_closed(tmp_path: Path,) -
             (SESSION_CURRENT, str(repo), "vscode", "user", 0),
         ],
     )
+    database = user_data / "workspaceStorage" / "storage-1" / "state.vscdb"
+    with sqlite3.connect(str(database)) as connection:
+        connection.execute(
+            "UPDATE ItemTable SET value = ? WHERE key = ?",
+            (
+                json.dumps(
+                    [
+                        {
+                            "providerType": "openai-codex",
+                            "resource": (
+                                "openai-codex://route/local/" + SESSION_CURRENT
+                            ),
+                        }
+                    ]
+                ),
+                "agentSessions.model.cache",
+            ),
+        )
 
     snapshot = make_discovery(
         tmp_path, GitRootResolver(repo), lambda _path: True
@@ -905,7 +928,7 @@ def test_persisted_but_nonlive_window_is_not_reported_or_tracked(
     assert snapshot.issues == ("vscode_live_window_unmapped",)
 
 
-def test_held_user_thread_must_belong_to_exact_window_session_cache(
+def test_stale_window_cache_does_not_suppress_exact_live_owner(
     tmp_path: Path,
 ) -> None:
     repo = (tmp_path / "repo").resolve()
@@ -942,7 +965,62 @@ def test_held_user_thread_must_belong_to_exact_window_session_cache(
         tmp_path, GitRootResolver(repo), lambda path: path.stem == SESSION_CURRENT,
     ).snapshot()
 
+    assert [item.session_id for item in snapshot.effective_workspaces] == [
+        SESSION_CURRENT
+    ]
+    assert snapshot.windows[0].tracking_status == "tracked"
+    assert snapshot.windows[0].session_source == "codex_state_vscode_live_owner"
+
+
+def test_empty_window_cache_allows_exact_live_owner_fallback(tmp_path: Path) -> None:
+    repo = (tmp_path / "repo").resolve()
+    repo.mkdir()
+    uri = repo.as_uri()
+    user_data = tmp_path / "Code" / "User"
+    write_windows_state(user_data / "globalStorage" / "storage.json", [{"folder": uri}])
+    write_workspace(user_data / "workspaceStorage", "storage-1", uri)
+    write_threads(
+        tmp_path / ".codex", [(SESSION_CURRENT, str(repo), "vscode", "user", 0)]
+    )
+    database = user_data / "workspaceStorage" / "storage-1" / "state.vscdb"
+    with sqlite3.connect(str(database)) as connection:
+        connection.execute(
+            "UPDATE ItemTable SET value = ? WHERE key = ?",
+            ("[]", "agentSessions.model.cache"),
+        )
+
+    snapshot = make_discovery(
+        tmp_path, GitRootResolver(repo), lambda path: path.stem == SESSION_CURRENT,
+    ).snapshot()
+
+    assert [item.session_id for item in snapshot.effective_workspaces] == [
+        SESSION_CURRENT
+    ]
+    assert snapshot.windows[0].session_source == "codex_state_vscode_live_owner"
+
+
+def test_held_cached_thread_without_exact_window_owner_fails_closed(
+    tmp_path: Path,
+) -> None:
+    repo = (tmp_path / "repo").resolve()
+    repo.mkdir()
+    uri = repo.as_uri()
+    user_data = tmp_path / "Code" / "User"
+    write_windows_state(user_data / "globalStorage" / "storage.json", [{"folder": uri}])
+    write_workspace(user_data / "workspaceStorage", "storage-1", uri)
+    write_threads(
+        tmp_path / ".codex", [(SESSION_CURRENT, str(repo), "vscode", "user", 0)]
+    )
+
+    snapshot = make_discovery(
+        tmp_path,
+        GitRootResolver(repo),
+        lambda path: path.stem == SESSION_CURRENT,
+        owner_probe=lambda _path, _session_id: False,
+    ).snapshot()
+
     assert snapshot.effective_workspaces == ()
+    assert snapshot.windows[0].tracking_status == "unresolved"
     assert snapshot.windows[0].reason == "no_loaded_vscode_thread"
 
 
@@ -964,7 +1042,10 @@ def test_malformed_window_session_cache_fails_closed(tmp_path: Path) -> None:
         )
 
     snapshot = make_discovery(
-        tmp_path, GitRootResolver(repo), lambda _path: True,
+        tmp_path,
+        GitRootResolver(repo),
+        lambda _path: True,
+        owner_probe=lambda _path, _session_id: False,
     ).snapshot()
 
     assert snapshot.effective_workspaces == ()
