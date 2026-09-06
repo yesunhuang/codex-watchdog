@@ -14,17 +14,25 @@ from .storage import InstructionStore, StoreBusyError
 
 
 _STOP_OUTPUT_SCHEMA_VERSION = 1
+DEFAULT_GRACE_SECONDS = 30.0
+DEFAULT_POLL_SECONDS = 0.1
+MIN_PRODUCTION_GRACE_SECONDS = 30.0
+MAX_PRODUCTION_GRACE_SECONDS = 1_200.0
 
 
 @dataclass(frozen=True)
 class HookSettings:
     runtime: Path
-    grace_seconds: float = 600.0
-    poll_seconds: float = 0.5
+    grace_seconds: float = DEFAULT_GRACE_SECONDS
+    poll_seconds: float = DEFAULT_POLL_SECONDS
     test_mode: bool = False
 
     def validate(self) -> None:
-        minimum, maximum = (0.0, 30.0) if self.test_mode else (300.0, 1_200.0)
+        minimum, maximum = (
+            (0.0, DEFAULT_GRACE_SECONDS)
+            if self.test_mode
+            else (MIN_PRODUCTION_GRACE_SECONDS, MAX_PRODUCTION_GRACE_SECONDS)
+        )
         if not minimum <= self.grace_seconds <= maximum:
             raise ValueError(
                 f"grace_seconds must be between {minimum:g} and {maximum:g} seconds"

@@ -92,6 +92,10 @@ merge such a file manually. Then open `/hooks` in Codex, inspect each exact
 definition, and trust it manually. Any executable path or hook-definition
 change requires renewed trust.
 
+The production default is a 30-second grace window with 0.1-second polling and
+a 60-second Codex hook timeout. This preserves a brief same-turn continuation
+opportunity without delaying ordinary completion notifications for minutes.
+
 ## Credentials and configuration
 
 The archive contains no Slack, Outlook, SSH, Git, Codex, or machine-specific

@@ -90,7 +90,9 @@ Implemented and unit-tested:
   retrying model continuation or queue delivery;
 - one continuation intent per session/turn;
 - `stop_hook_active` loop protection and continuation confirmation;
-- a configurable 5-20 minute production grace range (10 minutes by default);
+- a configurable 30-second to 20-minute production grace range (30 seconds by
+  default), so ordinary completion notifications are not held behind a long
+  short-stop window;
 - privacy-limited audit records that hash assistant output instead of retaining
   it, plus an exactly correlated transient Stop-output spool for notifications;
 - a narrow `codex queue` adapter with collision and uncertain-delivery handling;
@@ -918,6 +920,10 @@ whose target matches its `session_id`. It returns:
 ```json
 {"decision":"block","reason":"[CODEX_WATCHDOG_INSTRUCTION ...]\n..."}
 ```
+
+The installed production default waits 30 seconds and polls every 0.1 seconds.
+The resulting Codex hook timeout is 60 seconds. Longer grace windows remain an
+explicit opt-in up to 20 minutes rather than delaying every ordinary Stop.
 
 That native response asks Codex to continue in the same turn. When Stop is
 entered again with JSON boolean `stop_hook_active: true`, the handler confirms

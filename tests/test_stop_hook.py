@@ -4,7 +4,10 @@ import io
 import json
 from pathlib import Path
 
+import pytest
+
 from codex_watchdog.models import sha256_text
+from codex_watchdog.cli import build_parser
 from codex_watchdog.stop_hook import HookSettings, run_hook, run_hook_text
 from codex_watchdog.storage import InstructionStore, StoreBusyError
 
@@ -40,6 +43,24 @@ class FakeClock:
 
 def settings(tmp_path: Path, grace: float = 1.0) -> HookSettings:
     return HookSettings(tmp_path, grace_seconds=grace, poll_seconds=0.1, test_mode=True)
+
+
+def test_production_defaults_restore_short_completion_window(tmp_path: Path) -> None:
+    defaults = HookSettings(tmp_path)
+
+    defaults.validate()
+    assert defaults.grace_seconds == 30.0
+    assert defaults.poll_seconds == 0.1
+    assert defaults.test_mode is False
+
+    parsed = build_parser().parse_args(["hook"])
+    assert parsed.grace_seconds == 30.0
+    assert parsed.poll_seconds == 0.1
+
+
+def test_production_grace_rejects_less_than_thirty_seconds(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="between 30 and 1200"):
+        HookSettings(tmp_path, grace_seconds=29.9).validate()
 
 
 def test_instruction_arriving_during_grace_returns_one_block(tmp_path: Path) -> None:

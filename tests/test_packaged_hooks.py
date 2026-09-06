@@ -47,7 +47,11 @@ def test_packaged_hook_cli_renders_and_installs_idempotently(
 
     assert cli.main(arguments) == 0
     document = json.loads(capsys.readouterr().out)
-    assert document["hooks"]["Stop"]
+    stop = document["hooks"]["Stop"][0]["hooks"][0]
+    assert "--grace-seconds 30" in stop["commandWindows"]
+    assert "--poll-seconds 0.1" in stop["commandWindows"]
+    assert "--test-mode" not in stop["commandWindows"]
+    assert stop["timeout"] == 60
 
     assert cli.main([*arguments, "--install"]) == 0
     first = json.loads(capsys.readouterr().out)

@@ -23,6 +23,10 @@ from codex_watchdog.hook_config import (  # noqa: E402
     installation_result,
     render_hooks_document,
 )
+from codex_watchdog.stop_hook import (  # noqa: E402
+    DEFAULT_GRACE_SECONDS,
+    DEFAULT_POLL_SECONDS,
+)
 
 
 def _command(parts: Sequence[str], windows: bool) -> str:
@@ -59,8 +63,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
     parser.add_argument("--runtime", type=Path)
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
-    parser.add_argument("--grace-seconds", type=float, default=600.0)
-    parser.add_argument("--poll-seconds", type=float, default=0.5)
+    parser.add_argument("--grace-seconds", type=float, default=DEFAULT_GRACE_SECONDS)
+    parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS)
     parser.add_argument("--test-mode", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--install",

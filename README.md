@@ -86,6 +86,9 @@ watches, wakes, relays, and notifies without becoming another AI agent.
    it; follow the detailed setup guide to merge it manually. In Codex, open
    `/hooks`, inspect the exact definitions, and trust them.
 
+   The default Stop grace window is 30 seconds. Longer windows are an explicit
+   opt-in; ordinary completion notifications are not delayed for ten minutes.
+
 > [!IMPORTANT]
 > An upgrade automatically reuses a compatible launcher profile, the runtime
 > referenced by existing WatchDog hooks, or the newest adjacent previous-release

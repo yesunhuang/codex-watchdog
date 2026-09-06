@@ -33,7 +33,7 @@ def _environment(tmp_path: Path) -> dict[str, str]:
 
 
 def _package(tmp_path: Path) -> Path:
-    package = tmp_path / "codex-watchdog-v0.2.1-windows-x64"
+    package = tmp_path / "codex-watchdog-v0.2.2-windows-x64"
     package.mkdir()
     executable = package / "codex-watchdog.exe"
     executable.write_bytes(b"placeholder")

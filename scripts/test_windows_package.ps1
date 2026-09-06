@@ -100,11 +100,14 @@ try {
     }
     $hooks = $hooksOutput | ConvertFrom-Json
     $hookCommand = [string]$hooks.hooks.Stop[0].hooks[0].commandWindows
+    $hookTimeout = [int]$hooks.hooks.Stop[0].hooks[0].timeout
     if (
         -not $hookCommand.StartsWith($executable, [StringComparison]::OrdinalIgnoreCase) -or
-        $hookCommand -match 'python|codex_watchdog_hook\.py'
+        $hookCommand -match 'python|codex_watchdog_hook\.py|--test-mode' -or
+        $hookCommand -notmatch '--grace-seconds 30 --poll-seconds 0\.1' -or
+        $hookTimeout -ne 60
     ) {
-        throw "Packaged hook does not invoke only the packaged executable."
+        throw "Packaged hook does not use the production 30-second executable contract."
     }
     $hookInstallOutput = & $executable --runtime $runtime --codex-home $env:CODEX_HOME install-user-hooks --install
     if ($LASTEXITCODE -ne 0) {
@@ -123,7 +126,7 @@ try {
     if ($dryRun.runner -ne "packaged_executable") {
         throw "Packaged launcher did not select codex-watchdog.exe."
     }
-    $previousRuntime = Join-Path $testRoot "previous-v0.2.0-runtime"
+    $previousRuntime = Join-Path $testRoot "previous-v0.2.1-runtime"
     New-Item -ItemType Directory -Path $previousRuntime -Force | Out-Null
     New-Item -ItemType Directory -Path $env:CODEX_HOME -Force | Out-Null
     $savedConfigRoot = Join-Path $env:LOCALAPPDATA "CodexWatchdog"
@@ -133,7 +136,7 @@ try {
         schema_version = 1
         runtime_path = [IO.Path]::GetFullPath($previousRuntime)
         discovered_from = "codex_hooks"
-        created_by_version = "0.2.0"
+        created_by_version = "0.2.1"
         created_at = "2026-09-04T00:00:00Z"
         future_nonconflicting_key = [pscustomobject]@{ preserve = $true }
     } | ConvertTo-Json -Depth 4 | Set-Content `

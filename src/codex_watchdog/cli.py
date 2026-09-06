@@ -19,7 +19,12 @@ from .notifications import EnvironmentNotifier, NotificationConfig, Notification
 from .queue_wake import QueueWakeDispatcher
 from .service import RunOnceService
 from .slack_mapping import SlackRelayTarget
-from .stop_hook import HookSettings, run_hook
+from .stop_hook import (
+    DEFAULT_GRACE_SECONDS,
+    DEFAULT_POLL_SECONDS,
+    HookSettings,
+    run_hook,
+)
 from .storage import FileLock, InstructionStore, StoreBusyError
 from .workspace_discovery import EffectiveWorkspaceCatalog
 from .workspace_registry import REGISTRY_SCHEMA_VERSION, WorkspaceRegistry
@@ -60,8 +65,8 @@ def build_parser() -> argparse.ArgumentParser:
     hook = commands.add_parser(
         "hook", help="handle one native Codex hook event from stdin"
     )
-    hook.add_argument("--grace-seconds", type=float, default=600.0)
-    hook.add_argument("--poll-seconds", type=float, default=0.5)
+    hook.add_argument("--grace-seconds", type=float, default=DEFAULT_GRACE_SECONDS)
+    hook.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS)
     hook.add_argument("--test-mode", action="store_true", help=argparse.SUPPRESS)
 
     submit = commands.add_parser("submit", help="publish one short-stop instruction")
@@ -195,8 +200,12 @@ def build_parser() -> argparse.ArgumentParser:
         "install-user-hooks",
         help="render or conservatively install hooks that invoke the packaged executable",
     )
-    user_hooks.add_argument("--grace-seconds", type=float, default=600.0)
-    user_hooks.add_argument("--poll-seconds", type=float, default=0.5)
+    user_hooks.add_argument(
+        "--grace-seconds", type=float, default=DEFAULT_GRACE_SECONDS
+    )
+    user_hooks.add_argument(
+        "--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS
+    )
     user_hooks.add_argument("--test-mode", action="store_true", help=argparse.SUPPRESS)
     user_hooks.add_argument("--executable", type=_path, help=argparse.SUPPRESS)
     user_hooks.add_argument(
