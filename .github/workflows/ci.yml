@@ -47,7 +47,7 @@ jobs:
         run: python -m compileall -q src tools tests
 
       - name: Run test suite
-        run: python -m pytest
+        run: python -m pytest --basetemp .pytest-temp-ci
 
       - name: Smoke test CLI and version
         run: |
