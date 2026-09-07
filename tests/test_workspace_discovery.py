@@ -727,6 +727,23 @@ def test_status_parser_binds_extension_hosts_to_vscode_codex_children() -> None:
     }
 
 
+def test_status_parser_binds_posix_codex_children() -> None:
+    status = "\n".join(
+        (
+            "CPU %\tMem MB\tPID\tProcess",
+            "0\t100\t4100\textension-host [7]",
+            "0\t100\t4101\t     /Users/u/.vscode/extensions/openai.chatgpt-1-darwin-arm64/bin/darwin-arm64/codex -c x app-server",
+            "0\t100\t5100\textension-host [8]",
+            "0\t100\t5101\t     /home/u/.vscode/extensions/openai.chatgpt-1-linux-x64/bin/linux-x86_64/codex app-server",
+        )
+    )
+
+    assert VSCodeLiveWindowIndex._parse_status(status) == {
+        "7": (4100, 4101),
+        "8": (5100, 5101),
+    }
+
+
 def test_live_window_log_requires_latest_exact_extension_host_pid(
     tmp_path: Path,
 ) -> None:

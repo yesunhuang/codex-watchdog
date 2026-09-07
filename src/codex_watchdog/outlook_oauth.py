@@ -8,6 +8,8 @@ import threading
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 from urllib.parse import urlparse
 
+from .platform_adapters import detect_platform_adapter
+
 
 OUTLOOK_AUTHORITY = "https://login.microsoftonline.com/consumers"
 OUTLOOK_SMTP_SCOPES = ("https://outlook.office.com/SMTP.Send",)
@@ -65,17 +67,9 @@ def _default_cache_path(
     client_id: str, environment: Optional[Mapping[str, str]] = None
 ) -> Path:
     source = os.environ if environment is None else environment
-    if os.name == "nt":
-        local_app_data = source.get("LOCALAPPDATA")
-        if not isinstance(local_app_data, str) or not local_app_data.strip():
-            raise OutlookOAuthError("local_app_data_unavailable")
-        base = Path(local_app_data.strip()) / "CodexWatchdog"
-    else:
-        xdg_data_home = source.get("XDG_DATA_HOME")
-        if isinstance(xdg_data_home, str) and xdg_data_home.strip():
-            base = Path(xdg_data_home.strip()) / "codex-watchdog"
-        else:
-            base = Path.home() / ".local" / "share" / "codex-watchdog"
+    base = detect_platform_adapter(environment=source).application_data_root()
+    if base is None:
+        raise OutlookOAuthError("application_data_unavailable")
     client_digest = hashlib.sha256(client_id.encode("utf-8")).hexdigest()
     return base / "oauth" / f"outlook-{client_digest}.bin"
 

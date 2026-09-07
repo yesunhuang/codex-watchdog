@@ -38,6 +38,21 @@
 - **不增加额外 AI agent，也不过度编排。** WatchDog 把证据和指令送回准确的
   现有 Codex 线程，推理和工作仍由 Codex 完成。
 
+## 平台状态
+
+| 平台/路径 | 支持级别 |
+| --- | --- |
+| Windows x64 本地桌面 | **稳定、已完成端到端验证的打包参考实现** |
+| Linux Remote-SSH 目标 | **真实远程路径已验证** |
+| Linux 本地桌面 | **CI 已验证的预览版；仍需真实桌面端到端验证** |
+| macOS 本地桌面 | **CI 已验证的预览/Beta；仍需真实 Apple Silicon 端到端验证** |
+
+Linux 与 macOS 源码安装现在共用 POSIX 锁与存储、标准 VS Code 路径、
+原生 `code --status` 和 Codex 可执行文件发现，但仍是前台预览版。
+可运行 `codex-watchdog doctor` 进行只读检查，或用
+`codex-watchdog doctor --export report.json` 生成不含隐私信息的诊断文件。
+详见[平台支持与诊断](docs/PLATFORM_SUPPORT.md)。
+
 ## 它能做什么
 
 - 观察 Codex 的 Stop/完成事件，并可把最终输出放进通知。
@@ -117,6 +132,7 @@ Codex -> Parrot Dog（Slack）-> 人 -> Parrot Dog -> 准确的 Codex 线程
 
 - [Windows 打包与首次设置](WINDOWS_PACKAGE.md)
 - [详细设置与运行](docs/SETUP.md)
+- [平台支持与隐私安全诊断](docs/PLATFORM_SUPPORT.md)
 - [安全策略与运行边界](SECURITY.md)
 - [架构决策](doc/architecture.md)
 - [图片来源](ASSETS.md)与[第三方声明](THIRD_PARTY_NOTICES.md)

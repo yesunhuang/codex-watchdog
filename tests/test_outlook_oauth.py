@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -110,14 +111,20 @@ class Harness:
 def test_default_cache_path_is_user_local_and_hides_account_identity(
     tmp_path: Path,
 ) -> None:
+    environment = (
+        {"LOCALAPPDATA": str(tmp_path)}
+        if os.name == "nt"
+        else {"XDG_DATA_HOME": str(tmp_path)}
+    )
     provider = OutlookOAuthTokenProvider(
-        CLIENT_ID, USERNAME, environment={"LOCALAPPDATA": str(tmp_path)},
+        CLIENT_ID, USERNAME, environment=environment,
     )
 
     digest = hashlib.sha256(CLIENT_ID.encode("utf-8")).hexdigest()
+    product_directory = "CodexWatchdog" if os.name == "nt" else "codex-watchdog"
     assert (
         provider.cache_path
-        == (tmp_path / "CodexWatchdog" / "oauth" / f"outlook-{digest}.bin").resolve()
+        == (tmp_path / product_directory / "oauth" / f"outlook-{digest}.bin").resolve()
     )
     assert USERNAME not in str(provider.cache_path)
 

@@ -41,6 +41,23 @@ watches, wakes, relays, and notifies without becoming another AI agent.
   and instructions to the exact existing Codex thread; Codex still does the
   reasoning and work.
 
+## Platform status
+
+| Platform/path | Support level |
+| --- | --- |
+| Windows x64 local desktop | **Stable, full E2E verified, packaged reference** |
+| Linux Remote-SSH target | **Real remote path verified** |
+| Linux local desktop | **CI-verified preview; native desktop E2E pending** |
+| macOS local desktop | **CI-verified preview/beta; real Apple Silicon E2E pending** |
+
+Source installs now share POSIX locking/storage, standard VS Code paths, native
+`code --status`, and Codex executable discovery on Linux and macOS. They remain
+foreground previews; no Linux/macOS standalone package or background service is
+claimed. Run the privacy-safe read-only audit with `codex-watchdog doctor` or
+produce a tester attachment with `codex-watchdog doctor --export report.json`.
+See [platform support and diagnostics](docs/PLATFORM_SUPPORT.md) for exact
+support meanings and the native validation checklist.
+
 ## What it does
 
 - Observes Codex Stop/completion events and can capture the final output for a
@@ -132,6 +149,7 @@ inspectable, and not presented as conventional human-only development.
 
 - [Windows package and first-time setup](WINDOWS_PACKAGE.md)
 - [Detailed setup and operations](docs/SETUP.md)
+- [Platform support and privacy-safe doctor](docs/PLATFORM_SUPPORT.md)
 - [Security policy and operational boundary](SECURITY.md)
 - [Architecture decision](doc/architecture.md)
 - [Asset provenance](ASSETS.md) and [third-party notices](THIRD_PARTY_NOTICES.md)

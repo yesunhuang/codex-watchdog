@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import uuid
 
 from .models import sha256_text, utc_now, validate_instruction_id, validate_prompt
+from .platform_adapters import detect_platform_adapter
 from .storage import InstructionCollisionError, InstructionStore
 
 
@@ -72,15 +73,13 @@ def _resolve_codex_executable(
     if located:
         return str(Path(located).expanduser().resolve())
 
-    selected_home = Path.home() if home is None else Path(home)
-    selected_platform = os.name if platform_name is None else platform_name
-    executable_name = "codex.exe" if selected_platform == "nt" else "codex"
-    roots = (
-        selected_home / ".vscode" / "extensions",
-        selected_home / ".vscode-insiders" / "extensions",
-        selected_home / ".vscode-server" / "extensions",
-        selected_home / ".vscode-server-insiders" / "extensions",
+    adapter = detect_platform_adapter(
+        system_name=platform_name,
+        home=Path.home() if home is None else Path(home),
+        which=which_command,
     )
+    executable_name = adapter.codex_executable_name
+    roots = adapter.codex_extension_roots()
     candidates: List[Path] = []
     for root in roots:
         try:
@@ -95,7 +94,7 @@ def _resolve_codex_executable(
                 continue
             if not resolved.is_file():
                 continue
-            if selected_platform != "nt" and not os.access(resolved, os.X_OK):
+            if adapter.system != "windows" and not os.access(resolved, os.X_OK):
                 continue
             candidates.append(resolved)
     if candidates:

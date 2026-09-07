@@ -41,6 +41,22 @@
 - **余分な AI エージェントや過剰なオーケストレーションを増やさない。** WatchDog
   は正確な既存 Codex スレッドへ証拠と指示を届け、推論と作業は Codex が行います。
 
+## プラットフォーム対応状況
+
+| プラットフォーム/経路 | 対応レベル |
+| --- | --- |
+| Windows x64 ローカルデスクトップ | **安定版・完全 E2E 検証済みのパッケージ基準実装** |
+| Linux Remote-SSH ターゲット | **実機のリモート経路を検証済み** |
+| Linux ローカルデスクトップ | **CI 検証済みプレビュー。実機デスクトップ E2E は未完了** |
+| macOS ローカルデスクトップ | **CI 検証済みプレビュー/Beta。Apple Silicon 実機 E2E は未完了** |
+
+Linux/macOS のソース版では、POSIX ロックとストレージ、標準 VS Code
+パス、ネイティブ `code --status`、Codex 実行ファイル検出を共有します。
+現時点ではフォアグラウンドのプレビューです。`codex-watchdog doctor`
+で読み取り専用診断を実行し、`codex-watchdog doctor --export report.json`
+でプライバシー保護済みの診断 JSON を作成できます。詳細は
+[プラットフォーム対応と診断](docs/PLATFORM_SUPPORT.md)を参照してください。
+
 ## 主な機能
 
 - Codex の Stop／完了イベントを観察し、最終出力を通知できます。
@@ -129,6 +145,7 @@ Slack で往復を中継します。
 
 - [Windows パッケージと初回セットアップ](WINDOWS_PACKAGE.md)
 - [詳細なセットアップと運用](docs/SETUP.md)
+- [プラットフォーム対応とプライバシー安全な診断](docs/PLATFORM_SUPPORT.md)
 - [セキュリティポリシーと運用境界](SECURITY.md)
 - [アーキテクチャ決定](doc/architecture.md)
 - [画像の出典](ASSETS.md)と[サードパーティ通知](THIRD_PARTY_NOTICES.md)

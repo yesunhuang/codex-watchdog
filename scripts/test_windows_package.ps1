@@ -14,6 +14,7 @@ $package = [IO.Path]::GetFullPath($PackageDirectory)
 $executable = Join-Path $package "codex-watchdog.exe"
 $launcher = Join-Path $package "watchdog.ps1"
 $icon = Join-Path $package "images\codex-watchdog.ico"
+$platformGuide = Join-Path $package "docs\PLATFORM_SUPPORT.md"
 if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
     throw "Packaged executable is missing: $executable"
 }
@@ -22,6 +23,9 @@ if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) {
 }
 if (-not (Test-Path -LiteralPath $icon -PathType Leaf)) {
     throw "Packaged approved icon is missing: $icon"
+}
+if (-not (Test-Path -LiteralPath $platformGuide -PathType Leaf)) {
+    throw "Packaged platform support guide is missing: $platformGuide"
 }
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("codex-watchdog-package-test-" + [guid]::NewGuid().ToString("N"))
@@ -85,6 +89,31 @@ try {
     }
     if ($null -eq $discovery.windows -or $null -eq $discovery.issues) {
         throw "Packaged discovery did not return the expected structured result."
+    }
+    $doctorOutput = & $executable `
+        --runtime $runtime `
+        --codex-home $env:CODEX_HOME `
+        doctor `
+        --vscode-user-data (Join-Path $testRoot "missing-vscode-user") `
+        --export
+    if ($LASTEXITCODE -notin @(0, 1)) {
+        throw "Packaged doctor failed to produce a supported diagnostic result."
+    }
+    $doctor = $doctorOutput | ConvertFrom-Json
+    if (
+        $doctor.schema_version -ne 1 -or
+        $doctor.status -notin @("PASS", "PARTIAL", "FAIL") -or
+        $null -eq $doctor.platform.name -or
+        @($doctor.checks).Count -lt 10
+    ) {
+        throw "Packaged doctor did not return the expected bounded schema."
+    }
+    $doctorText = $doctorOutput | Out-String
+    if (
+        $doctorText.IndexOf($testRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+        $doctorText -match 'thread_id|session_id|workspace_id|username|webhook|token'
+    ) {
+        throw "Packaged doctor exposed a private path, identifier, or secret field."
     }
     $onceOutput = & $executable --runtime $runtime --codex-home $env:CODEX_HOME run --once --manual-only
     if ($LASTEXITCODE -ne 0) {
@@ -223,6 +252,7 @@ try {
         python_resolvable = $false
         help = "passed"
         discovery_status = $discovery.status
+        doctor_status = $doctor.status
         one_cycle_workspace_count = $once.workspace_count
         packaged_hook_install = $hookInstall.status
         launcher_runner = $dryRun.runner

@@ -142,6 +142,11 @@ try {
     )) {
         Copy-Item -LiteralPath (Join-Path $repoRoot $name) -Destination $packageDirectory
     }
+    $packageDocs = Join-Path $packageDirectory "docs"
+    New-Item -ItemType Directory -Path $packageDocs -Force | Out-Null
+    Copy-Item `
+        -LiteralPath (Join-Path $repoRoot "docs\PLATFORM_SUPPORT.md") `
+        -Destination $packageDocs
     $packageImages = Join-Path $packageDirectory "images"
     New-Item -ItemType Directory -Path $packageImages -Force | Out-Null
     foreach ($name in @(

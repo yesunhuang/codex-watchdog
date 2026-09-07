@@ -156,9 +156,13 @@ read-only local/remote inspection + exact git ls-remote branch OID
 atomic per-workspace observation + transition fingerprint
 ```
 
-Automatic discovery currently targets the current user's standard stable VS
-Code installation and data root on Windows. Persisted `windowsState` entries
-are candidates only. The live index runs `code --status`, binds each reported
+Automatic discovery selects the current user's standard stable VS Code data
+root and `code --status` invocation through one thin host adapter. Windows uses
+the accepted AppData/`code.cmd` path; Linux uses XDG/`~/.config` plus a native
+CLI; macOS uses `~/Library/Application Support` plus a native CLI or standard
+application bundle. Windows is full-E2E verified, while local Linux and macOS
+remain CI-verified preview paths until real desktop probes pass. Persisted
+`windowsState` entries are candidates only. The live index binds each reported
 window slot to an exact extension-host PID, and selects the corresponding log
 session only when its latest lifecycle event is that PID starting with no later
 termination or exit. The same extension-host log must expose exactly one
@@ -344,9 +348,9 @@ that the event alone does not imply user intervention.
 
 ## Locality and UI fallback
 
-The local Windows discovery process detects open `vscode-remote://ssh-remote+`
+The local host discovery process detects open `vscode-remote://ssh-remote+`
 windows and extracts only the authority, absolute remote path, and exact
-workspace-storage key. It never passes that path to Windows Git. A self-contained
+workspace-storage key. It never passes that path to process-local Git. A self-contained
 Python probe runs through non-interactive SSH beside the remote VS Code Server,
 intersects the exact window resource with remote Codex state and current owner
 logs, observes rollout completion and read-only Git, and journals queue delivery
@@ -357,6 +361,36 @@ fails closed.
 No UI or screenshot fallback was exercised. The first-party queue is narrower
 and succeeded on the actual local VS Code target, so UI automation is not part
 of the recommended architecture.
+
+## Host adapters and read-only diagnosis
+
+`platform_adapters.py` owns the genuinely host-specific facts: normalized OS
+and architecture, stable/Insiders VS Code data roots, safe `code --status`
+argv, Codex extension roots and executable name, current-user application-data
+location, encrypted credential-backend expectation, and launcher capability.
+Core routing, storage, Git observation, Slack/events, queue evidence, and
+service state do not branch on the host OS.
+
+Windows retains its exact local/machine `code.cmd` discovery and COMSPEC
+invocation. Linux and macOS invoke a native `code` binary without a shell. The
+live process recognizer normalizes path separators but still requires the exact
+OpenAI extension, Codex binary, and `app-server` markers. POSIX storage retains
+`flock` plus atomic rename; Windows retains its existing one-byte lock and
+bounded sharing-error replacement retry.
+
+`codex-watchdog doctor` is a read-only composition over these adapters. It
+checks VS Code/Codex paths and readability, live discovery, current-thread
+resolution, hooks, queue readiness, credential/launcher expectations, and
+filesystem primitives. It never sends, claims, notifies, creates runtime locks,
+or changes Git. `doctor --export [PATH]` emits only bounded counts, booleans,
+enumerated sources, and stable reason codes; raw paths, users, identifiers,
+hosts, messages, and credentials are excluded.
+
+Support labels are evidence levels, not marketing aliases: CI verified,
+native-probe verified, and full E2E verified. Hosted macOS/Linux CI does not
+justify the final label. macOS is preview/beta and Apple Silicon is the first
+native validation target. Linux Remote-SSH execution and Linux local-desktop
+hosting are tracked separately.
 
 ## Runtime and privacy invariants
 
@@ -381,10 +415,11 @@ of the recommended architecture.
 
 ## Deferred components
 
-The following remain unimplemented:
+The following remain unimplemented or unverified:
 
-- live Remote-SSH Stop and queue acceptance after batch SSH authorization;
+- real Linux-desktop and Apple Silicon macOS VS Code/Codex live E2E acceptance;
+- native macOS/Linux secure credential setup and foreground-launch ergonomics;
+- standalone macOS/Linux packaging and installed background services;
 - ACTIVE/NOT_ACTIVE/UNKNOWN workspace observation;
 - automatic interpretation of resume disposition lines;
-- background service installation; and
 - crash reconciliation UI or commands.

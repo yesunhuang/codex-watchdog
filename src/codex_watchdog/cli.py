@@ -7,6 +7,7 @@ import sys
 from typing import Optional, Sequence
 
 from . import __version__
+from .doctor import WatchdogDoctor, write_doctor_export
 from .hook_config import (
     build_packaged_hooks_document,
     install_hooks,
@@ -196,6 +197,21 @@ def build_parser() -> argparse.ArgumentParser:
         "outlook-login",
         help="authorize personal Outlook SMTP using a one-time Microsoft device code",
     )
+    doctor = commands.add_parser(
+        "doctor", help="run a read-only privacy-safe platform capability audit"
+    )
+    doctor.add_argument(
+        "--vscode-user-data",
+        type=_path,
+        help="explicit VS Code User directory for preview platform diagnosis",
+    )
+    doctor.add_argument(
+        "--export",
+        nargs="?",
+        const="-",
+        metavar="PATH",
+        help="emit compact safe JSON, or atomically write it to PATH",
+    )
     user_hooks = commands.add_parser(
         "install-user-hooks",
         help="render or conservatively install hooks that invoke the packaged executable",
@@ -225,6 +241,23 @@ def _prompt(message: Optional[str], prompt_file: Optional[Path]) -> str:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "doctor":
+        report = WatchdogDoctor(
+            args.runtime,
+            codex_home=args.codex_home,
+            user_data_root=args.vscode_user_data,
+        ).run()
+        if args.export not in (None, "-"):
+            write_doctor_export(Path(args.export), report)
+        print(
+            json.dumps(
+                report.to_dict(),
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=None if args.export is not None else 2,
+            )
+        )
+        return 0 if report.status in ("PASS", "PARTIAL") else 1
     if args.command == "install-user-hooks":
         executable = args.executable
         if executable is None:

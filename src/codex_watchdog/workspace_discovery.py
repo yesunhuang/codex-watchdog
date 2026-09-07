@@ -14,6 +14,12 @@ from urllib.parse import unquote, urlsplit
 import uuid
 
 from .models import sha256_text, utc_now
+from .platform_adapters import (
+    HostPlatformAdapter,
+    detect_platform_adapter,
+    is_codex_app_server_description,
+    run_vscode_status,
+)
 from .storage import InstructionStore
 from .workspace_registry import TrackedWorkspace, WorkspaceRegistry
 
@@ -183,43 +189,7 @@ def writer_lock_is_held(path: Path) -> bool:
 
 
 def _default_code_status() -> Optional[str]:
-    candidates = []
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    if local_app_data:
-        candidates.append(
-            Path(local_app_data) / "Programs" / "Microsoft VS Code" / "bin" / "code.cmd"
-        )
-    program_files = os.environ.get("ProgramFiles")
-    if program_files:
-        candidates.append(
-            Path(program_files) / "Microsoft VS Code" / "bin" / "code.cmd"
-        )
-    script = next((path for path in candidates if path.is_file()), None)
-    command_processor = os.environ.get("COMSPEC")
-    if script is None or not command_processor:
-        return None
-    environment = {
-        key: value
-        for key, value in os.environ.items()
-        if not key.upper().startswith("CODEX_WATCHDOG_")
-    }
-    try:
-        completed = subprocess.run(
-            [command_processor, "/d", "/c", "call", str(script), "--status"],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=30,
-            check=False,
-            env=environment,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if completed.returncode != 0 or not completed.stdout:
-        return None
-    return completed.stdout
+    return run_vscode_status().output
 
 
 def codex_log_owns_session(path: Path, session_id: str) -> bool:
@@ -338,12 +308,7 @@ class VSCodeLiveWindowIndex:
                 continue
             if current_window is None:
                 continue
-            lowered = stripped.casefold()
-            if (
-                "\\.vscode\\extensions\\openai.chatgpt-" in lowered
-                and "\\codex.exe" in lowered
-                and " app-server" in lowered
-            ):
+            if is_codex_app_server_description(stripped):
                 extension_host_pid, existing = windows[current_window]
                 windows[current_window] = (
                     extension_host_pid,
@@ -675,11 +640,17 @@ class VSCodeWorkspaceDiscovery:
         registry: Optional[WorkspaceRegistry] = None,
         session_resolver: Optional[CodexSessionResolver] = None,
         live_window_index: Optional[VSCodeLiveWindowIndex] = None,
+        platform_adapter: Optional[HostPlatformAdapter] = None,
         git_root_resolver: GitRootResolver = _default_git_root,
         exclude: Sequence[str] = (),
         sleep: Sleep = time.sleep,
     ) -> None:
         self.runtime = Path(runtime)
+        self.platform_adapter = (
+            detect_platform_adapter()
+            if platform_adapter is None
+            else platform_adapter
+        )
         selected_codex_home = (
             Path(codex_home)
             if codex_home is not None
@@ -687,11 +658,8 @@ class VSCodeWorkspaceDiscovery:
         )
         self.codex_home = _canonical_local_path(selected_codex_home)
         if user_data_root is None:
-            appdata = os.environ.get("APPDATA")
             self.user_data_root = (
-                _canonical_local_path(Path(appdata) / "Code" / "User")
-                if appdata
-                else None
+                self.platform_adapter.primary_vscode_user_data_root()
             )
         else:
             self.user_data_root = _canonical_local_path(Path(user_data_root))
@@ -704,7 +672,12 @@ class VSCodeWorkspaceDiscovery:
         self.live_window_index = (
             live_window_index
             if live_window_index is not None
-            else VSCodeLiveWindowIndex(self.user_data_root)
+            else VSCodeLiveWindowIndex(
+                self.user_data_root,
+                status_runner=lambda: run_vscode_status(
+                    self.platform_adapter
+                ).output,
+            )
             if self.user_data_root is not None
             else None
         )

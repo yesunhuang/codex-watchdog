@@ -99,6 +99,35 @@ def test_latest_installed_vscode_codex_is_used_when_path_is_missing(
     assert resolved == str(newer.resolve())
 
 
+@pytest.mark.parametrize(
+    ("platform_name", "target"),
+    (("linux", "linux-x86_64"), ("darwin", "darwin-arm64")),
+)
+def test_posix_vscode_codex_extension_fallback_is_executable(
+    tmp_path: Path, platform_name: str, target: str
+) -> None:
+    executable = (
+        tmp_path
+        / ".vscode"
+        / "extensions"
+        / f"openai.chatgpt-26.900.1-{target}"
+        / "bin"
+        / target
+        / "codex"
+    )
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"binary")
+    executable.chmod(0o755)
+
+    resolved = queue_wake._resolve_codex_executable(
+        home=tmp_path,
+        which=lambda _command: None,
+        platform_name=platform_name,
+    )
+
+    assert resolved == str(executable.resolve())
+
+
 def test_dispatcher_uses_automatically_resolved_codex_executable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
