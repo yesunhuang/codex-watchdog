@@ -46,6 +46,33 @@ class InstructionCollisionError(RuntimeError):
     """An existing instruction id was reused with different content."""
 
 
+def snapshot_state(path: Path, expected: bytes) -> Path:
+    """Atomically retain exact pre-migration bytes without replacing a backup."""
+    if path.is_symlink() or path.read_bytes() != expected:
+        raise ValueError("state changed before migration")
+    digest = hashlib.sha256(expected).hexdigest()
+    backup = path.with_name(path.name + ".backup-" + digest)
+    if backup.exists() or backup.is_symlink():
+        if backup.is_symlink() or backup.read_bytes() != expected:
+            raise ValueError("state backup collision")
+        return backup
+    fd, name = tempfile.mkstemp(prefix=".state-backup-", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(expected)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, backup)
+        except FileExistsError:
+            if backup.is_symlink() or backup.read_bytes() != expected:
+                raise ValueError("state backup collision")
+    finally:
+        temporary.unlink(missing_ok=True)
+    return backup
+
+
 def _creation_time(instruction: Instruction) -> datetime:
     value = datetime.fromisoformat(instruction.created_at.replace("Z", "+00:00"))
     if value.tzinfo is None:

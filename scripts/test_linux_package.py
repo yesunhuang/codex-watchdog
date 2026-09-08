@@ -20,6 +20,8 @@ import time
 import types
 import zipfile
 
+from package_rebind_acceptance import verify_manual_rebind
+
 
 ROOT = Path(__file__).resolve().parents[1]
 THREAD = "11111111-2222-4333-8444-555555555555"
@@ -219,6 +221,7 @@ def main() -> None:
         assert profile["runtime"] == str(runtime) and profile["codex_home"] == str(codex)
         assert (codex / "hooks.json").read_bytes() == old_hooks
         assert json.loads(run([executable, "linux-install"]).stdout)["status"] == "unchanged"
+        verify_manual_rebind(installed, root / "manual registration acceptance", environment)
         rendered = json.loads(run([installed, "linux-hooks"]).stdout)
         command = shlex.split(rendered["hooks"]["Stop"][0]["hooks"][0]["command"])
         assert command[:4] == [str(installed), "--runtime", str(runtime), "hook"]
@@ -359,7 +362,8 @@ def main() -> None:
               "architecture": manifest["architecture"], "source_commit": manifest["source_commit"],
               "python_hidden": True, "source_free_layout": True, "elf_architecture_verified": True,
               "dependency_and_native_license_inventory": True, "own_bytecode_privacy": True,
-              "doctor_privacy": True, "fresh_install": True, "source_runtime_reused": True,
+              "doctor_privacy": True, "manual_registration_migration": True,
+              "fresh_install": True, "source_runtime_reused": True,
               "replacement_and_stable_hooks": True, "foreground_and_writer_locks": True,
               "fixture_exact_thread_resume_restart_release": True, "fixture_queue_deduplication": True,
               "watchdog_git_read_only": True, "production_fixture_stop_ms": terminal[0]["hook_duration_ms"],

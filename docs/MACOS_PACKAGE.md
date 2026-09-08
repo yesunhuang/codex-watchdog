@@ -6,11 +6,14 @@ macOS 15 on Apple Silicon. Intel Macs and older macOS versions are not accepted
 by this recipe. The executable uses ad-hoc signing; it is not Developer ID
 signed or notarized. First use may require an attended approval in macOS.
 
-The source workflow's native Mac acceptance remains separate from acceptance
-of this package with your actual Keychain, trusted hooks, and VS Code window.
 The ZIP is published as a developer-preview asset alongside the Windows beta.
-Hosted package acceptance has passed; manual testing with the real user's Mac
-configuration remains pending.
+The published v0.2.3 package passed real-user acceptance for one manually
+registered workspace, foreground Slack-only operation, trusted hooks, exact
+Slack replies, repeated 30-second Stop notifications, and Git wake. That test
+required `SSL_CERT_FILE=/etc/ssl/cert.pem` and a manual state recovery after
+changing the registered thread. Version 0.2.5 addresses both findings below.
+Hosted acceptance of a new build remains separate from testing it with your
+actual Keychain, trusted hooks, and VS Code window.
 
 ## Install or upgrade
 
@@ -70,16 +73,21 @@ installation leaves the file unchanged.
 
 ## Foreground operation
 
-For the accepted Keychain Slack workflow:
+For the accepted Keychain Slack workflow with only your explicit registrations:
 
 ```sh
-"$HOME/Library/Application Support/CodexWatchdog/bin/watchdog-macos.sh" --slack-only
+"$HOME/Library/Application Support/CodexWatchdog/bin/watchdog-macos.sh" --slack-only -- --manual-only --interval 300
 ```
 
 The existing launcher loads credentials only into its child environment.
 `--slack-only` removes SMTP and Outlook settings from that child. Use `--dry-run`
 to inspect configuration without starting a listener, or add `-- --once` for a
 single service cycle. Keep the established Slack workspace/channel allowlist.
+`--manual-only` disables automatic workspace discovery. Register the exact
+existing repository and thread first using `workspace-add`; see
+[manual registration and rebind](SETUP.md#changing-a-manually-registered-thread).
+Omit `--manual-only` only when you intend to include automatically discovered
+workspaces as well.
 
 Fresh users can use the included `setup-slack-relay-macos.sh --help` for the
 normal attended Keychain setup. Existing users do not repeat setup.
@@ -89,6 +97,29 @@ The packaged executable also accepts the ordinary CLI commands, including
 runtime. The doctor remains read-only and can return `PARTIAL` or `FAIL` when
 VS Code/Codex or a provider capability is unavailable. No launchd service,
 network listener, root installation, or automatic startup is added.
+
+## Certificate discovery and connectivity
+
+From v0.2.5, the frozen Mac executable selects `/etc/ssl/cert.pem` when neither
+`SSL_CERT_FILE` nor `SSL_CERT_DIR` is set. If that system file is absent, it uses
+its bundled certifi roots. A present but invalid system bundle fails closed.
+Explicit certificate environment settings, including empty values, are retained.
+Selection affects only the process environment; it does not change macOS trust,
+Keychain entries, or saved profiles. Certificate and hostname verification stay
+enabled. Existing v0.2.3 launch commands with a CA override continue to work.
+
+Check the installed executable's outbound TLS independently of Slack login:
+
+```sh
+"$HOME/Library/Application Support/CodexWatchdog/bin/codex-watchdog" macos-tls-check
+```
+
+This explicit check uses Slack's [unauthenticated `api.test` method](https://docs.slack.dev/reference/methods/api.test/).
+It needs network access but no credentials, sends no message, and prints only
+the CA source and bounded verification result. Normal startup does not run this
+probe. When testing automatic selection after upgrading, omit the old
+process-local override from that test command; leave deliberate custom trust
+settings intact.
 
 ## Rollback and removal
 
@@ -115,8 +146,13 @@ and validates its executable on a [GitHub-hosted ARM64 Mac](https://docs.github.
 The package test hides Python and the source checkout from child execution,
 uses paths with spaces, checks doctor/privacy and foreground/hook commands,
 and tests source-profile reuse and package replacement with an isolated
-Keychain fixture. Real Mac VS Code/Keychain/hook acceptance remains a separate
-manual test; this published package is explicitly a developer preview.
+Keychain fixture. It also verifies outbound Slack TLS using the default system
+CA and a manual thread rebind through the installed executable: exact backup,
+preserved compatible fields, first and subsequent Stop processing once each,
+and unchanged Git state. Source regressions cover interrupted migration,
+notification deduplication, and preservation of pending delivery evidence.
+Real Mac VS Code/Keychain/hook acceptance remains a separate manual test; this
+published package is explicitly a developer preview.
 
 For manual acceptance, retain the existing configuration, install the package,
 and verify the reported runtime is reused. Move and trust the exact hook

@@ -52,7 +52,7 @@
 | Linux x64 実行ファイルパッケージ | **ホスト型ネイティブ環境で検証済み。実ユーザーのデスクトップ E2E は未完了** |
 | Linux ローカルデスクトップ | **CI 検証済みプレビュー。実機デスクトップ E2E は未完了** |
 | macOS Apple Silicon ソース実行 | **実機 E2E 検証済み。ウィンドウ構成の制限あり** |
-| macOS 15 ARM64 パッケージ | **開発者プレビュー。ネイティブ CI 検証済み、手動実機検証待ち** |
+| macOS 15 ARM64 パッケージ | **開発者プレビュー。CA の回避設定を使用した v0.2.3 の限定的な実ユーザー E2E 検証済み** |
 
 Linux/macOS では、POSIX ロックとストレージ、標準 VS Code
 パス、ネイティブ `code --status`、Codex 実行ファイル検出を共有します。
@@ -137,7 +137,14 @@ Linux/macOS では、POSIX ロックとストレージ、標準 VS Code
 ./codex-watchdog --version
 ./codex-watchdog macos-install
 "$HOME/Library/Application Support/CodexWatchdog/bin/codex-watchdog" doctor
+"$HOME/Library/Application Support/CodexWatchdog/bin/codex-watchdog" macos-tls-check
 ```
+
+TLS チェックは認証情報を使わず、メッセージを送信せずに Slack へ接続します。
+v0.2.5 以降はシステムの CA バンドルを自動選択し、ユーザーが明示した証明書設定を
+保持します。以前の実機検証は v0.2.3、手動登録した単一ワークスペース、明示的な
+CA 環境変数で実施しました。ネイティブのパッケージ検証と、ご自身の Mac での
+新バージョンの検証は別の確認手順です。
 
 既存のランタイム、ルーティング、Keychain 設定は再利用されます。固定パスへの
 フック導入と手動の信頼、Slack のフォアグラウンド実行、更新、ロールバック、

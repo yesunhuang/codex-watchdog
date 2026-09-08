@@ -49,7 +49,7 @@
 | Linux x64 可执行安装包 | **托管原生安装包验收通过；真实用户桌面端到端验证待完成** |
 | Linux 本地桌面 | **CI 已验证的预览版；仍需真实桌面端到端验证** |
 | macOS Apple Silicon 源码工作流 | **已完成真实端到端验证；仍有窗口拓扑限制** |
-| macOS 15 ARM64 安装包 | **开发者预览；原生安装包 CI 已验证，等待手动实机验收** |
+| macOS 15 ARM64 安装包 | **开发者预览；v0.2.3 在指定范围内通过真实用户 E2E 验证，需 CA 临时配置** |
 
 Linux 与 macOS 共用 POSIX 锁与存储、标准 VS Code 路径、
 原生 `code --status` 和 Codex 可执行文件发现，但仍是前台预览版。
@@ -127,7 +127,13 @@ Apple Silicon 和两种 Linux 架构均提供自带运行环境的 ZIP。Linux �
 ./codex-watchdog --version
 ./codex-watchdog macos-install
 "$HOME/Library/Application Support/CodexWatchdog/bin/codex-watchdog" doctor
+"$HOME/Library/Application Support/CodexWatchdog/bin/codex-watchdog" macos-tls-check
 ```
+
+TLS 检查会连接 Slack，但不使用凭据，也不发送消息。从 v0.2.5 起，安装包会
+自动选择系统 CA 证书包，并保留用户明确设置的证书配置。此前的实机验收使用
+v0.2.3、单个手动注册的工作区和显式 CA 环境变量；原生安装包检查与在您自己的
+Mac 上测试新版本仍是不同的验收步骤。
 
 程序会复用已有运行目录、路由和 Keychain 设置。固定路径的 Hook 安装、手动信任、
 Slack 前台运行、升级、回滚和手动测试步骤见

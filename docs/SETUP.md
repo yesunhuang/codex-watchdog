@@ -987,6 +987,36 @@ repository and remains effective even when its VS Code window is closed.
 `run` or `service-once` disables automatic discovery while retaining the
 override registry.
 
+### Changing a manually registered thread
+
+Stop the foreground WatchDog, remove the old registration with
+`workspace-remove`, then use `workspace-add` with the **same workspace ID and
+repository** and the exact new, existing thread ID. Restart the normal `run`
+command with the same runtime. Use `--manual-only` when you intend to monitor
+only explicitly registered workspaces. Removing a registration alone returns
+the repository to automatic discovery unless `--manual-only` is set.
+
+From v0.2.5, the first normal foreground cycle recognizes this explicit rebind.
+Before publishing the new state, it retains the exact prior state beside the
+original as a content-addressed `.backup-...` file. Compatible state fields,
+pending Git evidence, and delivery/notification journals survive. It processes
+the new thread's Stop completions since the new registration even when the old
+audit cursor has already passed them. Ordinary later cycles do not replay
+those notifications. If you deliberately want the latest completion from before
+the registration, run once with `--replay-latest-stop`; normal startup does not
+replay that history.
+
+Already queued or uncertain prompts keep their original target and identity.
+Rebinding does not resend them to another thread. A pending Git wake can remain
+blocked if its existing delivery belongs to the previous thread; inspect that
+evidence and let Codex resolve the repository state. Do not delete journals to
+force a retry. Automatic discovery changes, a different repository under the
+same ID, malformed state, and unknown future schema versions still fail closed.
+Keep the backup for rollback; restore it only with WatchDog stopped and the
+matching original registration restored.
+
+### Repository observation
+
 `service-once` processes effective workspace IDs in sorted order under a
 nonblocking global lock. For each repository it performs a noninteractive
 `git ls-remote` against the exact configured branch, validates local repository

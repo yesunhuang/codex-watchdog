@@ -8,8 +8,9 @@ pyproject settings without a version change do not republish anything.
 Publication requires the complete Windows/Ubuntu/macOS Python 3.9 matrix,
 the pinned native package builds, a full public-history secret scan, embedded
 Windows icon verification, Windows source-free fresh startup and upgrade from
-the immediately previous public executable, and native Mac source-free package
-acceptance, and both Linux executable acceptance jobs. The upgrade test obtains the previous package and verifies its
+the immediately previous public executable, native Mac source-free package
+acceptance, and both Linux executable acceptance jobs. The upgrade test obtains
+the previous package and verifies its
 published checksum, lets that executable create the saved launcher profile,
 then verifies the candidate preserves the profile, hooks, provider stores,
 settings, and retained journal bytes.
@@ -23,6 +24,16 @@ source-runtime reuse, replacement and stable hooks, 30-second fixture Stop,
 kernel ownership locks, exact-thread fixture queue/restart/release, and read-only
 Git observation. Real-user Spark acceptance is recorded separately from these
 isolated protocol fixtures; hosted x64 checks do not imply desktop E2E.
+
+The reusable `macos-package.yml` retains the pinned Apple Silicon build and
+isolated Keychain/upgrade/hook gates. It additionally requires the installed
+executable to verify TLS to Slack's unauthenticated `api.test` endpoint using
+the default macOS system CA, without source Python or certificate overrides.
+No Slack credential or message is involved. Both native POSIX package workflows
+also exercise manual thread rebind migration through the actual executable,
+including backup preservation, first/subsequent Stop processing once each,
+and unchanged Git state. The Windows v0.2.5 gate upgrades the actual public
+v0.2.4 executable's profile/runtime to the candidate.
 
 Only the final publish job has repository write permission. It combines the
 tested artifacts, checks all four ZIP hashes and the Linux manifest/receipt

@@ -4,6 +4,7 @@ name: Linux executable packages
   push:
     branches:
       - codex-a/linux-packages
+      - codex-a/rebind-and-ca
   workflow_dispatch:
   workflow_call:
 

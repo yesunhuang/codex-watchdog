@@ -18,6 +18,8 @@ import tempfile
 import types
 import zipfile
 
+from package_rebind_acceptance import verify_manual_rebind
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -93,7 +95,8 @@ def main() -> None:
                               "date": "/bin/date", "git": "/usr/bin/git"}.items():
             (tools / command).symlink_to(path)
         environment = {k: v for k, v in os.environ.items() if not k.startswith("CODEX_WATCHDOG_")
-                       and k not in ("PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV", "CODEX_HOME")}
+                       and k not in ("PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV", "CODEX_HOME",
+                                     "SSL_CERT_FILE", "SSL_CERT_DIR")}
         config = home / "Library/Application Support/CodexWatchdog"
         codex = home / ".codex"
         environment.update(HOME=str(home), PATH=str(tools), CODEX_HOME=str(codex),
@@ -140,11 +143,15 @@ def main() -> None:
         old_hooks = (codex / "hooks.json").read_bytes()
         assert json.loads(run([executable, "macos-install"]).stdout)["runtime_reused"]
         installed = config / "bin/codex-watchdog"
+        tls = json.loads(run([installed, "macos-tls-check"]).stdout)
+        assert tls == {"status": "passed", "ca_source": "macos_system_bundle", "tls_verification": True,
+                       "endpoint": "slack_api_test", "authenticated": False}
         profile_path = config / "macos-launcher.json"
         profile = json.loads(profile_path.read_text())
         assert profile["runtime"] == str(runtime)
         assert (codex / "hooks.json").read_bytes() == old_hooks
         assert json.loads(run([executable, "macos-install"]).stdout)["status"] == "unchanged"
+        verify_manual_rebind(installed, root / "manual registration acceptance", environment)
         rendered = json.loads(run([installed, "macos-hooks"]).stdout)
         assert rendered["unknown_user_key"] == "retain"
         command = shlex.split(rendered["hooks"]["Stop"][0]["hooks"][0]["command"])
@@ -229,7 +236,8 @@ def main() -> None:
 
     result = {"schema_version": 1, "status": "passed", "version": manifest["version"], "architecture": "arm64",
               "python_hidden": True, "source_free_layout": True, "own_bytecode_privacy": True,
-              "doctor_privacy": True, "legacy_runtime_reused": True, "native_fixture_keychain_preserved": True,
+              "doctor_privacy": True, "default_ca_outbound_tls": True, "manual_registration_migration": True,
+              "legacy_runtime_reused": True, "native_fixture_keychain_preserved": True,
               "upgrade_and_stable_hooks": True, "foreground_lifecycle": True, "busy_upgrade_refused": True,
               "production_fixture_stop_ms": terminal[0]["hook_duration_ms"], "real_codex_hook_acceptance": "pending"}
     (package.parent / "macos-package-acceptance.json").write_text(json.dumps(result, sort_keys=True, indent=2) + "\n")

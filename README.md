@@ -52,7 +52,7 @@ watches, wakes, relays, and notifies without becoming another AI agent.
 | Linux x64 executable package | **Hosted native package acceptance; real-user desktop E2E pending** |
 | Linux local desktop | **CI-verified preview; native desktop E2E pending** |
 | macOS Apple Silicon source workflow | **Native E2E verified; topology limitations remain** |
-| macOS 15 ARM64 package | **Developer preview; native package CI verified, manual device acceptance pending** |
+| macOS 15 ARM64 package | **Developer preview; bounded v0.2.3 real-user E2E verified with a CA workaround** |
 
 Linux and macOS share POSIX locking/storage, standard VS Code paths, native
 `code --status`, and Codex executable discovery on Linux and macOS. They remain
@@ -138,7 +138,14 @@ Stop any running WatchDog before an upgrade. From the extracted directory:
 ./codex-watchdog --version
 ./codex-watchdog macos-install
 "$HOME/Library/Application Support/CodexWatchdog/bin/codex-watchdog" doctor
+"$HOME/Library/Application Support/CodexWatchdog/bin/codex-watchdog" macos-tls-check
 ```
+
+The TLS check contacts Slack without credentials or sending a message. From
+v0.2.5, the package selects the system CA bundle automatically and preserves
+explicit certificate settings. The earlier real-user acceptance used v0.2.3,
+one manually registered workspace, and an explicit CA override; native package
+checks remain separate from testing the new version on your own Mac.
 
 Existing runtime, routing, and Keychain settings are reused. See the
 [Mac package guide](docs/MACOS_PACKAGE.md) for stable hook installation, normal

@@ -1,37 +1,41 @@
-Version 0.2.4 adds self-contained Linux ARM64 and x64 executable ZIPs alongside
-Windows x64 and macOS 15 ARM64 preview packages. All four include Python and
-resolved dependency licenses, with archive checksums and automated package
-acceptance results attached. Linux targets Ubuntu 22.04 or newer with glibc;
-ordinary package use needs no Python installation, pip, virtualenv, or checkout.
+Version 0.2.5 fixes two problems found during real-user testing of the v0.2.3
+Apple Silicon package. Windows x64, macOS 15 ARM64 preview, Linux ARM64, and
+Linux x64 executable ZIPs continue to include Python, resolved dependency
+licenses, checksums, and automated package-acceptance records.
 
-The Linux installer reuses the current user's existing hook runtime or saved
-package profile, preserves journals, workspace/routing/provider settings and
-compatible unknown fields, and backs up replaced files atomically. Hooks use
-a stable executable path, including paths with spaces. Review and trust changed
-hook commands in Codex; the installer never changes trust or exports credentials.
-See [the Linux package guide](https://github.com/yesunhuang/codex-watchdog/blob/main/docs/LINUX_PACKAGE.md)
-for installation, the explicit same-thread foreground workflow, and rollback.
+The frozen Mac executable now selects the system CA bundle automatically when
+no certificate environment setting is supplied. It uses bundled certifi roots
+only when the system bundle is absent, preserves explicit certificate settings,
+and keeps certificate and hostname verification enabled. It changes no saved
+profile, Keychain entry, or macOS trust setting. The new `macos-tls-check` command
+checks Slack connectivity without credentials or sending a message. Native
+package acceptance requires that check to pass with Python and certificate
+overrides absent. See [the Mac package guide](https://github.com/yesunhuang/codex-watchdog/blob/main/docs/MACOS_PACKAGE.md).
 
-Both Linux architectures pass hosted native package acceptance, including
-source-free startup, license/privacy checks, production fixture Stop, kernel
-locks, exact-thread fixture queue/restart/release, and read-only Git observation.
-ARM64 also passes package testing on a real Ubuntu ARM64 machine, including
-state reuse and one deduplicated reply in an existing VS Code conversation.
-General Linux desktop discovery remains a CI-verified preview; hosted package
-checks do not establish real-user desktop E2E or replace human hook trust.
+Changing an explicit manual registration to another existing thread in the
+same repository no longer leaves the foreground service stuck on incompatible
+state. The first normal cycle retains an exact atomic backup, preserves
+compatible state and pending Git/delivery evidence, and processes the new
+thread's Stop completions since registration without losing the first one to
+the previous audit cursor. Restart regressions verify notification deduplication.
+Existing queued or uncertain prompts retain their original target; a rebind
+never blindly sends them to a different thread. Automatic discovery changes,
+different repository identities, and invalid/future state still fail closed.
+See [manual thread rebind](https://github.com/yesunhuang/codex-watchdog/blob/main/docs/SETUP.md#changing-a-manually-registered-thread).
 
-The Apple Silicon package is a developer preview: ad-hoc signed, not Developer
-ID signed or notarized. Hosted native package checks pass before publication;
-manual acceptance with real user Keychain, trusted hooks, and VS Code remains
-separate. See [the Mac package guide](https://github.com/yesunhuang/codex-watchdog/blob/main/docs/MACOS_PACKAGE.md)
-for installation and normal attended trust. Existing runtime, routing, and
-credentials are reused in place.
+The earlier v0.2.3 Mac acceptance passed the foreground Slack-only workflow with
+one manual workspace, human-trusted hooks, exact Slack replies, repeated
+30-second Stop notifications, and Git wake. It used an explicit CA override
+and manual state recovery. That bounded real-user evidence remains distinct
+from the new version's hosted native package tests. The Mac asset is still
+ad-hoc signed and not notarized; Intel, background-service, Outlook, and general
+multi-window acceptance are not added by this release.
 
-Instruction submission now preserves creation order even when the wall clock
-ties or moves backward, while retaining compatible existing queue records.
-Linux detach/restart/release preserves the original conversation; an interrupted
-extension-owned command is not automatically replayed. Windows remains the
-packaged reference, with embedded-icon and immediately previous public release
-upgrade from the actual v0.2.3 executable required before publishing. Future
-version changes on public `main` run all four package gates and publish an
-immutable beta from the exact tested commit. The v0.2.3 release is unchanged.
+English, Chinese, and Japanese READMEs remain together at the repository root,
+with matching Quick Start structure, commands, and current support information.
+Existing runtime, routing, provider credentials, and trusted stable hook paths
+are reused. Release gates retain the full three-OS source matrix, all four
+native packages, complete-history secret scan, embedded Windows icon check,
+and Windows upgrade from the actual immediately previous public v0.2.4 package.
+Future version changes on public `main` automatically publish only after these
+gates pass. Published v0.2.3 and v0.2.4 tags and assets remain unchanged.

@@ -10,9 +10,11 @@ import os
 from pathlib import Path
 import re
 import shlex
+import ssl
 import subprocess
 import sys
 from typing import Optional, Sequence
+import urllib.request
 
 from . import __version__
 from .posix_package import (
@@ -23,6 +25,44 @@ from .storage import FileLock, InstructionStore, StoreBusyError
 
 PACKAGE_FILES = ("codex-watchdog", "watchdog-macos.sh", "setup-slack-relay-macos.sh")
 PROFILE_NAME = "macos-launcher.json"
+SYSTEM_CA_FILE = Path("/etc/ssl/cert.pem")
+
+
+def configure_packaged_ca() -> str:
+    """Select current-host trust for frozen Python without changing user choices."""
+    if sys.platform != "darwin" or not getattr(sys, "frozen", False):
+        return "source_or_other_platform"
+    if "SSL_CERT_FILE" in os.environ or "SSL_CERT_DIR" in os.environ:
+        return "environment"
+    if SYSTEM_CA_FILE.exists():
+        candidate, source = SYSTEM_CA_FILE, "macos_system_bundle"
+    else:
+        import certifi
+
+        candidate, source = Path(certifi.where()), "bundled_certifi"
+    try:
+        context = ssl.create_default_context(cafile=str(candidate))
+        if not context.cert_store_stats()["x509_ca"]:
+            raise ValueError("empty CA bundle")
+    except (OSError, ValueError) as exc:
+        raise PackageError("macos_ca_bundle_invalid") from exc
+    os.environ["SSL_CERT_FILE"] = str(candidate)
+    return source
+
+
+def check_slack_tls(ca_source: str) -> dict:
+    """An explicit credential-free connectivity check; never sends a message."""
+    context = ssl.create_default_context()
+    if context.verify_mode != ssl.CERT_REQUIRED or not context.check_hostname:
+        raise PackageError("macos_tls_verification_required")
+    request = urllib.request.Request("https://slack.com/api/api.test", data=b"",
+                                     headers={"Content-Type": "application/x-www-form-urlencoded"})
+    with urllib.request.urlopen(request, context=context, timeout=15) as response:
+        value = json.loads(response.read(65537))
+        if response.status != 200 or not isinstance(value, dict) or value.get("ok") is not True:
+            raise PackageError("macos_tls_probe_failed")
+    return {"status": "passed", "ca_source": ca_source, "tls_verification": True,
+            "endpoint": "slack_api_test", "authenticated": False}
 
 
 def config_directory() -> Path:
@@ -190,14 +230,18 @@ def main(argv: Sequence[str], executable: Path) -> int:
 
     arguments = list(argv)
     try:
+        ca_source = configure_packaged_ca()
         if arguments == ["--help"] or arguments == ["-h"]:
             print(build_parser().format_help())
             print("macOS package commands:\n  macos-install [--runtime PATH] [--install-dir PATH]\n"
-                  "  macos-hooks [--install]\n\n"
+                  "  macos-hooks [--install]\n  macos-tls-check\n\n"
                   "Run watchdog-macos.sh for the saved Keychain Slack foreground workflow.")
             return 0
         if arguments == ["--version"]:
             return core_main(arguments)
+        if arguments == ["macos-tls-check"]:
+            print(json.dumps(check_slack_tls(ca_source), sort_keys=True))
+            return 0
         directory, codex_home = config_directory(), codex_directory()
         if arguments and arguments[0] == "macos-install":
             if sys.platform != "darwin":

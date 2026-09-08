@@ -1,0 +1,48 @@
+name: Apple Silicon package acceptance
+'on':
+  push:
+    branches:
+    - codex-a/rebind-and-ca
+  workflow_dispatch: null
+  workflow_call: null
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: macos-15
+    timeout-minutes: 25
+    env:
+      PYTHONUTF8: '1'
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+        cache: pip
+        cache-dependency-path: requirements-macos-package.txt
+    - name: Install pinned build and test dependencies
+      run: |
+        python -m pip install --disable-pip-version-check pip==26.0.1
+        python -m pip install --disable-pip-version-check -r requirements-macos-package.txt
+        python -m pip install --disable-pip-version-check --no-deps --no-build-isolation .
+        python -m pip check
+    - name: Verify source and existing Mac launcher regressions
+      run: |
+        python -m compileall -q src tools tests packaging scripts
+        python -m pytest --basetemp .pytest-temp-package
+        bash -n watchdog-macos.sh
+        bash -n setup-slack-relay-macos.sh
+    - name: Build ARM64 developer preview
+      run: python scripts/build_macos_package.py
+    - name: Test the package without source Python
+      run: python scripts/test_macos_package.py --package dist/*-macos-arm64-preview
+    - name: Retain tested Mac release candidate
+      uses: actions/upload-artifact@v4
+      with:
+        name: macos-release-candidate
+        path: |
+          dist/*.zip
+          dist/*.sha256
+          dist/macos-package-acceptance.json
+        if-no-files-found: error
+        retention-days: 14

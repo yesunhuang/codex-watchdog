@@ -30,7 +30,7 @@ from .service import (
 )
 from .slack_mapping import SlackRelayTarget
 from .slack_relay import SlackReplyRelay
-from .storage import InstructionStore, StoreBusyError
+from .storage import InstructionStore, StoreBusyError, snapshot_state
 from .workspace_discovery import EffectiveWorkspaceCatalog
 from .workspace_registry import TrackedWorkspace, WorkspaceRegistry
 
@@ -1098,7 +1098,32 @@ class MvpWatchdogService:
                 return state, (matches[-1],)
             return state, ()
 
-        state = self._read_state(path, workspace)
+        original = path.read_bytes()
+        state = self._read_state(path, workspace, allow_thread_change=True)
+        if state["session_id"] != workspace.session_id:
+            # Only an exact durable manual registration authorizes this migration.
+            # Automatic discovery still fails closed on a changed registration.
+            registered = WorkspaceRegistry(self.runtime).get(workspace.workspace_id)
+            if not registered.has_same_registration(workspace):
+                raise ValueError("MVP rebind registration changed")
+            cutover = self._parse_timestamp(registered.registered_at)
+            if cutover is None:
+                raise ValueError("MVP rebind registration time is invalid")
+            snapshot_state(path, original)
+            matches = self._matching_stops(workspace, audit_files)
+            # The previous thread's cursor may already be past this thread's first
+            # Stop. Select completions since the explicit registration instead.
+            stops = tuple(event for event in matches if
+                          (self._parse_timestamp(event["hook_completed_at"]) or
+                           datetime.min.replace(tzinfo=timezone.utc)) >= cutover)
+            if replay_latest_stop and not stops and matches:
+                stops = (matches[-1],)
+            state = {**state, "session_id": workspace.session_id,
+                     "audit_cursor": audit_files[-1].name if audit_files else None}
+            # Keep pending Git and all delivery journals unchanged. Existing wake
+            # IDs retain their original thread and refuse cross-thread resends.
+            # Normal cycle publication commits this state after handling Stop.
+            return state, stops
         cursor = state["audit_cursor"]
         candidates = tuple(
             audit_path
@@ -1153,7 +1178,8 @@ class MvpWatchdogService:
             }
         )
 
-    def _read_state(self, path: Path, workspace: TrackedWorkspace) -> Dict[str, Any]:
+    def _read_state(self, path: Path, workspace: TrackedWorkspace, *,
+                    allow_thread_change: bool = False) -> Dict[str, Any]:
         with path.open("r", encoding="utf-8") as handle:
             state = json.load(handle)
         legacy_keys = frozenset(
@@ -1169,13 +1195,14 @@ class MvpWatchdogService:
         )
         if (
             isinstance(state, dict)
-            and state.get("schema_version") == 1
-            and frozenset(state) == legacy_keys
+            and type(state.get("schema_version")) is int
+            and state["schema_version"] == 1
+            and legacy_keys <= frozenset(state)
         ):
             state = {
                 **state,
                 "schema_version": MVP_STATE_SCHEMA_VERSION,
-                "last_remote_oid": None,
+                "last_remote_oid": state.get("last_remote_oid"),
             }
         expected_keys = frozenset(
             {
@@ -1189,15 +1216,19 @@ class MvpWatchdogService:
                 "pending_remote_detected_at",
             }
         )
-        if not isinstance(state, dict) or frozenset(state) != expected_keys:
+        if not isinstance(state, dict) or not expected_keys <= frozenset(state):
             raise ValueError("MVP workspace state is malformed")
         if (
-            state["schema_version"] != MVP_STATE_SCHEMA_VERSION
+            type(state["schema_version"]) is not int
+            or state["schema_version"] != MVP_STATE_SCHEMA_VERSION
             or state["workspace_id"] != workspace.workspace_id
             or state["repo_root"] != str(workspace.repo_root)
-            or state["session_id"] != workspace.session_id
+            or (not allow_thread_change and state["session_id"] != workspace.session_id)
         ):
             raise ValueError("MVP workspace state does not match registration")
+        if (not isinstance(state["session_id"], str)
+                or str(uuid.UUID(state["session_id"])) != state["session_id"]):
+            raise ValueError("MVP workspace state has an invalid thread")
         cursor = state["audit_cursor"]
         if cursor is not None and (
             not isinstance(cursor, str)

@@ -18,7 +18,7 @@ and launcher capability.
 | Linux x64 executable package | **Hosted native package acceptance verified** | Separate x86-64 ELF built and tested on Ubuntu 22.04 with the same source-free, state-preservation, license/privacy, Stop, lock, and owner fixture gates | Real-user/native-desktop E2E |
 | Linux local desktop | **CI verified preview** | Shared tests, POSIX locking/atomic replacement, standard VS Code/XDG paths, native CLI invocation, Codex binary discovery, and CLI/version smoke tests | Real Linux-desktop VS Code/Codex ownership, hooks, credential store, and full E2E |
 | macOS Apple Silicon source workflow | **Native E2E verified preview** | Exact live ownership where topology is resolvable, trusted Stop/continuation, queue/restart, and Keychain-backed Slack-only notification/reply/dedup | Shared or unnumbered VS Code window topology still fails closed; Outlook acceptance is separate |
-| macOS 15 ARM64 package | **Hosted native package checks verified; developer preview** | No source Python required, stable install/hooks, runtime/profile reuse, native fixture Keychain, foreground lifecycle, and replacement | Manual real-user Keychain/hooks/VS Code acceptance; no Developer ID signature or notarization |
+| macOS 15 ARM64 package | **Developer preview; bounded v0.2.3 real-user E2E verified with a CA override** | Hosted source-free package checks; real-user stable install, Keychain reuse, trusted hooks, exact Slack reply, repeated Stop notification and Git wake in one manual workspace | v0.2.3 needed a CA override and manual rebind recovery; new-version device acceptance is separate; no Developer ID signature or notarization |
 
 Hosted CI is not full E2E validation. A platform advances from **CI verified** to
 **native-probe verified** only after the diagnostic and relevant native probes
@@ -152,8 +152,12 @@ must fail closed rather than fall back to plaintext.
 
 The Apple Silicon source path passed real VS Code/Codex and Keychain Slack
 acceptance. The macOS 15 ARM64 ZIP additionally passes hosted native package
-checks, with Python absent from child execution. Real-user package migration
-and hook/VS Code acceptance are still manual. Intel Macs and older macOS
+checks, with Python absent from child execution. The public v0.2.3 package passed
+real-user foreground Slack-only acceptance for one manual registration, with
+trusted hooks and an explicit system-CA override. Rebinding the thread required
+manual state recovery. Version 0.2.5 adds default CA selection and state-preserving
+manual rebind migration, with native package regressions; that evidence does
+not substitute for new-version device acceptance. Intel Macs and older macOS
 versions are not accepted by this build recipe. An unnumbered/shared VS Code
 window that cannot be correlated still fails closed as `vscode_live_window_unmapped`.
 
