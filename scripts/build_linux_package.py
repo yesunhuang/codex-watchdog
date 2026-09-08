@@ -87,7 +87,7 @@ def main() -> None:
         "--output", str(package / "THIRD_PARTY_LICENSES"),
         "--include-distribution", "pyinstaller", "--include-distribution", "importlib-metadata",
         "--include-distribution", "packaging", "--include-distribution", "setuptools",
-        "--include-distribution", "zipp",
+        "--include-distribution", "zipp", "--include-distribution", "tomli",
     ], check=True)
     analysis = list((build / "work").rglob("Analysis-00.toc"))
     if len(analysis) != 1:
