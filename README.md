@@ -75,28 +75,11 @@ support meanings and the native validation checklist.
   back to Codex (the **Parrot Dog** path).
 - Enforces a zero-Git-mutation boundary in every WatchDog locality.
 
-## Quick start - Apple Silicon developer preview
-
-Download `codex-watchdog-vX.Y.Z-macos-arm64-preview.zip` from
-[GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases), verify
-its entry in `SHA256SUMS.txt`, and extract it. Python is included. This preview
-targets macOS 15 on Apple Silicon and is ad-hoc signed, not notarized.
-
-From the extracted directory:
-
-```sh
-./codex-watchdog --version
-./codex-watchdog macos-install
-"$HOME/Library/Application Support/CodexWatchdog/bin/codex-watchdog" doctor
-```
-
-Existing runtime, routing, and Keychain settings are reused. See the
-[Mac package guide](docs/MACOS_PACKAGE.md) for stable hook installation, normal
-human trust, foreground Slack operation, upgrades, rollback, and manual testing.
-
-## Quick start - Windows x64 beta
+## Quick Start
 
 **Ultra-easy setup:** ask your local Codex to scan this repository and guide you through installation and startup step by step.
+
+### Windows x64 beta
 
 1. Download `codex-watchdog-vX.Y.Z-windows-x64.zip` and
    `SHA256SUMS.txt` from [GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases),
@@ -139,6 +122,44 @@ Notifications, Slack reply relay, Outlook OAuth, Remote-SSH, Duo fallback, and
 source installation are opt-in. See the [Windows package guide](WINDOWS_PACKAGE.md)
 and [detailed setup and operations](docs/SETUP.md) when you need them.
 
+### macOS Apple Silicon developer preview
+
+Download `codex-watchdog-vX.Y.Z-macos-arm64-preview.zip` from
+[GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases), verify
+its entry in `SHA256SUMS.txt`, and extract it. Python is included. This preview
+targets macOS 15 on Apple Silicon and is ad-hoc signed, not notarized.
+
+Stop any running WatchDog before an upgrade. From the extracted directory:
+
+```sh
+./codex-watchdog --version
+./codex-watchdog macos-install
+"$HOME/Library/Application Support/CodexWatchdog/bin/codex-watchdog" doctor
+```
+
+Existing runtime, routing, and Keychain settings are reused. See the
+[Mac package guide](docs/MACOS_PACKAGE.md) for stable hook installation, normal
+human trust, foreground Slack operation, upgrades, rollback, and manual testing.
+
+### Linux source preview
+
+Linux uses a source installation with Python 3.9 or newer, Git, VS Code with
+Codex, and Codex CLI. From this repository's source checkout:
+
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -e .
+codex-watchdog --version
+```
+
+Follow the [Linux source guide](docs/LINUX_SOURCE_WORKFLOW.md) to bind the exact
+existing conversation, review and trust its hooks, and start the foreground
+owner with `linux-run`. Use `linux-release` and wait for release before reopening
+the same conversation in VS Code. This explicit workflow is native E2E verified
+on Ubuntu ARM64; general Linux desktop discovery remains a preview, and no Linux
+binary package is published.
+
 ## Typical workflow
 
 ```text
@@ -170,6 +191,8 @@ inspectable, and not presented as conventional human-only development.
 ## More docs
 
 - [Windows package and first-time setup](WINDOWS_PACKAGE.md)
+- [Mac package, upgrades, and manual testing](docs/MACOS_PACKAGE.md)
+- [Linux source installation and same-thread lifecycle](docs/LINUX_SOURCE_WORKFLOW.md)
 - [Detailed setup and operations](docs/SETUP.md)
 - [Platform support and privacy-safe doctor](docs/PLATFORM_SUPPORT.md)
 - [Security policy and operational boundary](SECURITY.md)

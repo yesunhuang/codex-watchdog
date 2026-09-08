@@ -47,23 +47,20 @@
 | --- | --- |
 | Windows x64 ローカルデスクトップ | **安定版・完全 E2E 検証済みのパッケージ基準実装** |
 | Linux Remote-SSH ターゲット | **実機のリモート経路を検証済み** |
-| Linux ローカルデスクトップ | **CI 検証済みプレビュー。実機デスクトップ E2E は未完了** |
 | Linux の明示的な同一スレッド・ソース実行 | **Ubuntu ARM64 実機 E2E 検証済み** |
+| Linux ローカルデスクトップ | **CI 検証済みプレビュー。実機デスクトップ E2E は未完了** |
 | macOS Apple Silicon ソース実行 | **実機 E2E 検証済み。ウィンドウ構成の制限あり** |
 | macOS 15 ARM64 パッケージ | **開発者プレビュー。ネイティブ CI 検証済み、手動実機検証待ち** |
 
 Linux/macOS のソース版では、POSIX ロックとストレージ、標準 VS Code
 パス、ネイティブ `code --status`、Codex 実行ファイル検出を共有します。
-現時点ではフォアグラウンドのプレビューです。`codex-watchdog doctor`
+現時点ではフォアグラウンドのプレビューです。Apple Silicon にはランタイム同梱の
+ZIP があり、Linux は[明示的なソース実行手順](docs/LINUX_SOURCE_WORKFLOW.md)を
+使います。バックグラウンドサービスのインストーラーは含まれません。
+`codex-watchdog doctor`
 で読み取り専用診断を実行し、`codex-watchdog doctor --export report.json`
-でプライバシー保護済みの診断 JSON を作成できます。詳細は
+でプライバシー保護済みの診断 JSON を作成できます。対応レベルの定義と実機検証項目は
 [プラットフォーム対応と診断](docs/PLATFORM_SUPPORT.md)を参照してください。
-
-Apple Silicon 向け ZIP は [GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases)
-の `codex-watchdog-vX.Y.Z-macos-arm64-preview.zip` です。`SHA256SUMS.txt` を確認して
-展開し、`./codex-watchdog macos-install` を実行します。Python を同梱し、既存の
-ランタイムと Keychain 設定を再利用します。ad-hoc 署名のみで公証は未実施です。
-手動検証と更新の手順は [Mac パッケージガイド](docs/MACOS_PACKAGE.md)を参照してください。
 
 ## 主な機能
 
@@ -77,9 +74,11 @@ Apple Silicon 向け ZIP は [GitHub Releases](https://github.com/yesunhuang/cod
   **Parrot Dog** 中継を任意で利用できます。
 - どの実行環境でも WatchDog による Git 変更を禁止します。
 
-## クイックスタート - Windows x64 ベータ
+## クイックスタート
 
 **いちばん簡単な導入方法：** お使いの Codex にこのリポジトリをスキャンさせ、インストールから起動まで順番に案内してもらってください。
+
+### Windows x64 ベータ
 
 1. [GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases) から
    `codex-watchdog-vX.Y.Z-windows-x64.zip` と `SHA256SUMS.txt` をダウンロードし、
@@ -110,16 +109,55 @@ Apple Silicon 向け ZIP は [GitHub Releases](https://github.com/yesunhuang/cod
    Stop フックの既定の猶予時間は 30 秒です。より長い待機は明示的な
    オプトインであり、通常の完了通知が 10 分遅れることはありません。
 
-アップグレード時には、互換性のある起動プロファイル、既存の WatchDog フックが
-参照するランタイム、または隣接する最新の旧バージョンのランタイムが自動的に
-再利用されます。Slack、Outlook、Duo、OAuth、ワークスペース、通知設定のコピーや
-再入力は不要です。新しいフックを確認・置換し、Codex で信頼するまでは旧バージョン
-のディレクトリを残してください。
+> [!IMPORTANT]
+> アップグレード時には、互換性のある起動プロファイル、既存の WatchDog フックが
+> 参照するランタイム、または隣接する最新の旧バージョンのランタイムが自動的に
+> 再利用されます。Slack、Outlook、Duo、OAuth、ワークスペース、通知設定のコピーや
+> 再入力は不要です。新しいフックを確認・置換し、Codex で信頼するまでは旧バージョン
+> のディレクトリを残してください。
 
 通知、Slack 返信中継、Outlook OAuth、Remote-SSH、Duo フォールバック、ソース
 インストールは必要な場合だけ設定します。詳しくは
 [Windows パッケージガイド](WINDOWS_PACKAGE.md)と
 [詳細なセットアップ・運用ガイド](docs/SETUP.md)を参照してください。
+
+### macOS Apple Silicon 開発者プレビュー
+
+[GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases) から
+`codex-watchdog-vX.Y.Z-macos-arm64-preview.zip` をダウンロードし、
+`SHA256SUMS.txt` の該当チェックサムを確認して展開します。Python を同梱しており、
+対象は Apple Silicon 上の macOS 15 です。ad-hoc 署名のみで、公証は未実施です。
+
+更新前に実行中の WatchDog を停止してください。展開したディレクトリで実行します。
+
+```sh
+./codex-watchdog --version
+./codex-watchdog macos-install
+"$HOME/Library/Application Support/CodexWatchdog/bin/codex-watchdog" doctor
+```
+
+既存のランタイム、ルーティング、Keychain 設定は再利用されます。固定パスへの
+フック導入と手動の信頼、Slack のフォアグラウンド実行、更新、ロールバック、
+手動検証は [Mac パッケージガイド](docs/MACOS_PACKAGE.md)を参照してください。
+
+### Linux ソースプレビュー
+
+Linux ではソースからインストールします。Python 3.9 以降、Git、Codex を導入した
+VS Code、Codex CLI が必要です。このリポジトリのソースディレクトリで実行します。
+
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -e .
+codex-watchdog --version
+```
+
+[Linux ソースガイド](docs/LINUX_SOURCE_WORKFLOW.md)に従って正確な既存の会話を
+明示的にバインドし、フックを確認して信頼した後、`linux-run` でフォアグラウンドの
+制御プロセスを起動します。VS Code で同じ会話を開き直す前に `linux-release` を実行し、
+解放の完了を待ってください。この明示的な手順は Ubuntu ARM64 で実機 E2E 検証済みです。
+一般的な Linux デスクトップ検出は引き続きプレビューで、Linux のバイナリパッケージは
+公開していません。
 
 ## 典型的な流れ
 
@@ -152,12 +190,15 @@ Slack で往復を中継します。
 ## 関連ドキュメント
 
 - [Windows パッケージと初回セットアップ](WINDOWS_PACKAGE.md)
+- [Mac パッケージ、更新、手動検証](docs/MACOS_PACKAGE.md)
+- [Linux ソース導入と同一スレッドのライフサイクル](docs/LINUX_SOURCE_WORKFLOW.md)
 - [詳細なセットアップと運用](docs/SETUP.md)
 - [プラットフォーム対応とプライバシー安全な診断](docs/PLATFORM_SUPPORT.md)
 - [セキュリティポリシーと運用境界](SECURITY.md)
 - [アーキテクチャ決定](doc/architecture.md)
 - [画像の出典](ASSETS.md)と[サードパーティ通知](THIRD_PARTY_NOTICES.md)
 - [実装計画](doc/codex_watchdog_implementation_plan.md)
+- [過去の実現可能性調査](doc/probe_report.md)
 - [Dogfooding と開発履歴](doc/Progress/)
 
 > [!NOTE]

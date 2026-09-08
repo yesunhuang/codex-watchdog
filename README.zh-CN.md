@@ -44,22 +44,18 @@
 | --- | --- |
 | Windows x64 本地桌面 | **稳定、已完成端到端验证的打包参考实现** |
 | Linux Remote-SSH 目标 | **真实远程路径已验证** |
-| Linux 本地桌面 | **CI 已验证的预览版；仍需真实桌面端到端验证** |
 | Linux 显式绑定的同线程源码工作流 | **已在 Ubuntu ARM64 完成真实端到端验证** |
+| Linux 本地桌面 | **CI 已验证的预览版；仍需真实桌面端到端验证** |
 | macOS Apple Silicon 源码工作流 | **已完成真实端到端验证；仍有窗口拓扑限制** |
 | macOS 15 ARM64 安装包 | **开发者预览；原生安装包 CI 已验证，等待手动实机验收** |
 
 Linux 与 macOS 源码安装现在共用 POSIX 锁与存储、标准 VS Code 路径、
 原生 `code --status` 和 Codex 可执行文件发现，但仍是前台预览版。
+Apple Silicon 提供自带运行环境的 ZIP；Linux 使用
+[显式绑定的源码工作流](docs/LINUX_SOURCE_WORKFLOW.md)。目前不提供后台服务安装器。
 可运行 `codex-watchdog doctor` 进行只读检查，或用
 `codex-watchdog doctor --export report.json` 生成不含隐私信息的诊断文件。
-详见[平台支持与诊断](docs/PLATFORM_SUPPORT.md)。
-
-Apple Silicon 用户可从 [GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases)
-下载 `codex-watchdog-vX.Y.Z-macos-arm64-preview.zip`，校验 `SHA256SUMS.txt`
-后解压，并运行 `./codex-watchdog macos-install`。安装包自带 Python，复用已有
-运行目录和 Keychain 设置。预览版仅使用 ad-hoc 签名，尚未公证；手动测试步骤见
-[Mac 安装包指南](docs/MACOS_PACKAGE.md)。
+支持级别的具体含义和原生验证清单见[平台支持与诊断](docs/PLATFORM_SUPPORT.md)。
 
 ## 它能做什么
 
@@ -72,9 +68,11 @@ Apple Silicon 用户可从 [GitHub Releases](https://github.com/yesunhuang/codex
   **Parrot Dog（鹦鹉狗）**路径。
 - 在所有运行位置强制遵守“WatchDog 不修改 Git”的边界。
 
-## 快速开始 - Windows x64 Beta
+## 快速开始
 
 **超简单安装运行：** 让你的 Codex 扫描本仓库，并一步步引导你完成安装和启动。
+
+### Windows x64 Beta
 
 1. 从 [GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases)
    下载 `codex-watchdog-vX.Y.Z-windows-x64.zip` 和 `SHA256SUMS.txt`，校验后
@@ -103,14 +101,51 @@ Apple Silicon 用户可从 [GitHub Releases](https://github.com/yesunhuang/codex
    Stop Hook 的默认宽限时间为 30 秒。更长的等待时间必须显式启用，普通完成
    通知不会再因此延迟十分钟。
 
-升级时，程序会自动复用兼容的启动配置、现有 WatchDog Hook 所引用的运行时，
-或相邻的最新旧版本运行时；不会复制或要求重新输入 Slack、Outlook、Duo、OAuth、
-工作区或通知设置。在完成新 Hook 的检查、替换并在 Codex 中重新信任之前，请保留
-旧版本目录。
+> [!IMPORTANT]
+> 升级时，程序会自动复用兼容的启动配置、现有 WatchDog Hook 所引用的运行时，
+> 或相邻的最新旧版本运行时；不会复制或要求重新输入 Slack、Outlook、Duo、OAuth、
+> 工作区或通知设置。在完成新 Hook 的检查、替换并在 Codex 中重新信任之前，请保留
+> 旧版本目录。
 
 通知、Slack 回复转发、Outlook OAuth、Remote-SSH、Duo 回退和源码安装都是
 按需配置。需要时请阅读 [Windows 打包与安装说明](WINDOWS_PACKAGE.md)和
 [详细设置与运行文档](docs/SETUP.md)。
+
+### macOS Apple Silicon 开发者预览版
+
+从 [GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases)
+下载 `codex-watchdog-vX.Y.Z-macos-arm64-preview.zip`，核对 `SHA256SUMS.txt`
+中的对应校验值后解压。安装包自带 Python，面向 macOS 15 上的 Apple Silicon，
+仅使用 ad-hoc 签名，尚未公证。
+
+升级前请先停止正在运行的 WatchDog。在解压目录中执行：
+
+```sh
+./codex-watchdog --version
+./codex-watchdog macos-install
+"$HOME/Library/Application Support/CodexWatchdog/bin/codex-watchdog" doctor
+```
+
+程序会复用已有运行目录、路由和 Keychain 设置。固定路径的 Hook 安装、手动信任、
+Slack 前台运行、升级、回滚和手动测试步骤见
+[Mac 安装包指南](docs/MACOS_PACKAGE.md)。
+
+### Linux 源码预览版
+
+Linux 使用源码安装，需要 Python 3.9 或更新版本、Git、带 Codex 的 VS Code
+以及 Codex CLI。在本仓库的源码目录中执行：
+
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -e .
+codex-watchdog --version
+```
+
+按照 [Linux 源码指南](docs/LINUX_SOURCE_WORKFLOW.md)显式绑定准确的现有会话，
+检查并信任其 Hook，再用 `linux-run` 启动前台控制进程。在 VS Code 中重新打开
+同一会话前，请运行 `linux-release` 并等待释放完成。该显式工作流已在 Ubuntu ARM64
+完成真实端到端验证；通用 Linux 桌面发现仍是预览功能，目前不提供 Linux 二进制安装包。
 
 ## 典型工作流
 
@@ -139,12 +174,15 @@ Codex -> Parrot Dog（Slack）-> 人 -> Parrot Dog -> 准确的 Codex 线程
 ## 更多文档
 
 - [Windows 打包与首次设置](WINDOWS_PACKAGE.md)
+- [Mac 安装包、升级与手动测试](docs/MACOS_PACKAGE.md)
+- [Linux 源码安装与同线程生命周期](docs/LINUX_SOURCE_WORKFLOW.md)
 - [详细设置与运行](docs/SETUP.md)
 - [平台支持与隐私安全诊断](docs/PLATFORM_SUPPORT.md)
 - [安全策略与运行边界](SECURITY.md)
 - [架构决策](doc/architecture.md)
 - [图片来源](ASSETS.md)与[第三方声明](THIRD_PARTY_NOTICES.md)
 - [实现计划](doc/codex_watchdog_implementation_plan.md)
+- [历史可行性探测](doc/probe_report.md)
 - [Dogfooding 与开发历史](doc/Progress/)
 
 > [!NOTE]
