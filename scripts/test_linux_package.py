@@ -196,6 +196,21 @@ def main() -> None:
         run([executable, "doctor", "--export", export], accepted=(0, 1, 2))
         assert str(home) not in export.read_text() and str(ROOT) not in export.read_text()
         assert not config.exists() and not codex.exists()
+        # api.test accepts no credentials and never posts a Slack message. Exercise
+        # the actual frozen urllib/TLS stack, including its current-host CA roots.
+        tls_environment = {**environment, "CODEX_WATCHDOG_SLACK_WEBHOOK_URL": "https://slack.com/api/api.test"}
+        tls_command = [executable, "--runtime", root / "credential-free TLS probe",
+                       "notify-test", "--id", "linux-package-tls-probe"]
+        tls_result = run(tls_command, accepted=(0, 1), env=tls_environment)
+        if tls_result.returncode:
+            for host_ca in (Path("/etc/ssl/certs/ca-certificates.crt"), Path("/etc/pki/tls/cert.pem")):
+                if host_ca.is_file():
+                    retry = run([*tls_command[:-1], "explicit-host-ca-probe"], accepted=(0, 1),
+                                env={**tls_environment, "SSL_CERT_FILE": str(host_ca)})
+                    print(json.dumps({"default_ca_probe": "failed", "explicit_host_ca_probe_exit": retry.returncode}), flush=True)
+                    break
+        assert tls_result.returncode == 0, "credential-free HTTPS failed with default CA discovery"
+        assert json.loads(tls_result.stdout)["status"] == "sent"
         fresh = home / "fresh installation"
         fresh_env = {**environment, "CODEX_WATCHDOG_LINUX_CONFIG_DIR": str(fresh)}
         assert not json.loads(run([executable, "linux-install"], env=fresh_env).stdout)["runtime_reused"]
@@ -373,6 +388,7 @@ def main() -> None:
               "architecture": manifest["architecture"], "source_commit": manifest["source_commit"],
               "minimum_glibc": manifest["minimum_glibc"], "host_glibc": platform.libc_ver()[1],
               "glibc_requirement_verified": True,
+              "credential_free_default_ca_https": True,
               "python_hidden": True, "source_free_layout": True, "elf_architecture_verified": True,
               "dependency_and_native_license_inventory": True, "own_bytecode_privacy": True,
               "doctor_privacy": True, "manual_registration_migration": True,
