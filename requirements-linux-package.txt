@@ -1,4 +1,4 @@
-# Linux native ARM64/x64 package recipe; Python 3.12, pip 26.0.1.
+# Linux native ARM64/x64 package recipe; Python 3.12.14, pip 26.0.1.
 # Install the project afterward with --no-deps --no-build-isolation.
 altgraph==0.17.5
 certifi==2026.7.22

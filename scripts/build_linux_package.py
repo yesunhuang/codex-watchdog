@@ -37,8 +37,8 @@ def main() -> None:
         raise SystemExit("Build natively on Linux ARM64 or x86-64.")
     import PyInstaller
 
-    if PyInstaller.__version__ != "6.22.2" or sys.version_info[:2] != (3, 12):
-        raise SystemExit("This recipe requires Python 3.12 and PyInstaller 6.22.2.")
+    if PyInstaller.__version__ != "6.22.2" or sys.version_info[:3] != (3, 12, 14):
+        raise SystemExit("This recipe requires Python 3.12.14 and PyInstaller 6.22.2.")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=ROOT / "dist")
     args = parser.parse_args()

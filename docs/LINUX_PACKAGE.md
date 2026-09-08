@@ -124,7 +124,7 @@ runtime, backups, and credentials unless you intend to remove that user state.
 
 ## Build and package acceptance
 
-Use native Python 3.12 and pip 26.0.1, install `requirements-linux-package.txt`,
+Use native Python 3.12.14 and pip 26.0.1, install `requirements-linux-package.txt`,
 then install this project with `--no-deps --no-build-isolation`. Run
 `scripts/build_linux_package.py`, followed by
 `scripts/test_linux_package.py --package dist/codex-watchdog-vX.Y.Z-linux-ARCH`.

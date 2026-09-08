@@ -298,7 +298,8 @@ def main() -> None:
         (runtime / "linux/status.json").unlink()
         def start_owner():
             return subprocess.Popen([str(installed), "linux-run", "--interval", "1", "--codex-executable", str(fake_codex)],
-                                    cwd=work, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                                    cwd=work, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    text=True, start_new_session=True)
         process = start_owner()
         try:
             wait_state(runtime, "owned", process)
@@ -313,8 +314,10 @@ def main() -> None:
             assert json.loads(foreign.stdout)["status"] == "rejected"
             with sqlite3.connect(codex / "queue_1.sqlite") as db:
                 assert db.execute("SELECT COUNT(*) FROM queued_items").fetchone()[0] == 1
-            # Crash only our isolated controller; EOF closes its fixture child's writer.
-            process.kill(); process.communicate(timeout=15)
+            # A one-file executable has a bootstrap parent and a controller child.
+            # Crash only this fixture's new process group, including its fake server.
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate(timeout=15)
             deadline = time.monotonic() + 15
             while True:
                 with lock.open("rb") as handle:
@@ -342,7 +345,8 @@ def main() -> None:
                 try:
                     process.communicate(timeout=15)
                 except subprocess.TimeoutExpired:
-                    process.kill(); process.communicate(timeout=10)
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate(timeout=10)
         methods = [json.loads(line) for line in (codex / "fixture-methods.jsonl").read_text().splitlines()]
         resumes = [item for item in methods if item["method"] == "thread/resume"]
         assert len(resumes) == 2 and all(item["params"] == {"threadId": THREAD, "excludeTurns": True} for item in resumes)
