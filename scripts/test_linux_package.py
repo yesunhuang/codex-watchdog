@@ -12,7 +12,6 @@ import platform
 import shlex
 import shutil
 import signal
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -162,10 +161,25 @@ def main() -> None:
     parser.add_argument("--package", type=Path, required=True)
     parser.add_argument("--fixture-python", type=Path, default=Path(sys.executable),
                         help="external interpreter for the protocol fixture (defaults to the harness Python)")
+    parser.add_argument("--archive-python", type=Path,
+                        help="optional matching Python minor version for bundled bytecode inspection")
+    parser.add_argument("--archive-only", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     assert sys.platform == "linux", "native Linux acceptance required"
     package = args.package.resolve()
-    manifest = validate_archive(package)
+    if args.archive_python:
+        archive_python = args.archive_python.absolute()
+        assert archive_python.is_file()
+        probe = subprocess.run([str(archive_python), str(Path(__file__).resolve()),
+                                "--package", str(package), "--archive-only"], check=True,
+                               capture_output=True, text=True, timeout=60)
+        manifest = json.loads(probe.stdout)
+    else:
+        manifest = validate_archive(package)
+    if args.archive_only:
+        print(json.dumps(manifest, sort_keys=True))
+        return
+    import sqlite3
     output_log = []
     with tempfile.TemporaryDirectory(prefix="watchdog-linux-package-") as temporary:
         root = Path(temporary).resolve()

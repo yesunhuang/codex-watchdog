@@ -15,7 +15,7 @@ and launcher capability.
 | Linux Remote-SSH execution target | **Native-probe and real remote path verified** | Compact remote state/thread/Git/queue logic and notification/relay paths on a real Linux target | More host distributions and reconnect patterns |
 | Linux explicit same-thread source owner | **Native E2E verified on Ubuntu ARM64** | Exact operator binding, trusted Stop, actual client detach, same-thread queue/restart/context, idle release, and VS Code reattachment | Automatic Linux desktop discovery remains separate |
 | Linux ARM64 executable package | **Hosted and real Ubuntu ARM64 package acceptance verified** | Actual ZIP with Python hidden: manifests, native licenses, privacy, startup, source-runtime reuse, replacement, stable hooks, production Stop and exact-owner queue/restart/release fixtures | Real-user packaged-hook trust and full detached package lifecycle remain distinct from fixture acceptance |
-| Linux x64 executable package | **Hosted native package acceptance verified** | Separate x86-64 ELF built and tested on Ubuntu 22.04 with the same source-free, state-preservation, license/privacy, Stop, lock, and owner fixture gates | Real-user/native-desktop E2E |
+| Linux x64 executable package | **Hosted and real RHEL 8.10 package acceptance verified** | x86-64 ELF built on UBI 8/glibc 2.28 and tested on Ubuntu 22.04, UBI 8, and an isolated real RHEL 8.10 host: source-free startup, state preservation, HTTPS trust, licenses/privacy, Stop, locks and owner fixtures | Real-user/native-desktop E2E |
 | Linux local desktop | **CI verified preview** | Shared tests, POSIX locking/atomic replacement, standard VS Code/XDG paths, native CLI invocation, Codex binary discovery, and CLI/version smoke tests | Real Linux-desktop VS Code/Codex ownership, hooks, credential store, and full E2E |
 | macOS Apple Silicon source workflow | **Native E2E verified preview** | Exact live ownership where topology is resolvable, trusted Stop/continuation, queue/restart, and Keychain-backed Slack-only notification/reply/dedup | Shared or unnumbered VS Code window topology still fails closed; Outlook acceptance is separate |
 | macOS 15 ARM64 package | **Developer preview; bounded v0.2.3 real-user E2E verified with a CA override** | Hosted source-free package checks; real-user stable install, Keychain reuse, trusted hooks, exact Slack reply, repeated Stop notification and Git wake in one manual workspace | v0.2.3 needed a CA override and manual rebind recovery; new-version device acceptance is separate; no Developer ID signature or notarization |
@@ -29,8 +29,9 @@ restart/recovery acceptance.
 The Apple Silicon ZIP is a published developer preview; see the
 [Mac package guide](MACOS_PACKAGE.md). Linux ARM64 and x64 have
 [self-contained executable ZIPs](LINUX_PACKAGE.md), with native package checks
-on Ubuntu 22.04 and additional real-machine ARM64 acceptance on Ubuntu with
-glibc 2.39. The [explicit same-thread source workflow](LINUX_SOURCE_WORKFLOW.md)
+on Ubuntu 22.04, plus UBI 8/glibc 2.28 for x64. Additional isolated real-machine
+acceptance covers x64 RHEL 8.10/glibc 2.28 and ARM64 Ubuntu/glibc 2.39.
+The [explicit same-thread source workflow](LINUX_SOURCE_WORKFLOW.md)
 and existing Remote-SSH helper remain available. Windows is the packaged stable reference and the
 behavior that cross-platform changes must not regress.
 

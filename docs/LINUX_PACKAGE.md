@@ -176,3 +176,11 @@ the original conversation. The packaged owner waits and releases while VS Code
 retains its writer lock. Existing trusted source hooks remain unchanged in that
 check. Real-user packaged-hook trust and detached package lifecycle acceptance
 are separate from these tests and the already accepted source lifecycle.
+
+The x64 executable also passes isolated package acceptance on a real RHEL 8.10
+host with glibc 2.28, including a 30-second production Stop, HTTPS trust,
+installation/replacement, manual registration migration, and exact-owner queue,
+restart and release fixtures. No real user thread or provider configuration is
+used for that test. An external harness may use `--archive-python` to select a
+matching Python 3.12 bytecode inspector separately from its runtime-fixture
+interpreter. Every packaged child still runs with source Python hidden.

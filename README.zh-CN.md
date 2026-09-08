@@ -46,7 +46,7 @@
 | Linux Remote-SSH 目标 | **真实远程路径已验证** |
 | Linux 显式绑定的同线程源码工作流 | **已在 Ubuntu ARM64 完成真实端到端验证** |
 | Linux ARM64 可执行安装包 | **已在 Ubuntu ARM64 实机完成安装包验收；使用显式同线程工作流** |
-| Linux x64 可执行安装包 | **托管原生安装包验收通过；真实用户桌面端到端验证待完成** |
+| Linux x64 可执行安装包 | **Ubuntu 与 RHEL 8.10 原生安装包验收通过；真实用户桌面端到端验证待完成** |
 | Linux 本地桌面 | **CI 已验证的预览版；仍需真实桌面端到端验证** |
 | macOS Apple Silicon 源码工作流 | **已完成真实端到端验证；仍有窗口拓扑限制** |
 | macOS 15 ARM64 安装包 | **开发者预览；v0.2.3 在指定范围内通过真实用户 E2E 验证，需 CA 临时配置** |
@@ -166,7 +166,8 @@ watchdog="${XDG_DATA_HOME:-$HOME/.local/share}/codex-watchdog/bin/codex-watchdog
 [Linux 安装包指南](docs/LINUX_PACKAGE.md)。
 
 ARM64 安装包已在真实 Ubuntu ARM64 机器上完成原生验收；x64 安装包已通过托管
-原生验收。这些检查包含隔离的所有权与 Stop 测试。通用 Linux 桌面发现仍是 CI 已验证
+Ubuntu/UBI 验收和真实 RHEL 8.10 机器上的隔离验收。这些检查包含 HTTPS 信任、
+所有权与 Stop 测试。通用 Linux 桌面发现仍是 CI 已验证
 的预览功能；安装包验收不能替代真实用户的 Hook 信任或桌面端到端验收。
 
 #### 可选的 Linux 源码安装

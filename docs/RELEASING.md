@@ -29,8 +29,10 @@ its actual executable with Python hidden from PATH. Gates cover ELF identity,
 all shipped hashes and native dependency licenses, privacy, fresh installation,
 source-runtime reuse, replacement and stable hooks, 30-second fixture Stop,
 kernel ownership locks, exact-thread fixture queue/restart/release, and read-only
-Git observation. Real-user Spark acceptance is recorded separately from these
-isolated protocol fixtures; hosted x64 checks do not imply desktop E2E.
+Git observation and credential-free default-CA HTTPS. The disposable UBI
+acceptance container receives its own temporary machine ID because the base
+image omits that binding prerequisite. Real-machine Ubuntu ARM64 and RHEL 8.10
+acceptance remains distinct from general desktop E2E.
 
 The reusable `macos-package.yml` retains the pinned Apple Silicon build and
 isolated Keychain/upgrade/hook gates. It additionally requires the installed

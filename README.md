@@ -49,7 +49,7 @@ watches, wakes, relays, and notifies without becoming another AI agent.
 | Linux Remote-SSH target | **Real remote path verified** |
 | Linux explicit same-thread source owner | **Native E2E verified on Ubuntu ARM64** |
 | Linux ARM64 executable package | **Native package acceptance on Ubuntu ARM64; explicit same-thread workflow** |
-| Linux x64 executable package | **Hosted native package acceptance; real-user desktop E2E pending** |
+| Linux x64 executable package | **Native package acceptance on Ubuntu and RHEL 8.10; real-user desktop E2E pending** |
 | Linux local desktop | **CI-verified preview; native desktop E2E pending** |
 | macOS Apple Silicon source workflow | **Native E2E verified; topology limitations remain** |
 | macOS 15 ARM64 package | **Developer preview; bounded v0.2.3 real-user E2E verified with a CA workaround** |
@@ -179,8 +179,8 @@ in Codex. The stable executable path supports spaces. See the
 foreground `linux-run`, idle `linux-release`, upgrades, and rollback.
 
 ARM64 packages pass native acceptance on a real Ubuntu ARM64 machine; x64
-packages pass hosted native acceptance. These checks include isolated owner and
-Stop fixtures. General Linux desktop discovery remains a CI-verified preview;
+packages pass hosted Ubuntu/UBI acceptance and isolated acceptance on a real
+RHEL 8.10 machine. These checks include HTTPS trust, owner and Stop fixtures. General Linux desktop discovery remains a CI-verified preview;
 packaging does not replace real-user hook trust or desktop E2E acceptance.
 
 #### Optional Linux source installation
