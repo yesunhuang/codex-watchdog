@@ -26,6 +26,12 @@ def rpm_license_record(destination: Path, source: Path) -> dict:
         ["rpm", "-q", "--queryformat", "%{VERSION}-%{RELEASE}", package], text=True).strip()
     paths = subprocess.check_output(["rpm", "-q", "--licensefiles", package], text=True).splitlines()
     licenses = sorted({Path(path).resolve(strict=True) for path in paths if Path(path).is_file()})
+    public_domain = (not licenses and package == "sqlite-libs"
+                     and re.fullmatch(r"libsqlite3\.so(?:\.[0-9]+)*", source.name) is not None
+                     and subprocess.check_output(["rpm", "-q", "--queryformat", "%{LICENSE}", package],
+                                                 text=True).strip() == "Public Domain")
+    if public_domain:
+        licenses = [Path(__file__).resolve().parents[1] / "packaging/licenses/sqlite-public-domain.txt"]
     if not licenses:
         raise RuntimeError("RPM native-library license text is missing: " + package)
     files = []
@@ -36,7 +42,8 @@ def rpm_license_record(destination: Path, source: Path) -> dict:
         shutil.copyfile(license_path, target)
         files.append({"path": relative, "sha256": hashlib.sha256(target.read_bytes()).hexdigest()})
     return {"name": "rpm-" + package, "version": version,
-            "license": "See copied RPM license text", "url": "https://access.redhat.com/articles/4238681",
+            "license": "Public Domain" if public_domain else "See copied RPM license text",
+            "url": "https://www.sqlite.org/copyright.html" if public_domain else "https://access.redhat.com/articles/4238681",
             "license_files": files}
 
 

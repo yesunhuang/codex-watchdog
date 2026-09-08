@@ -9,12 +9,19 @@ Choose `codex-watchdog-vX.Y.Z-linux-arm64.zip` for `aarch64`, or
 [GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases).
 Verify its entry in `SHA256SUMS.txt` before extracting the complete ZIP.
 
-The release recipe builds each architecture natively on pinned Ubuntu 22.04
-runners. Ubuntu 22.04 or newer with glibc is the package target; Alpine/musl and
-older glibc are not supported by this recipe. Linux packages still use the
-operating system's glibc and ELF loader. See
+From v0.2.6, the x64 package targets RHEL 8.10 and Ubuntu 22.04 or newer. It is
+built natively against glibc 2.28 in a pinned Red Hat UBI 8 container, with the
+same Python 3.12.14 and application dependency versions. ARM64 continues to
+target Ubuntu 22.04 or newer with glibc 2.35. Alpine/musl is not supported by
+these recipes. Linux packages still use the operating system's glibc and ELF
+loader. The manifest records the verified minimum glibc required by every
+bundled native library and the bootloader. See
 [PyInstaller's Linux compatibility guidance](https://pyinstaller.org/en/stable/usage.html#making-gnu-linux-apps-forward-compatible).
 An executable temporary directory is needed for the bundled runtime to unpack.
+
+The older v0.2.5 x64 package needs glibc 2.35 and fails before startup on RHEL 8.
+Use v0.2.6 or newer there. The compatible package uses the existing installation
+and state-preservation procedure below; no host glibc replacement is involved.
 
 Packaging does not expand thread discovery. The explicit same-thread workflow
 is separate from general Linux desktop discovery, which remains a CI-verified
@@ -124,13 +131,27 @@ runtime, backups, and credentials unless you intend to remove that user state.
 
 ## Build and package acceptance
 
-Use native Python 3.12.14 and pip 26.0.1, install `requirements-linux-package.txt`,
-then install this project with `--no-deps --no-build-isolation`. Run
-`scripts/build_linux_package.py`, followed by
-`scripts/test_linux_package.py --package dist/codex-watchdog-vX.Y.Z-linux-ARCH`.
+For x64, use `packaging/linux-rhel8.Dockerfile` from a clean public checkout.
+It pins the UBI 8.10 image, verifies the Python 3.12.14 source checksum, and
+installs the pinned package dependencies. Build the image with
+`docker build --file packaging/linux-rhel8.Dockerfile --tag watchdog-rhel8-builder .`.
+Mount that checkout at `/workspace` when running the image, install the project
+with `python -m pip install --no-deps --no-build-isolation .`, and run
+`python scripts/build_linux_package.py` inside the container. The
+[Linux package workflow](../.github/workflows/linux-package.yml) gives the full
+build and acceptance commands, including output ownership for hosted runners.
+
+ARM64 retains native Ubuntu 22.04, Python 3.12.14 and pip 26.0.1. Install
+`requirements-linux-package.txt`, then the project with
+`--no-deps --no-build-isolation`, and run `scripts/build_linux_package.py`.
+For either architecture, run `scripts/test_linux_package.py --package
+dist/codex-watchdog-vX.Y.Z-linux-ARCH` using an external harness interpreter.
+The packaged child processes run with source Python hidden. x64 must pass the
+same executable acceptance on both Ubuntu 22.04 and UBI 8's glibc 2.28.
 
 The manifest records the architecture, version, source commit, build runtime,
-and every shipped file digest. `THIRD_PARTY_LICENSES/inventory.json` identifies
+minimum glibc requirement, and every shipped file digest.
+`THIRD_PARTY_LICENSES/inventory.json` identifies
 Python dependencies, CPython, the PyInstaller bootloader, and every collected
 native library with its license text and hash. The recipe refuses an unaccounted
 native library. Package acceptance checks archive membership, hashes, ELF

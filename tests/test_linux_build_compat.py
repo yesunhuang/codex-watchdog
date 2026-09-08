@@ -71,3 +71,26 @@ def test_rpm_missing_license_fails_closed(tmp_path, monkeypatch):
     source, _ = rpm_fixture(tmp_path, monkeypatch, present=False)
     with pytest.raises(RuntimeError, match='license text is missing'):
         licenses.rpm_license_record(tmp_path / 'inventory', source)
+
+
+@pytest.mark.parametrize('declaration', ['Public Domain', 'Different license'])
+def test_sqlite_fallback_requires_exact_rpm_public_domain_declaration(tmp_path, monkeypatch, declaration):
+    source, _ = rpm_fixture(tmp_path, monkeypatch, owners='sqlite-libs\n', present=False)
+    sqlite = source.with_name('libsqlite3.so.0.8.6')
+    source.rename(sqlite)
+    def query(args, **kwargs):
+        if '--licensefiles' in args:
+            return ''
+        if '%{LICENSE}' in args:
+            return declaration
+        return '3.26.0-vendor-update'
+    monkeypatch.setattr(licenses.subprocess, 'check_output', query)
+    destination = tmp_path / 'inventory'
+    if declaration != 'Public Domain':
+        with pytest.raises(RuntimeError, match='license text is missing'):
+            licenses.rpm_license_record(destination, sqlite)
+    else:
+        record = licenses.rpm_license_record(destination, sqlite)
+        assert record['license'] == 'Public Domain'
+        copied = destination / record['license_files'][0]['path']
+        assert 'https://www.sqlite.org/copyright.html' in copied.read_text()

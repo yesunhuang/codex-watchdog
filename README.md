@@ -156,8 +156,9 @@ human trust, foreground Slack operation, upgrades, rollback, and manual testing.
 Download `codex-watchdog-vX.Y.Z-linux-arm64.zip` for `aarch64`, or
 `codex-watchdog-vX.Y.Z-linux-x64.zip` for `x86_64`, from
 [GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases). Check
-`SHA256SUMS.txt` and extract the complete ZIP. These packages target Ubuntu 22.04
-or newer with glibc. Python, pip, a virtualenv, and a source checkout are not
+`SHA256SUMS.txt` and extract the complete ZIP. From v0.2.6, x64 targets RHEL 8.10
+and Ubuntu 22.04 or newer, with a glibc 2.28 baseline. ARM64 retains Ubuntu 22.04
+or newer with glibc 2.35. Python, pip, a virtualenv, and a source checkout are not
 needed; Git and Codex CLI/VS Code remain external prerequisites.
 
 Release/stop a running WatchDog before an upgrade. From the extracted directory:

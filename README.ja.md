@@ -155,7 +155,9 @@ CA 環境変数で実施しました。ネイティブのパッケージ検証�
 [GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases) から
 `aarch64` 用の `codex-watchdog-vX.Y.Z-linux-arm64.zip`、または `x86_64` 用の
 `codex-watchdog-vX.Y.Z-linux-x64.zip` をダウンロードします。`SHA256SUMS.txt`
-を確認して ZIP 全体を展開してください。glibc を使う Ubuntu 22.04 以降が対象です。
+を確認して ZIP 全体を展開してください。v0.2.6 以降の x64 は RHEL 8.10 と
+Ubuntu 22.04 以降を対象とし、glibc 2.28 を基準にビルドします。ARM64 は引き続き
+Ubuntu 22.04 以降が対象で、glibc 2.35 が必要です。
 Python、pip、仮想環境、ソースの取得は不要ですが、Git と Codex CLI/VS Code は
 別途必要です。
 

@@ -144,7 +144,9 @@ Slack 前台运行、升级、回滚和手动测试步骤见
 从 [GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases) 下载
 `codex-watchdog-vX.Y.Z-linux-arm64.zip`（`aarch64`）或
 `codex-watchdog-vX.Y.Z-linux-x64.zip`（`x86_64`），核对 `SHA256SUMS.txt` 后
-完整解压。安装包面向使用 glibc 的 Ubuntu 22.04 及更新版本，无需另装 Python、pip、
+完整解压。从 v0.2.6 起，x64 面向 RHEL 8.10 和 Ubuntu 22.04 及更新版本，
+以 glibc 2.28 为基线；ARM64 仍面向 Ubuntu 22.04 及更新版本，需 glibc 2.35。
+无需另装 Python、pip、
 虚拟环境或源码；Git 和 Codex CLI/VS Code 仍需单独安装。
 
 升级前请先释放或停止正在运行的 WatchDog。在解压目录中执行：

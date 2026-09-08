@@ -15,9 +15,16 @@ published checksum, lets that executable create the saved launcher profile,
 then verifies the candidate preserves the profile, hooks, provider stores,
 settings, and retained journal bytes.
 
-The reusable `linux-package.yml` workflow builds ARM64 on `ubuntu-22.04-arm`
-and x64 on `ubuntu-22.04`, using Python 3.12.14, pip 26.0.1, and the pinned
-`requirements-linux-package.txt`. Each job runs the full source suite and tests
+The reusable `linux-package.yml` workflow builds ARM64 on `ubuntu-22.04-arm`.
+The x64 runner uses a digest-pinned Red Hat UBI 8.10 build container with glibc
+2.28, then tests the actual package on both Ubuntu 22.04 and UBI 8. Python
+3.12.14, pip 26.0.1, and `requirements-linux-package.txt` stay pinned. The UBI
+recipe verifies the official Python source checksum and retains vendor RPM
+license records. SQLite's public-domain notice is included only when its exact
+RPM/library identity and declaration agree. Every bundled ELF dependency is
+checked against the architecture's glibc ceiling before packaging. The derived
+minimum is recorded in the manifest and acceptance receipt. Each job runs the
+full source suite and tests
 its actual executable with Python hidden from PATH. Gates cover ELF identity,
 all shipped hashes and native dependency licenses, privacy, fresh installation,
 source-runtime reuse, replacement and stable hooks, 30-second fixture Stop,
@@ -32,8 +39,8 @@ the default macOS system CA, without source Python or certificate overrides.
 No Slack credential or message is involved. Both native POSIX package workflows
 also exercise manual thread rebind migration through the actual executable,
 including backup preservation, first/subsequent Stop processing once each,
-and unchanged Git state. The Windows v0.2.5 gate upgrades the actual public
-v0.2.4 executable's profile/runtime to the candidate.
+and unchanged Git state. The Windows v0.2.6 gate upgrades the actual public
+v0.2.5 executable's profile/runtime to the candidate.
 
 Only the final publish job has repository write permission. It combines the
 tested artifacts, checks all four ZIP hashes and the Linux manifest/receipt
