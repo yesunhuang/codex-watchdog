@@ -67,6 +67,9 @@ jobs:
         run: |
           cp dist/linux-x64-package-acceptance.json dist/linux-x64-ubuntu-package-acceptance.json
           docker run --rm --volume "$PWD:/workspace" watchdog-rhel8-builder bash -euc '
+            # UBI omits this host prerequisite. Give only this disposable fixture
+            # container an identity; preserve the product locality fence.
+            test -s /etc/machine-id || tr -d "-" < /proc/sys/kernel/random/uuid > /etc/machine-id
             python scripts/test_linux_package.py --package dist/*-linux-x64
           '
       - uses: actions/upload-artifact@v4

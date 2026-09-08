@@ -160,6 +160,8 @@ def validate_archive(package: Path) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--package", type=Path, required=True)
+    parser.add_argument("--fixture-python", type=Path, default=Path(sys.executable),
+                        help="external interpreter for the protocol fixture (defaults to the harness Python)")
     args = parser.parse_args()
     assert sys.platform == "linux", "native Linux acceptance required"
     package = args.package.resolve()
@@ -301,7 +303,7 @@ def main() -> None:
         fixture_script.write_text(FIXTURE_CODEX)
         fixture_stderr = root / "external protocol fixture.stderr"
         fake_codex = tools / "codex"
-        fake_codex.write_text("#!/bin/sh\nexec " + shlex.join([sys.executable, str(fixture_script)])
+        fake_codex.write_text("#!/bin/sh\nexec " + shlex.join([str(args.fixture_python.resolve(strict=True)), str(fixture_script)])
                               + ' "$@" 2>> ' + shlex.quote(str(fixture_stderr)) + '\n')
         fake_codex.chmod(0o700)
         bind = [installed, "linux-bind", "--workspace", "package-fixture", "--repo", repo, "--thread", THREAD]
