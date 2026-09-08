@@ -140,13 +140,16 @@ def validate_archive(package: Path) -> dict:
         assert hashlib.sha256(reader.extract(name)).hexdigest() == item["sha256"]
     pyz = reader.open_embedded_archive(next(name for name in reader.toc if name.endswith(".pyz")))
     forbidden = (str(ROOT), str(Path.home()))
+    def private_path(value):
+        return any(value == marker or marker + os.sep in value for marker in forbidden)
     def inspect(value):
         if isinstance(value, types.CodeType):
-            assert not any(marker in value.co_filename for marker in forbidden)
+            assert not Path(value.co_filename).is_absolute()
+            assert not private_path(value.co_filename)
             for child in value.co_consts:
                 inspect(child)
         elif isinstance(value, str):
-            assert not any(marker in value for marker in forbidden)
+            assert not private_path(value)
     modules = [name for name in pyz.toc if name == "codex_watchdog" or name.startswith("codex_watchdog.")]
     assert modules
     for name in modules:

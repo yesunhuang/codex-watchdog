@@ -23,6 +23,12 @@ The older v0.2.5 x64 package needs glibc 2.35 and fails before startup on RHEL 8
 Use v0.2.6 or newer there. The compatible package uses the existing installation
 and state-preservation procedure below; no host glibc replacement is involved.
 
+The frozen executable selects the current host's Ubuntu or RHEL CA bundle for
+HTTPS and SMTP TLS, with bundled certifi roots only when no supported host
+bundle exists. Explicit `SSL_CERT_FILE` and `SSL_CERT_DIR` settings are preserved.
+This selection affects only the running process; it changes no saved profile,
+credential store, or operating-system trust setting.
+
 Packaging does not expand thread discovery. The explicit same-thread workflow
 is separate from general Linux desktop discovery, which remains a CI-verified
 preview awaiting real desktop E2E. See [platform support](PLATFORM_SUPPORT.md)
@@ -145,7 +151,8 @@ ARM64 retains native Ubuntu 22.04, Python 3.12.14 and pip 26.0.1. Install
 `requirements-linux-package.txt`, then the project with
 `--no-deps --no-build-isolation`, and run `scripts/build_linux_package.py`.
 For either architecture, run `scripts/test_linux_package.py --package
-dist/codex-watchdog-vX.Y.Z-linux-ARCH` using an external harness interpreter.
+dist/codex-watchdog-vX.Y.Z-linux-ARCH` using an external Python 3.12 harness
+interpreter, whose minor version must match the bundled bytecode being inspected.
 The packaged child processes run with source Python hidden. x64 must pass the
 same executable acceptance on both Ubuntu 22.04 and UBI 8's glibc 2.28.
 
@@ -157,6 +164,8 @@ native library with its license text and hash. The recipe refuses an unaccounted
 native library. Package acceptance checks archive membership, hashes, ELF
 architecture, privacy, source-free operation, installation/replacement, stable
 hooks, production fixture Stop, and explicit-owner behavior in isolated state.
+It also checks default certificate discovery against Slack's credential-free
+`api.test` endpoint, which does not send a message.
 Fixture App Server checks are distinct from a real user's Codex/VS Code test.
 
 The ARM64 executable additionally passes the package harness on a real Ubuntu

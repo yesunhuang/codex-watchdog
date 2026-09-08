@@ -11,6 +11,7 @@ from pathlib import Path
 import platform
 import re
 import shlex
+import ssl
 import subprocess
 import sys
 from typing import Optional, Sequence
@@ -210,11 +211,37 @@ def install_packaged_hooks(directory: Path, codex_home: Path) -> dict:
     return {"status": "installed", "trust": "review_exact_definitions_in_codex"}
 
 
+SYSTEM_CA_FILES = (Path("/etc/ssl/certs/ca-certificates.crt"), Path("/etc/pki/tls/cert.pem"))
+
+
+def configure_packaged_ca() -> str:
+    """Use current-host trust when the frozen build came from another distro."""
+    if sys.platform != "linux" or not getattr(sys, "frozen", False):
+        return "source_or_other_platform"
+    if "SSL_CERT_FILE" in os.environ or "SSL_CERT_DIR" in os.environ:
+        return "environment"
+    candidate = next((path for path in SYSTEM_CA_FILES if path.exists()), None)
+    source = "linux_system_bundle"
+    if candidate is None:
+        import certifi
+
+        candidate, source = Path(certifi.where()), "bundled_certifi"
+    try:
+        context = ssl.create_default_context(cafile=str(candidate))
+        if not context.cert_store_stats()["x509_ca"]:
+            raise ValueError("empty CA bundle")
+    except (OSError, ValueError) as exc:
+        raise PackageError("linux_ca_bundle_invalid") from exc
+    os.environ["SSL_CERT_FILE"] = str(candidate)
+    return source
+
+
 def main(argv: Sequence[str], executable: Path) -> int:
     from .cli import build_parser, main as core_main
 
     arguments = list(argv)
     try:
+        configure_packaged_ca()
         if not arguments or arguments in (["--help"], ["-h"]):
             print(build_parser().format_help())
             print("Linux package commands:\n  linux-install [--runtime PATH] [--install-dir PATH] [--codex-home PATH]\n"

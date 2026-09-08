@@ -9,6 +9,12 @@ search path for the external Codex executable. This prevents bundled libraries
 from conflicting with that executable's host dependencies while leaving
 WatchDog's own loader environment and user-supplied library settings intact.
 
+The frozen Linux process selects the current host's Ubuntu or RHEL CA bundle,
+falling back to bundled certifi roots only when a supported host bundle is
+absent. Explicit certificate settings are preserved. A credential-free HTTPS
+acceptance check verifies this path without sending a Slack message or changing
+saved credentials, profiles, or system trust.
+
 x64 package acceptance runs on both Ubuntu 22.04 and UBI 8. Linux ARM64 retains
 its Ubuntu 22.04/glibc 2.35 baseline. All packages include dependency and native
 library notices with hashes; the RPM inventory uses the vendor's license files
