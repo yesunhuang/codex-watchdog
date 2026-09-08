@@ -48,14 +48,17 @@ watches, wakes, relays, and notifies without becoming another AI agent.
 | Windows x64 local desktop | **Stable, full E2E verified, packaged reference** |
 | Linux Remote-SSH target | **Real remote path verified** |
 | Linux explicit same-thread source owner | **Native E2E verified on Ubuntu ARM64** |
+| Linux ARM64 executable package | **Native package acceptance on Ubuntu ARM64; explicit same-thread workflow** |
+| Linux x64 executable package | **Hosted native package acceptance; real-user desktop E2E pending** |
 | Linux local desktop | **CI-verified preview; native desktop E2E pending** |
 | macOS Apple Silicon source workflow | **Native E2E verified; topology limitations remain** |
 | macOS 15 ARM64 package | **Developer preview; native package CI verified, manual device acceptance pending** |
 
-Source installs now share POSIX locking/storage, standard VS Code paths, native
+Linux and macOS share POSIX locking/storage, standard VS Code paths, native
 `code --status`, and Codex executable discovery on Linux and macOS. They remain
-foreground previews. Apple Silicon has a self-contained ZIP; Linux uses the
-[explicit source workflow](docs/LINUX_SOURCE_WORKFLOW.md). No background-service
+foreground previews. Apple Silicon and both Linux architectures have self-contained
+ZIPs. Linux also supports the [explicit source workflow](docs/LINUX_SOURCE_WORKFLOW.md)
+and the separate Remote-SSH helper path. No background-service
 installer is included. Run the privacy-safe read-only audit with `codex-watchdog doctor` or
 produce a tester attachment with `codex-watchdog doctor --export report.json`.
 See [platform support and diagnostics](docs/PLATFORM_SUPPORT.md) for exact
@@ -141,10 +144,40 @@ Existing runtime, routing, and Keychain settings are reused. See the
 [Mac package guide](docs/MACOS_PACKAGE.md) for stable hook installation, normal
 human trust, foreground Slack operation, upgrades, rollback, and manual testing.
 
-### Linux source preview
+### Linux ARM64 and x64 packages
 
-Linux uses a source installation with Python 3.9 or newer, Git, VS Code with
-Codex, and Codex CLI. From this repository's source checkout:
+Download `codex-watchdog-vX.Y.Z-linux-arm64.zip` for `aarch64`, or
+`codex-watchdog-vX.Y.Z-linux-x64.zip` for `x86_64`, from
+[GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases). Check
+`SHA256SUMS.txt` and extract the complete ZIP. These packages target Ubuntu 22.04
+or newer with glibc. Python, pip, a virtualenv, and a source checkout are not
+needed; Git and Codex CLI/VS Code remain external prerequisites.
+
+Release/stop a running WatchDog before an upgrade. From the extracted directory:
+
+```sh
+./codex-watchdog --version
+./codex-watchdog linux-install
+watchdog="${XDG_DATA_HOME:-$HOME/.local/share}/codex-watchdog/bin/codex-watchdog"
+"$watchdog" doctor
+"$watchdog" linux-hooks
+```
+
+Installation reuses the existing hook runtime or saved package profile, keeps
+user settings and credentials in place, and backs up replaced files. Review the
+rendered hooks before `linux-hooks --install`, then trust the changed definitions
+in Codex. The stable executable path supports spaces. See the
+[Linux package guide](docs/LINUX_PACKAGE.md) for exact-thread binding,
+foreground `linux-run`, idle `linux-release`, upgrades, and rollback.
+
+ARM64 packages pass native acceptance on a real Ubuntu ARM64 machine; x64
+packages pass hosted native acceptance. These checks include isolated owner and
+Stop fixtures. General Linux desktop discovery remains a CI-verified preview;
+packaging does not replace real-user hook trust or desktop E2E acceptance.
+
+#### Optional Linux source installation
+
+Source use requires Python 3.9 or newer. From this repository's checkout:
 
 ```sh
 python3 -m venv .venv
@@ -157,8 +190,8 @@ Follow the [Linux source guide](docs/LINUX_SOURCE_WORKFLOW.md) to bind the exact
 existing conversation, review and trust its hooks, and start the foreground
 owner with `linux-run`. Use `linux-release` and wait for release before reopening
 the same conversation in VS Code. This explicit workflow is native E2E verified
-on Ubuntu ARM64; general Linux desktop discovery remains a preview, and no Linux
-binary package is published.
+on Ubuntu ARM64. The Remote-SSH helper is a separate execution path and does not
+require installing a second WatchDog owner on every remote host.
 
 ## Typical workflow
 
@@ -192,6 +225,7 @@ inspectable, and not presented as conventional human-only development.
 
 - [Windows package and first-time setup](WINDOWS_PACKAGE.md)
 - [Mac package, upgrades, and manual testing](docs/MACOS_PACKAGE.md)
+- [Linux ARM64/x64 packages, upgrades, and rollback](docs/LINUX_PACKAGE.md)
 - [Linux source installation and same-thread lifecycle](docs/LINUX_SOURCE_WORKFLOW.md)
 - [Detailed setup and operations](docs/SETUP.md)
 - [Platform support and privacy-safe doctor](docs/PLATFORM_SUPPORT.md)

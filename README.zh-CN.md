@@ -45,14 +45,17 @@
 | Windows x64 本地桌面 | **稳定、已完成端到端验证的打包参考实现** |
 | Linux Remote-SSH 目标 | **真实远程路径已验证** |
 | Linux 显式绑定的同线程源码工作流 | **已在 Ubuntu ARM64 完成真实端到端验证** |
+| Linux ARM64 可执行安装包 | **已在 Ubuntu ARM64 实机完成安装包验收；使用显式同线程工作流** |
+| Linux x64 可执行安装包 | **托管原生安装包验收通过；真实用户桌面端到端验证待完成** |
 | Linux 本地桌面 | **CI 已验证的预览版；仍需真实桌面端到端验证** |
 | macOS Apple Silicon 源码工作流 | **已完成真实端到端验证；仍有窗口拓扑限制** |
 | macOS 15 ARM64 安装包 | **开发者预览；原生安装包 CI 已验证，等待手动实机验收** |
 
-Linux 与 macOS 源码安装现在共用 POSIX 锁与存储、标准 VS Code 路径、
+Linux 与 macOS 共用 POSIX 锁与存储、标准 VS Code 路径、
 原生 `code --status` 和 Codex 可执行文件发现，但仍是前台预览版。
-Apple Silicon 提供自带运行环境的 ZIP；Linux 使用
-[显式绑定的源码工作流](docs/LINUX_SOURCE_WORKFLOW.md)。目前不提供后台服务安装器。
+Apple Silicon 和两种 Linux 架构均提供自带运行环境的 ZIP。Linux 还支持
+[显式绑定的源码工作流](docs/LINUX_SOURCE_WORKFLOW.md)及独立的 Remote-SSH 辅助路径。
+目前不提供后台服务安装器。
 可运行 `codex-watchdog doctor` 进行只读检查，或用
 `codex-watchdog doctor --export report.json` 生成不含隐私信息的诊断文件。
 支持级别的具体含义和原生验证清单见[平台支持与诊断](docs/PLATFORM_SUPPORT.md)。
@@ -130,10 +133,37 @@ Apple Silicon 提供自带运行环境的 ZIP；Linux 使用
 Slack 前台运行、升级、回滚和手动测试步骤见
 [Mac 安装包指南](docs/MACOS_PACKAGE.md)。
 
-### Linux 源码预览版
+### Linux ARM64 与 x64 安装包
 
-Linux 使用源码安装，需要 Python 3.9 或更新版本、Git、带 Codex 的 VS Code
-以及 Codex CLI。在本仓库的源码目录中执行：
+从 [GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases) 下载
+`codex-watchdog-vX.Y.Z-linux-arm64.zip`（`aarch64`）或
+`codex-watchdog-vX.Y.Z-linux-x64.zip`（`x86_64`），核对 `SHA256SUMS.txt` 后
+完整解压。安装包面向使用 glibc 的 Ubuntu 22.04 及更新版本，无需另装 Python、pip、
+虚拟环境或源码；Git 和 Codex CLI/VS Code 仍需单独安装。
+
+升级前请先释放或停止正在运行的 WatchDog。在解压目录中执行：
+
+```sh
+./codex-watchdog --version
+./codex-watchdog linux-install
+watchdog="${XDG_DATA_HOME:-$HOME/.local/share}/codex-watchdog/bin/codex-watchdog"
+"$watchdog" doctor
+"$watchdog" linux-hooks
+```
+
+安装时会复用现有 Hook 的运行目录或已保存的安装包配置，保留用户设置与凭据，
+并备份被替换的文件。先检查生成的 Hook，再运行 `linux-hooks --install`，
+随后在 Codex 中手动信任更改后的定义。固定可执行路径支持空格。准确的同线程绑定、
+前台 `linux-run`、空闲时 `linux-release`、升级与回滚步骤见
+[Linux 安装包指南](docs/LINUX_PACKAGE.md)。
+
+ARM64 安装包已在真实 Ubuntu ARM64 机器上完成原生验收；x64 安装包已通过托管
+原生验收。这些检查包含隔离的所有权与 Stop 测试。通用 Linux 桌面发现仍是 CI 已验证
+的预览功能；安装包验收不能替代真实用户的 Hook 信任或桌面端到端验收。
+
+#### 可选的 Linux 源码安装
+
+源码运行需要 Python 3.9 或更新版本。在本仓库的源码目录中执行：
 
 ```sh
 python3 -m venv .venv
@@ -145,7 +175,8 @@ codex-watchdog --version
 按照 [Linux 源码指南](docs/LINUX_SOURCE_WORKFLOW.md)显式绑定准确的现有会话，
 检查并信任其 Hook，再用 `linux-run` 启动前台控制进程。在 VS Code 中重新打开
 同一会话前，请运行 `linux-release` 并等待释放完成。该显式工作流已在 Ubuntu ARM64
-完成真实端到端验证；通用 Linux 桌面发现仍是预览功能，目前不提供 Linux 二进制安装包。
+完成真实端到端验证。Remote-SSH 辅助程序是独立的执行路径，无需在每台远程主机上
+再安装一个 WatchDog 所有权控制进程。
 
 ## 典型工作流
 
@@ -175,6 +206,7 @@ Codex -> Parrot Dog（Slack）-> 人 -> Parrot Dog -> 准确的 Codex 线程
 
 - [Windows 打包与首次设置](WINDOWS_PACKAGE.md)
 - [Mac 安装包、升级与手动测试](docs/MACOS_PACKAGE.md)
+- [Linux ARM64/x64 安装包、升级与回滚](docs/LINUX_PACKAGE.md)
 - [Linux 源码安装与同线程生命周期](docs/LINUX_SOURCE_WORKFLOW.md)
 - [详细设置与运行](docs/SETUP.md)
 - [平台支持与隐私安全诊断](docs/PLATFORM_SUPPORT.md)

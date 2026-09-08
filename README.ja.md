@@ -48,15 +48,18 @@
 | Windows x64 ローカルデスクトップ | **安定版・完全 E2E 検証済みのパッケージ基準実装** |
 | Linux Remote-SSH ターゲット | **実機のリモート経路を検証済み** |
 | Linux の明示的な同一スレッド・ソース実行 | **Ubuntu ARM64 実機 E2E 検証済み** |
+| Linux ARM64 実行ファイルパッケージ | **Ubuntu ARM64 実機でパッケージ検証済み。明示的な同一スレッド手順に対応** |
+| Linux x64 実行ファイルパッケージ | **ホスト型ネイティブ環境で検証済み。実ユーザーのデスクトップ E2E は未完了** |
 | Linux ローカルデスクトップ | **CI 検証済みプレビュー。実機デスクトップ E2E は未完了** |
 | macOS Apple Silicon ソース実行 | **実機 E2E 検証済み。ウィンドウ構成の制限あり** |
 | macOS 15 ARM64 パッケージ | **開発者プレビュー。ネイティブ CI 検証済み、手動実機検証待ち** |
 
-Linux/macOS のソース版では、POSIX ロックとストレージ、標準 VS Code
+Linux/macOS では、POSIX ロックとストレージ、標準 VS Code
 パス、ネイティブ `code --status`、Codex 実行ファイル検出を共有します。
-現時点ではフォアグラウンドのプレビューです。Apple Silicon にはランタイム同梱の
-ZIP があり、Linux は[明示的なソース実行手順](docs/LINUX_SOURCE_WORKFLOW.md)を
-使います。バックグラウンドサービスのインストーラーは含まれません。
+現時点ではフォアグラウンドのプレビューです。Apple Silicon と両 Linux アーキテクチャに
+ランタイム同梱の ZIP があります。Linux では
+[明示的なソース実行手順](docs/LINUX_SOURCE_WORKFLOW.md)と独立した Remote-SSH
+ヘルパー経路も利用できます。バックグラウンドサービスのインストーラーは含まれません。
 `codex-watchdog doctor`
 で読み取り専用診断を実行し、`codex-watchdog doctor --export report.json`
 でプライバシー保護済みの診断 JSON を作成できます。対応レベルの定義と実機検証項目は
@@ -140,10 +143,40 @@ ZIP があり、Linux は[明示的なソース実行手順](docs/LINUX_SOURCE_W
 フック導入と手動の信頼、Slack のフォアグラウンド実行、更新、ロールバック、
 手動検証は [Mac パッケージガイド](docs/MACOS_PACKAGE.md)を参照してください。
 
-### Linux ソースプレビュー
+### Linux ARM64 と x64 パッケージ
 
-Linux ではソースからインストールします。Python 3.9 以降、Git、Codex を導入した
-VS Code、Codex CLI が必要です。このリポジトリのソースディレクトリで実行します。
+[GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases) から
+`aarch64` 用の `codex-watchdog-vX.Y.Z-linux-arm64.zip`、または `x86_64` 用の
+`codex-watchdog-vX.Y.Z-linux-x64.zip` をダウンロードします。`SHA256SUMS.txt`
+を確認して ZIP 全体を展開してください。glibc を使う Ubuntu 22.04 以降が対象です。
+Python、pip、仮想環境、ソースの取得は不要ですが、Git と Codex CLI/VS Code は
+別途必要です。
+
+更新前に実行中の WatchDog を解放または停止してください。展開したディレクトリで実行します。
+
+```sh
+./codex-watchdog --version
+./codex-watchdog linux-install
+watchdog="${XDG_DATA_HOME:-$HOME/.local/share}/codex-watchdog/bin/codex-watchdog"
+"$watchdog" doctor
+"$watchdog" linux-hooks
+```
+
+既存フックのランタイムまたは保存済みパッケージプロファイルを再利用し、ユーザー設定と
+認証情報を保持して、置換するファイルをバックアップします。生成されたフックを確認してから
+`linux-hooks --install` を実行し、変更された定義を Codex で手動で信頼してください。
+固定実行パスは空白に対応します。正確な同一スレッドのバインド、フォアグラウンドの
+`linux-run`、アイドル時の `linux-release`、更新とロールバックは
+[Linux パッケージガイド](docs/LINUX_PACKAGE.md)を参照してください。
+
+ARM64 パッケージは実際の Ubuntu ARM64 マシンで、x64 パッケージはホスト型ネイティブ
+環境で検証済みです。検証には隔離した所有権と Stop のテストを含みます。一般的な Linux
+デスクトップ検出は引き続き CI 検証済みプレビューであり、パッケージ検証は実ユーザーによる
+フックの信頼やデスクトップ E2E 検証の代わりにはなりません。
+
+#### 任意の Linux ソースインストール
+
+ソース実行には Python 3.9 以降が必要です。このリポジトリのソースディレクトリで実行します。
 
 ```sh
 python3 -m venv .venv
@@ -156,8 +189,8 @@ codex-watchdog --version
 明示的にバインドし、フックを確認して信頼した後、`linux-run` でフォアグラウンドの
 制御プロセスを起動します。VS Code で同じ会話を開き直す前に `linux-release` を実行し、
 解放の完了を待ってください。この明示的な手順は Ubuntu ARM64 で実機 E2E 検証済みです。
-一般的な Linux デスクトップ検出は引き続きプレビューで、Linux のバイナリパッケージは
-公開していません。
+Remote-SSH ヘルパーは独立した実行経路であり、各リモートホストに別の WatchDog
+所有権制御プロセスを導入する必要はありません。
 
 ## 典型的な流れ
 
@@ -191,6 +224,7 @@ Slack で往復を中継します。
 
 - [Windows パッケージと初回セットアップ](WINDOWS_PACKAGE.md)
 - [Mac パッケージ、更新、手動検証](docs/MACOS_PACKAGE.md)
+- [Linux ARM64/x64 パッケージ、更新とロールバック](docs/LINUX_PACKAGE.md)
 - [Linux ソース導入と同一スレッドのライフサイクル](docs/LINUX_SOURCE_WORKFLOW.md)
 - [詳細なセットアップと運用](docs/SETUP.md)
 - [プラットフォーム対応とプライバシー安全な診断](docs/PLATFORM_SUPPORT.md)
