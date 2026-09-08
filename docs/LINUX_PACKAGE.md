@@ -137,3 +137,12 @@ native library. Package acceptance checks archive membership, hashes, ELF
 architecture, privacy, source-free operation, installation/replacement, stable
 hooks, production fixture Stop, and explicit-owner behavior in isolated state.
 Fixture App Server checks are distinct from a real user's Codex/VS Code test.
+
+The ARM64 executable additionally passes the package harness on a real Ubuntu
+ARM64 machine with glibc 2.39. A separate live check verifies automatic reuse of
+the existing source runtime, preserved user state, exact idempotent binding,
+foreground replacement/competing-owner refusal, and one deduplicated reply in
+the original conversation. The packaged owner waits and releases while VS Code
+retains its writer lock. Existing trusted source hooks remain unchanged in that
+check. Real-user packaged-hook trust and detached package lifecycle acceptance
+are separate from these tests and the already accepted source lifecycle.

@@ -11,7 +11,8 @@ context recovery, deduplication, idle release, and real VS Code reattachment on
 Ubuntu ARM64 with the extension's Codex 0.153.0. This explicit-binding source
 workflow is native E2E verified. It does not establish automatic Linux
 desktop/Remote-SSH discovery, uninterrupted in-flight execution, or a packaged
-Linux release.
+Linux release. For self-contained ARM64/x64 executables, installation, upgrades,
+and their separate acceptance evidence, use the [Linux package guide](LINUX_PACKAGE.md).
 
 ## Source installation and binding
 

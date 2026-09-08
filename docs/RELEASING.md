@@ -1,8 +1,8 @@
 # Automatic version releases
 
 Change the canonical `[project].version` in `pyproject.toml` and push it to
-`main`. The `Publish versioned packages` workflow automatically builds a new
-Windows x64, macOS ARM64 preview, Linux ARM64, and Linux x64 ZIP. Changes to other
+`main`. The `Publish versioned packages` workflow automatically builds new
+Windows x64, macOS ARM64 preview, Linux ARM64, and Linux x64 ZIPs. Changes to other
 pyproject settings without a version change do not republish anything.
 
 Publication requires the complete Windows/Ubuntu/macOS Python 3.9 matrix,

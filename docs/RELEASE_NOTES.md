@@ -15,7 +15,8 @@ for installation, the explicit same-thread foreground workflow, and rollback.
 Both Linux architectures pass hosted native package acceptance, including
 source-free startup, license/privacy checks, production fixture Stop, kernel
 locks, exact-thread fixture queue/restart/release, and read-only Git observation.
-ARM64 also undergoes native package testing on a real Ubuntu ARM64 machine.
+ARM64 also passes package testing on a real Ubuntu ARM64 machine, including
+state reuse and one deduplicated reply in an existing VS Code conversation.
 General Linux desktop discovery remains a CI-verified preview; hosted package
 checks do not establish real-user desktop E2E or replace human hook trust.
 
