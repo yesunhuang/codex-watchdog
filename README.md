@@ -52,7 +52,7 @@ watches, wakes, relays, and notifies without becoming another AI agent.
 | Linux x64 executable package | **Native package acceptance on Ubuntu and RHEL 8.10; real-user desktop E2E pending** |
 | Linux local desktop | **CI-verified preview; native desktop E2E pending** |
 | macOS Apple Silicon source workflow | **Native E2E verified; topology limitations remain** |
-| macOS 15 ARM64 package | **Developer preview; bounded v0.2.3 real-user E2E verified with a CA workaround** |
+| macOS 15 ARM64 package | **Developer preview; bounded v0.2.3 real-user E2E verified; v0.2.5+ removes the CA workaround, new-version device E2E pending** |
 
 Linux and macOS share POSIX locking/storage, standard VS Code paths, native
 `code --status`, and Codex executable discovery on Linux and macOS. They remain
