@@ -6,13 +6,14 @@ No prompt generation, model selection, automatic consent, or reconnect retry.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 import queue
 import subprocess
 import threading
 import time
 from typing import Any, Callable, Dict, Optional
+
+from .process_environment import codex_process_environment
 
 
 class AppServerError(RuntimeError):
@@ -26,7 +27,7 @@ class StdioAppServer:
         self.process = subprocess.Popen(
             [executable, "-c", "features.code_mode_host=true", "app-server"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            cwd=str(cwd), env={**os.environ, "CODEX_HOME": str(codex_home)},
+            cwd=str(cwd), env=codex_process_environment(codex_home),
         )
         self.messages: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=128)
         self.failed = threading.Event()

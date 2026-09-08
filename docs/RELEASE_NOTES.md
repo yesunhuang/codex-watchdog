@@ -4,6 +4,11 @@ builds Python 3.12.14 and its native dependencies against UBI 8.10. Every bundle
 ELF library and the executable bootloader must fit the glibc 2.28 limit, and the
 manifest records the measured requirement. No host glibc replacement is needed.
 
+Frozen Linux App Server and queue commands also restore the original library
+search path for the external Codex executable. This prevents bundled libraries
+from conflicting with that executable's host dependencies while leaving
+WatchDog's own loader environment and user-supplied library settings intact.
+
 x64 package acceptance runs on both Ubuntu 22.04 and UBI 8. Linux ARM64 retains
 its Ubuntu 22.04/glibc 2.35 baseline. All packages include dependency and native
 library notices with hashes; the RPM inventory uses the vendor's license files

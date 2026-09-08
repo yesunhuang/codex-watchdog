@@ -14,6 +14,7 @@ import uuid
 from .models import sha256_text, utc_now, validate_instruction_id, validate_prompt
 from .linux_binding import LinuxBindingError, sender_guard
 from .platform_adapters import detect_platform_adapter
+from .process_environment import codex_process_environment
 from .storage import InstructionCollisionError, InstructionStore, StoreBusyError
 
 
@@ -264,8 +265,7 @@ class QueueWakeDispatcher:
 
         wrapped = f"{marker}\n{prompt}"
         try:
-            environment = os.environ.copy()
-            environment["CODEX_HOME"] = str(self.codex_home)
+            environment = codex_process_environment(self.codex_home)
             completed = self.runner(
                 [
                     self.codex_executable,
