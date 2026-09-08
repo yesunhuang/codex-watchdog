@@ -281,8 +281,10 @@ def main() -> None:
             db.execute("INSERT INTO queued_thread_revisions VALUES (?, 0)", (THREAD,))
         fixture_script = root / "external protocol fixture.py"
         fixture_script.write_text(FIXTURE_CODEX)
+        fixture_stderr = root / "external protocol fixture.stderr"
         fake_codex = tools / "codex"
-        fake_codex.write_text("#!/bin/sh\nexec " + shlex.join([sys.executable, str(fixture_script)]) + ' "$@"\n')
+        fake_codex.write_text("#!/bin/sh\nexec " + shlex.join([sys.executable, str(fixture_script)])
+                              + ' "$@" 2>> ' + shlex.quote(str(fixture_stderr)) + '\n')
         fake_codex.chmod(0o700)
         bind = [installed, "linux-bind", "--workspace", "package-fixture", "--repo", repo, "--thread", THREAD]
         run(bind)
@@ -346,6 +348,11 @@ def main() -> None:
             wait_state(runtime, "released")
             process.communicate(timeout=15)
             assert process.returncode == 0
+        except BaseException:
+            # Only this generated fixture's diagnostics; never real server output.
+            if fixture_stderr.exists():
+                print("External protocol fixture stderr:\n" + fixture_stderr.read_text(), flush=True)
+            raise
         finally:
             if process.poll() is None:
                 process.send_signal(signal.SIGTERM)
