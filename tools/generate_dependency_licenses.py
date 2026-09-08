@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import shutil
 import sys
+import sysconfig
 from typing import Dict, Iterable, List, Optional, Sequence, Set
 
 from packaging.requirements import Requirement
@@ -118,6 +119,8 @@ def _copy_python_license(destination: Path) -> Dict[str, object]:
     candidates = [
         Path(sys.base_prefix) / "LICENSE.txt",
         Path(sys.base_prefix) / "LICENSE_PYTHON.txt",
+        Path(sysconfig.get_path("stdlib")) / "LICENSE.txt",
+        Path(sys.base_prefix) / "LICENSE",
     ]
     source = next((candidate for candidate in candidates if candidate.is_file()), None)
     if source is None:
@@ -176,7 +179,7 @@ def generate(destination: Path, include_distributions: Sequence[str]) -> Dict:
     lines = [
         "# Resolved dependency and runtime licenses",
         "",
-        "This inventory was generated from the isolated Windows release environment.",
+        "This inventory was generated from the isolated release environment.",
         "License texts copied from installed distribution metadata are stored below.",
         "",
         "| Package | Version | Declared license | Project |",

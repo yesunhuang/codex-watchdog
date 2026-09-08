@@ -73,6 +73,38 @@ def test_workspace_add_exact_repeat_reports_existing_registration(
     assert value["workspace"] == WorkspaceRegistry(runtime).get("workspace-1").to_dict()
 
 
+def test_workspace_add_collision_emits_bounded_reason_without_traceback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    runtime = tmp_path / "runtime"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    WorkspaceRegistry(runtime).add("workspace-1", repo, SESSION_1)
+
+    code = cli.main(
+        [
+            "--runtime",
+            str(runtime),
+            "workspace-add",
+            "--workspace",
+            "workspace-2",
+            "--repo",
+            str(repo),
+            "--thread",
+            SESSION_2,
+        ]
+    )
+
+    output = capsys.readouterr()
+    assert code == 1
+    assert output.err == ""
+    assert json.loads(output.out) == {
+        "reason": "workspace_registration_collision",
+        "status": "error",
+    }
+    assert str(repo) not in output.out
+
+
 def test_workspace_list_emits_deterministically_sorted_schema_one_json(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -116,24 +148,28 @@ def test_workspace_add_rejects_remote_uri_before_writing_registry(
 ) -> None:
     runtime = tmp_path / "runtime"
 
-    with pytest.raises(ValueError, match="process-local"):
-        cli.main(
-            [
-                "--runtime",
-                str(runtime),
-                "workspace-add",
-                "--workspace",
-                "remote-workspace",
-                "--repo",
-                "vscode-remote://ssh-remote+gpu_lab/home/user/repo",
-                "--thread",
-                SESSION_1,
-            ]
-        )
+    code = cli.main(
+        [
+            "--runtime",
+            str(runtime),
+            "workspace-add",
+            "--workspace",
+            "remote-workspace",
+            "--repo",
+            "vscode-remote://ssh-remote+gpu_lab/home/user/repo",
+            "--thread",
+            SESSION_1,
+        ]
+    )
 
     output = capsys.readouterr()
-    assert output.out == ""
+    assert code == 1
+    assert json.loads(output.out) == {
+        "reason": "invalid_workspace_registration",
+        "status": "error",
+    }
     assert output.err == ""
+    assert "gpu_lab" not in output.out
     assert not WorkspaceRegistry(runtime).path.exists()
 
 

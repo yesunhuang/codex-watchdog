@@ -30,7 +30,7 @@ from .service import (
 )
 from .slack_mapping import SlackRelayTarget
 from .slack_relay import SlackReplyRelay
-from .storage import InstructionStore
+from .storage import InstructionStore, StoreBusyError
 from .workspace_discovery import EffectiveWorkspaceCatalog
 from .workspace_registry import TrackedWorkspace, WorkspaceRegistry
 
@@ -111,6 +111,7 @@ class MvpCycleResult:
     discovery: Optional[Dict[str, Any]] = None
     error_sha256: Optional[str] = None
     error_chars: int = 0
+    reason: Optional[str] = None
 
     @property
     def ok(self) -> bool:
@@ -121,7 +122,7 @@ class MvpCycleResult:
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        value = {
             "cycle_id": self.cycle_id,
             "status": self.status,
             "started_at": self.started_at,
@@ -132,6 +133,9 @@ class MvpCycleResult:
             "error_sha256": self.error_sha256,
             "error_chars": self.error_chars,
         }
+        if self.reason is not None:
+            value["reason"] = self.reason
+        return value
 
 
 class MvpWatchdogService:
@@ -290,6 +294,18 @@ class MvpWatchdogService:
                     *remote_results,
                     *missing_remote_results,
                 )
+        except StoreBusyError as exc:
+            digest, chars = self._error_summary(exc)
+            return MvpCycleResult(
+                cycle_id=cycle_id,
+                status="error",
+                started_at=started_at,
+                completed_at=utc_now(),
+                workspaces=(),
+                error_sha256=digest,
+                error_chars=chars,
+                reason="service_cycle_lock_held",
+            )
         except Exception as exc:
             digest, chars = self._error_summary(exc)
             return MvpCycleResult(

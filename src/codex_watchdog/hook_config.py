@@ -31,6 +31,8 @@ def build_hooks_document_from_prefix(
     grace_seconds: float,
     poll_seconds: float,
     test_mode: bool,
+    *,
+    target_windows: bool = True,
 ) -> Dict:
     if not command_prefix:
         raise ValueError("hook command prefix must not be empty")
@@ -49,7 +51,7 @@ def build_hooks_document_from_prefix(
     if test_mode:
         parts.append("--test-mode")
     command = hook_command(parts, windows=False)
-    command_windows = hook_command(parts, windows=True)
+    command_windows = hook_command(parts, windows=True) if target_windows else None
     stop_timeout = max(10, int(grace_seconds) + 30)
     return {
         "description": "Codex WatchDog user hooks; trust each definition manually",
@@ -61,7 +63,7 @@ def build_hooks_document_from_prefix(
                         {
                             "type": "command",
                             "command": command,
-                            "commandWindows": command_windows,
+                            **({"commandWindows": command_windows} if target_windows else {}),
                             "timeout": 10,
                             "statusMessage": "Recording pre-routing approval event",
                         }
@@ -74,7 +76,7 @@ def build_hooks_document_from_prefix(
                         {
                             "type": "command",
                             "command": command,
-                            "commandWindows": command_windows,
+                            **({"commandWindows": command_windows} if target_windows else {}),
                             "timeout": stop_timeout,
                             "statusMessage": "Waiting briefly for a watchdog instruction",
                         }

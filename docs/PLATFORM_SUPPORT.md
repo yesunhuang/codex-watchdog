@@ -13,8 +13,10 @@ and launcher capability.
 | --- | --- | --- | --- |
 | Windows x64 local desktop | **Full E2E verified; stable reference** | Native hooks, exact live workspace/thread ownership, 30-second Stop continuation, queue wake, Git observation, Slack/SMTP, Slack reply relay, Remote-SSH adapters, packaged one-click startup, previous-release upgrade, and embedded icon | Continue regression dogfood for every release |
 | Linux Remote-SSH execution target | **Native-probe and real remote path verified** | Compact remote state/thread/Git/queue logic and notification/relay paths on a real Linux target | More host distributions and reconnect patterns |
+| Linux explicit same-thread source owner | **Native E2E verified on Ubuntu ARM64** | Exact operator binding, trusted Stop, actual client detach, same-thread queue/restart/context, idle release, and VS Code reattachment | Automatic Linux desktop discovery and a standalone Linux package remain separate |
 | Linux local desktop | **CI verified preview** | Shared tests, POSIX locking/atomic replacement, standard VS Code/XDG paths, native CLI invocation, Codex binary discovery, and CLI/version smoke tests | Real Linux-desktop VS Code/Codex ownership, hooks, credential store, and full E2E |
-| macOS local desktop | **CI verified preview/beta** | Shared tests on GitHub-hosted macOS, standard VS Code paths, native CLI invocation, Apple Silicon path/architecture modeling, POSIX storage, and CLI/version smoke tests | Real Apple Silicon VS Code/Codex ownership, hooks, Keychain-backed OAuth, launcher ergonomics, and full E2E |
+| macOS Apple Silicon source workflow | **Native E2E verified preview** | Exact live ownership where topology is resolvable, trusted Stop/continuation, queue/restart, and Keychain-backed Slack-only notification/reply/dedup | Shared or unnumbered VS Code window topology still fails closed; Outlook acceptance is separate |
+| macOS 15 ARM64 package | **Hosted native package checks verified; developer preview** | No source Python required, stable install/hooks, runtime/profile reuse, native fixture Keychain, foreground lifecycle, and replacement | Manual real-user Keychain/hooks/VS Code acceptance; no Developer ID signature or notarization |
 
 Hosted CI is not full E2E validation. A platform advances from **CI verified** to
 **native-probe verified** only after the diagnostic and relevant native probes
@@ -22,9 +24,11 @@ run on that operating system. It advances to **full E2E verified** only after a
 real existing VS Code Codex thread completes Stop, notification, wake, and
 restart/recovery acceptance.
 
-No standalone Linux or macOS binary is published yet. Source installation and a
-foreground CLI are the preview path. Windows remains the only packaged stable
-release and the behavior that cross-platform changes must not regress.
+The Apple Silicon ZIP is a published developer preview; see the
+[Mac package guide](MACOS_PACKAGE.md). Linux uses the
+[explicit same-thread source workflow](LINUX_SOURCE_WORKFLOW.md) or the existing
+Remote-SSH helper. Windows remains the packaged stable reference and the
+behavior that cross-platform changes must not regress.
 
 ## Read-only doctor
 
@@ -74,9 +78,10 @@ Interpretation:
   unsupported. WatchDog will not guess a target.
 
 Closing VS Code before running the command normally produces `PARTIAL`, because
-there is no live window/current owner to resolve. On macOS and Linux, the
-preview credential and foreground-launcher checks also remain `PARTIAL` until
-their native security and UX paths are accepted.
+there is no live window/current owner to resolve. Mac credential/launcher
+capability checks describe the accepted Keychain Slack foreground path. Linux
+credential/packaged-launcher checks remain `PARTIAL`; `doctor --linux-bound`
+checks an explicit binding and live kernel owners without desktop discovery.
 
 ## Preview source installation
 
@@ -139,10 +144,12 @@ standard VS Code extension roots. Application data belongs under
 atomic rename. Outlook OAuth requires Keychain-backed encrypted persistence and
 must fail closed rather than fall back to plaintext.
 
-Apple Silicon is the first native validation target. Intel packaging is not
-planned until it is cheap and justified. Hosted macOS CI covers source behavior
-only; the platform remains preview/beta until a real Apple Silicon VS Code
-Codex session passes the complete live procedure.
+The Apple Silicon source path passed real VS Code/Codex and Keychain Slack
+acceptance. The macOS 15 ARM64 ZIP additionally passes hosted native package
+checks, with Python absent from child execution. Real-user package migration
+and hook/VS Code acceptance are still manual. Intel Macs and older macOS
+versions are not accepted by this build recipe. An unnumbered/shared VS Code
+window that cannot be correlated still fails closed as `vscode_live_window_unmapped`.
 
 ## Native validation checklist
 

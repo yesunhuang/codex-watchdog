@@ -65,7 +65,9 @@ class HostPlatformAdapter:
     def support_tier(self) -> str:
         if self.system == "windows":
             return "stable_full_e2e"
-        if self.system in ("linux", "macos"):
+        if self.system == "macos":
+            return "preview_native_e2e"
+        if self.system == "linux":
             return "preview_ci"
         return "unsupported"
 
@@ -78,18 +80,18 @@ class HostPlatformAdapter:
         if self.system == "windows":
             return "windows_dpapi"
         if self.system == "macos":
-            return "macos_keychain_required"
+            return "macos_keychain_slack"
         if self.system == "linux":
             return "linux_libsecret_required"
         return "encrypted_persistence_unverified"
 
     @property
     def launcher_mode(self) -> str:
-        return (
-            "windows_one_click_foreground"
-            if self.system == "windows"
-            else "foreground_cli_only"
-        )
+        if self.system == "windows":
+            return "windows_one_click_foreground"
+        if self.system == "macos":
+            return "macos_keychain_foreground"
+        return "foreground_cli_only"
 
     def default_codex_home(self) -> Path:
         configured = self.environment.get("CODEX_HOME", "").strip()

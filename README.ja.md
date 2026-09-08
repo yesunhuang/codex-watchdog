@@ -48,7 +48,9 @@
 | Windows x64 ローカルデスクトップ | **安定版・完全 E2E 検証済みのパッケージ基準実装** |
 | Linux Remote-SSH ターゲット | **実機のリモート経路を検証済み** |
 | Linux ローカルデスクトップ | **CI 検証済みプレビュー。実機デスクトップ E2E は未完了** |
-| macOS ローカルデスクトップ | **CI 検証済みプレビュー/Beta。Apple Silicon 実機 E2E は未完了** |
+| Linux の明示的な同一スレッド・ソース実行 | **Ubuntu ARM64 実機 E2E 検証済み** |
+| macOS Apple Silicon ソース実行 | **実機 E2E 検証済み。ウィンドウ構成の制限あり** |
+| macOS 15 ARM64 パッケージ | **開発者プレビュー。ネイティブ CI 検証済み、手動実機検証待ち** |
 
 Linux/macOS のソース版では、POSIX ロックとストレージ、標準 VS Code
 パス、ネイティブ `code --status`、Codex 実行ファイル検出を共有します。
@@ -56,6 +58,12 @@ Linux/macOS のソース版では、POSIX ロックとストレージ、標準 V
 で読み取り専用診断を実行し、`codex-watchdog doctor --export report.json`
 でプライバシー保護済みの診断 JSON を作成できます。詳細は
 [プラットフォーム対応と診断](docs/PLATFORM_SUPPORT.md)を参照してください。
+
+Apple Silicon 向け ZIP は [GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases)
+の `codex-watchdog-vX.Y.Z-macos-arm64-preview.zip` です。`SHA256SUMS.txt` を確認して
+展開し、`./codex-watchdog macos-install` を実行します。Python を同梱し、既存の
+ランタイムと Keychain 設定を再利用します。ad-hoc 署名のみで公証は未実施です。
+手動検証と更新の手順は [Mac パッケージガイド](docs/MACOS_PACKAGE.md)を参照してください。
 
 ## 主な機能
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Dict, Optional, Sequence
@@ -40,9 +41,12 @@ def build_hooks_document(
     grace_seconds: float,
     poll_seconds: float,
     test_mode: bool,
+    *,
+    target_windows: Optional[bool] = None,
 ) -> Dict:
     repo_root = repo_root.expanduser().resolve()
-    python_executable = python_executable.expanduser().resolve()
+    # Resolving a POSIX virtualenv symlink selects the base interpreter instead.
+    python_executable = Path(os.path.abspath(os.fspath(python_executable.expanduser())))
     script = repo_root / "tools" / "codex_watchdog_hook.py"
     if not script.is_file():
         raise FileNotFoundError(f"watchdog hook entry point not found: {script}")
@@ -54,6 +58,7 @@ def build_hooks_document(
         grace_seconds,
         poll_seconds,
         test_mode,
+        target_windows=os.name == "nt" if target_windows is None else target_windows,
     )
 
 

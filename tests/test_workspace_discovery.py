@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import errno
 import json
+import os
 from pathlib import Path
 import sqlite3
 from typing import Iterable, List, Tuple
 
+import pytest
+
 from codex_watchdog.workspace_discovery import (
+    _posix_writer_lock_is_held,
     CodexSessionResolver,
     EffectiveWorkspaceCatalog,
     LiveVSCodeWindow,
@@ -20,6 +25,42 @@ from codex_watchdog.workspace_registry import WorkspaceRegistry
 SESSION_CURRENT = "11111111-2222-4333-8444-555555555555"
 SESSION_OLD = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 SESSION_OTHER = "12345678-1234-4234-8234-123456789abc"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX flock is unavailable")
+def test_posix_writer_lock_accepts_darwin_eagain_35(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import fcntl
+
+    lock = tmp_path / "thread.lock"
+    lock.write_bytes(b"")
+
+    monkeypatch.setattr(errno, "EAGAIN", 35)
+
+    def held(_descriptor: int, _operation: int) -> None:
+        raise BlockingIOError(35, "writer lock held")
+
+    monkeypatch.setattr(fcntl, "flock", held)
+
+    assert _posix_writer_lock_is_held(lock) is True
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX flock is unavailable")
+def test_posix_writer_lock_rejects_unrelated_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import fcntl
+
+    lock = tmp_path / "thread.lock"
+    lock.write_bytes(b"")
+
+    def failed(_descriptor: int, _operation: int) -> None:
+        raise OSError(errno.EIO, "unrelated failure")
+
+    monkeypatch.setattr(fcntl, "flock", failed)
+
+    assert _posix_writer_lock_is_held(lock) is False
 
 
 class GitRootResolver:

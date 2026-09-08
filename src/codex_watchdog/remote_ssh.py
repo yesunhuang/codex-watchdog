@@ -483,6 +483,20 @@ def dispatch_wake(request, session):
         if record.get("thread_id") != session or record.get("prompt_sha256") != digest:
             return {"status": "uncertain", "reason": "remote_wake_id_collision"}
         return observe_wake(record)
+    # A Linux-local binding owns new delivery. Remote observers may reconcile
+    # their previous receipts but must not become a second sender after handoff.
+    binding_path = Path.home() / ".codex" / "watchdog-linux" / (session + ".json")
+    if binding_path.exists():
+        try:
+            with binding_path.open("rb") as handle:
+                raw = handle.read(65537)
+            binding = json.loads(raw) if len(raw) <= 65536 else None
+            if (not isinstance(binding, dict) or binding.get("schema_version") != 1
+                    or binding.get("thread_id") != session
+                    or binding.get("state") != "released"):
+                return {"status": "rejected", "reason": "linux_thread_reserved"}
+        except (OSError, ValueError):
+            return {"status": "rejected", "reason": "linux_thread_reserved"}
     database = queue_database()
     try:
         _, baseline_revision = queue_snapshot(database, session)

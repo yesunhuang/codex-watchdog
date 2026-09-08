@@ -12,8 +12,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import uuid
 
 from .models import sha256_text, utc_now, validate_instruction_id, validate_prompt
+from .linux_binding import LinuxBindingError, sender_guard
 from .platform_adapters import detect_platform_adapter
-from .storage import InstructionCollisionError, InstructionStore
+from .storage import InstructionCollisionError, InstructionStore, StoreBusyError
 
 
 REMOTE_UPDATE_PROMPT = """You were resumed by WatchDog.
@@ -171,6 +172,26 @@ class QueueWakeDispatcher:
         self.store = InstructionStore(self.runtime)
 
     def dispatch(
+        self,
+        thread_id: str,
+        instruction_id: str,
+        prompt: str,
+        source: str,
+        timeout_seconds: float = 30.0,
+    ) -> QueueReceipt:
+        thread_id = _canonical_uuid(thread_id, "thread id")
+        instruction_id = validate_instruction_id(instruction_id)
+        # Existing records are observation/dedup only, including uncertain sends.
+        if (self.records / (sha256_text(instruction_id) + ".json")).exists():
+            return self._dispatch(thread_id, instruction_id, prompt, source, timeout_seconds)
+        try:
+            with sender_guard(self.codex_home, self.runtime, thread_id):
+                return self._dispatch(thread_id, instruction_id, prompt, source, timeout_seconds)
+        except (LinuxBindingError, StoreBusyError):
+            return QueueReceipt(instruction_id, thread_id, "rejected", "",
+                                "linux_thread_reserved", 1)
+
+    def _dispatch(
         self,
         thread_id: str,
         instruction_id: str,

@@ -4,7 +4,13 @@ param(
     [string]$PackageDirectory,
 
     [Parameter(Mandatory = $true)]
-    [string]$ExpectedVersion
+    [string]$ExpectedVersion,
+
+    [Parameter(Mandatory = $true)]
+    [string]$PreviousPackageDirectory,
+
+    [Parameter(Mandatory = $true)]
+    [string]$PreviousVersion
 )
 
 Set-StrictMode -Version Latest
@@ -12,6 +18,10 @@ $ErrorActionPreference = "Stop"
 
 $package = [IO.Path]::GetFullPath($PackageDirectory)
 $executable = Join-Path $package "codex-watchdog.exe"
+$previousExecutable = Join-Path ([IO.Path]::GetFullPath($PreviousPackageDirectory)) "codex-watchdog.exe"
+if (-not (Test-Path -LiteralPath $previousExecutable -PathType Leaf)) {
+    throw "The immediately previous public executable is required for upgrade acceptance."
+}
 $launcher = Join-Path $package "watchdog.ps1"
 $icon = Join-Path $package "images\codex-watchdog.ico"
 $platformGuide = Join-Path $package "docs\PLATFORM_SUPPORT.md"
@@ -155,22 +165,24 @@ try {
     if ($dryRun.runner -ne "packaged_executable") {
         throw "Packaged launcher did not select codex-watchdog.exe."
     }
-    $previousRuntime = Join-Path $testRoot "previous-v0.2.1-runtime"
+    $previousRuntime = Join-Path $testRoot "previous-v$PreviousVersion-runtime"
     New-Item -ItemType Directory -Path $previousRuntime -Force | Out-Null
+    $env:CODEX_HOME = Join-Path $testRoot "previous-codex-home"
     New-Item -ItemType Directory -Path $env:CODEX_HOME -Force | Out-Null
     $savedConfigRoot = Join-Path $env:LOCALAPPDATA "CodexWatchdog"
     New-Item -ItemType Directory -Path $savedConfigRoot -Force | Out-Null
     $profilePath = Join-Path $savedConfigRoot "launcher-profile.json"
-    [pscustomobject][ordered]@{
-        schema_version = 1
-        runtime_path = [IO.Path]::GetFullPath($previousRuntime)
-        discovered_from = "codex_hooks"
-        created_by_version = "0.2.1"
-        created_at = "2026-09-04T00:00:00Z"
-        future_nonconflicting_key = [pscustomobject]@{ preserve = $true }
-    } | ConvertTo-Json -Depth 4 | Set-Content `
-        -LiteralPath $profilePath -Encoding UTF8
-    $profileBefore = Get-Content -LiteralPath $profilePath -Raw
+    if (Test-Path -LiteralPath $profilePath) { throw "Upgrade fixture must begin without a launcher profile." }
+    $oldVersionOutput = (& $previousExecutable --version | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $oldVersionOutput -ne "codex-watchdog $PreviousVersion") {
+        throw "Previous release executable version mismatch."
+    }
+    $oldHooks = & $previousExecutable --runtime $previousRuntime --codex-home $env:CODEX_HOME install-user-hooks --install
+    if ($LASTEXITCODE -ne 0 -or ($oldHooks | ConvertFrom-Json).status -ne "installed") {
+        throw "Previous release could not create its own production hook configuration."
+    }
+    Set-Content -LiteralPath (Join-Path $env:CODEX_HOME "config.toml") -Value "# Retain unrelated user settings" -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $previousRuntime "retained-journal.json") -Value '{"schema_version":1,"retained":"previous user state"}' -Encoding UTF8
     $testWebhook = "https://hooks.slack.com/services/T00000000/B00000000/package-test-secret"
     $testBotToken = "xoxb-package-test-secret"
     $testAppToken = "xapp-package-test-secret"
@@ -210,6 +222,25 @@ try {
     $env:CODEX_WATCHDOG_SMTP_TO = "package-test@example.invalid"
     $env:CODEX_WATCHDOG_NOTIFICATION_TIMEOUT_SECONDS = "15"
     $env:CODEX_WATCHDOG_PACKAGE_TEST_ONCE = "1"
+    $oldStartupOutput = & $previousExecutable
+    if ($LASTEXITCODE -ne 0) { throw "Previous release one-click startup failed." }
+    $oldProfile = Get-Content -LiteralPath $profilePath -Raw | ConvertFrom-Json
+    if ($oldProfile.created_by_version -ne $PreviousVersion) {
+        throw "The upgrade profile was not created by the actual previous release."
+    }
+    $oldProfile | Add-Member -NotePropertyName future_nonconflicting_key -NotePropertyValue ([pscustomobject]@{ preserve = $true })
+    $oldProfile | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $profilePath -Encoding UTF8
+    $profileBefore = Get-Content -LiteralPath $profilePath -Raw
+    $protectedPaths = @(
+        $profilePath,
+        (Join-Path $env:CODEX_HOME "hooks.json"),
+        (Join-Path $env:CODEX_HOME "config.toml"),
+        (Join-Path $previousRuntime "retained-journal.json")
+    ) + @(Get-ChildItem -LiteralPath $savedConfigRoot -File | Select-Object -ExpandProperty FullName)
+    $protectedHashes = @{}
+    foreach ($protectedPath in $protectedPaths) {
+        $protectedHashes[$protectedPath] = (Get-FileHash -LiteralPath $protectedPath -Algorithm SHA256).Hash
+    }
     $oneClickOutput = & $executable
     if ($LASTEXITCODE -ne 0) {
         throw "Packaged no-argument one-click startup failed."
@@ -227,6 +258,11 @@ try {
     if ((Get-Content -LiteralPath $profilePath -Raw) -cne $profileBefore) {
         throw "One-click upgrade rewrote the compatible previous release profile."
     }
+    foreach ($protectedPath in $protectedHashes.Keys) {
+        if ((Get-FileHash -LiteralPath $protectedPath -Algorithm SHA256).Hash -ne $protectedHashes[$protectedPath]) {
+            throw "Upgrade changed protected profile, provider, hook, settings, or journal bytes."
+        }
+    }
     $oneClickText = $oneClickOutput | Out-String
     if ($oneClickText -notmatch "runner\s*:\s*packaged_executable") {
         throw "One-click startup did not use the packaged executable bootstrap."
@@ -242,13 +278,14 @@ try {
         }
     }
     foreach ($secret in @($testWebhook, $testBotToken, $testAppToken)) {
-        if ($oneClickText.IndexOf($secret, [StringComparison]::Ordinal) -ge 0) {
+        if (($oneClickText + ($oldStartupOutput | Out-String)).IndexOf($secret, [StringComparison]::Ordinal) -ge 0) {
             throw "One-click upgrade exposed a saved Slack secret."
         }
     }
     [pscustomobject][ordered]@{
         status = "passed"
-        version = $versionOutput
+        version = $ExpectedVersion
+        previous_version = $PreviousVersion
         python_resolvable = $false
         help = "passed"
         discovery_status = $discovery.status
@@ -256,7 +293,9 @@ try {
         one_cycle_workspace_count = $once.workspace_count
         packaged_hook_install = $hookInstall.status
         launcher_runner = $dryRun.runner
-        one_click_upgrade_runtime = [string]$profile.runtime_path
+        one_click_upgrade_runtime_reused = $true
+        upgrade_profile_source = "previous_public_executable"
+        protected_files_unchanged = $true
         one_click_saved_configuration = "reused_without_secret_output"
     } | ConvertTo-Json -Compress
 } finally {

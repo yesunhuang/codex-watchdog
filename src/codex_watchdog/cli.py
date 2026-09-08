@@ -28,7 +28,11 @@ from .stop_hook import (
 )
 from .storage import FileLock, InstructionStore, StoreBusyError
 from .workspace_discovery import EffectiveWorkspaceCatalog
-from .workspace_registry import REGISTRY_SCHEMA_VERSION, WorkspaceRegistry
+from .workspace_registry import (
+    REGISTRY_SCHEMA_VERSION,
+    WorkspaceCollisionError,
+    WorkspaceRegistry,
+)
 
 
 def _path(value: str) -> Path:
@@ -62,6 +66,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--codex-home", type=_path, help="exact Codex home shared with queue state"
     )
     commands = parser.add_subparsers(dest="command", required=True)
+
+    linux_bind = commands.add_parser(
+        "linux-bind", help="reserve one exact existing Linux VS Code thread for this runtime"
+    )
+    linux_bind.add_argument("--workspace", required=True, type=_safe_id)
+    linux_bind.add_argument("--repo", required=True, type=_path)
+    linux_bind.add_argument("--thread", required=True)
+    linux_bind.add_argument("--lease-seconds", type=float, default=21600)
+    linux_run = commands.add_parser(
+        "linux-run", help="wait for detach, then serve the bound thread through first-party stdio"
+    )
+    linux_run.add_argument("--interval", type=float, default=5)
+    linux_run.add_argument("--codex-executable", type=_path)
+    commands.add_parser("linux-release", help="request idle writer release before VS Code reattachment")
+    commands.add_parser("linux-status", help="show privacy-safe Linux binding and owner status")
 
     hook = commands.add_parser(
         "hook", help="handle one native Codex hook event from stdin"
@@ -201,6 +220,10 @@ def build_parser() -> argparse.ArgumentParser:
         "doctor", help="run a read-only privacy-safe platform capability audit"
     )
     doctor.add_argument(
+        "--linux-bound", action="store_true",
+        help="audit the explicit Linux binding and live kernel owners instead of desktop discovery",
+    )
+    doctor.add_argument(
         "--vscode-user-data",
         type=_path,
         help="explicit VS Code User directory for preview platform diagnosis",
@@ -241,11 +264,43 @@ def _prompt(message: Optional[str], prompt_file: Optional[Path]) -> str:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command.startswith("linux-"):
+        from .linux_binding import LinuxBinding, LinuxBindingError, locality_identity, read_json
+        from .linux_owner import LinuxThreadOwner
+        from .platform_adapters import detect_platform_adapter
+        from .workspace_registry import TrackedWorkspace
+
+        try:
+            locality_identity()
+            binding = LinuxBinding(
+                args.runtime, args.codex_home or detect_platform_adapter().default_codex_home()
+            )
+            if args.command == "linux-bind":
+                binding.bind(TrackedWorkspace.create(args.workspace, args.repo, args.thread), args.lease_seconds)
+            elif args.command == "linux-release":
+                binding.set_state("release_requested")
+            elif args.command == "linux-run":
+                return LinuxThreadOwner(
+                    binding, executable=str(args.codex_executable) if args.codex_executable else None
+                ).run(args.interval, emit=lambda value: print(json.dumps(value, sort_keys=True), flush=True))
+            result = binding.status()
+            status_path = args.runtime / "linux" / "status.json"
+            if args.command == "linux-status" and status_path.exists():
+                result["last_observation"] = read_json(status_path)
+            print(json.dumps(result, sort_keys=True))
+            return 0
+        except (LinuxBindingError, StoreBusyError, OSError, ValueError) as exc:
+            reason = (str(exc) if isinstance(exc, LinuxBindingError) else
+                      "linux_owner_already_running" if isinstance(exc, StoreBusyError) else
+                      "linux_setup_failed")
+            print(json.dumps({"status": "blocked", "reason": reason}, sort_keys=True))
+            return 1
     if args.command == "doctor":
         report = WatchdogDoctor(
             args.runtime,
             codex_home=args.codex_home,
             user_data_root=args.vscode_user_data,
+            linux_bound=args.linux_bound,
         ).run()
         if args.export not in (None, "-"):
             write_doctor_export(Path(args.export), report)
@@ -323,9 +378,32 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         return 0
     if args.command == "workspace-add":
-        result = WorkspaceRegistry(args.runtime).add(
-            args.workspace, args.repo, args.thread
-        )
+        try:
+            result = WorkspaceRegistry(args.runtime).add(
+                args.workspace, args.repo, args.thread
+            )
+        except WorkspaceCollisionError:
+            print(
+                json.dumps(
+                    {
+                        "status": "error",
+                        "reason": "workspace_registration_collision",
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 1
+        except ValueError:
+            print(
+                json.dumps(
+                    {
+                        "status": "error",
+                        "reason": "invalid_workspace_registration",
+                    },
+                    sort_keys=True,
+                )
+            )
+            return 1
         print(
             json.dumps(
                 {"status": result.status, "workspace": result.workspace.to_dict()},

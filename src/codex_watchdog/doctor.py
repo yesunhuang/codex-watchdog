@@ -82,7 +82,11 @@ class WatchdogDoctor:
         user_data_root: Optional[Path] = None,
         adapter: Optional[HostPlatformAdapter] = None,
         status_probe: StatusProbe = run_vscode_status,
+        linux_bound: bool = False,
     ) -> None:
+        if type(linux_bound) is not bool:
+            raise ValueError("linux_bound must be a boolean")
+        self.linux_bound = linux_bound
         self.runtime = Path(runtime).expanduser().resolve()
         self.adapter = detect_platform_adapter() if adapter is None else adapter
         self.codex_home = (
@@ -113,21 +117,22 @@ class WatchdogDoctor:
             )
         )
 
-        status_commands = self.adapter.vscode_status_commands()
-        checks.append(
-            DoctorCheck(
-                "vscode_cli",
-                PASS if status_commands else FAIL,
-                "vscode_cli_available" if status_commands else "vscode_cli_unavailable",
-                {
-                    "candidate_count": len(status_commands),
-                    "candidate_sources": sorted({item.source for item in status_commands}),
-                },
+        if not self.linux_bound:
+            status_commands = self.adapter.vscode_status_commands()
+            checks.append(
+                DoctorCheck(
+                    "vscode_cli",
+                    PASS if status_commands else FAIL,
+                    "vscode_cli_available" if status_commands else "vscode_cli_unavailable",
+                    {
+                        "candidate_count": len(status_commands),
+                        "candidate_sources": sorted({item.source for item in status_commands}),
+                    },
+                )
             )
-        )
 
-        checks.append(self._user_data_check())
-        checks.append(self._workspace_storage_check())
+            checks.append(self._user_data_check())
+            checks.append(self._workspace_storage_check())
 
         extensions = self._extension_count()
         executable, executable_available, executable_source = self._codex_executable()
@@ -151,31 +156,36 @@ class WatchdogDoctor:
         )
         checks.append(self._codex_home_check())
 
-        probe = self.status_probe(self.adapter)
-        checks.append(
-            DoctorCheck(
-                "vscode_live_status",
-                PASS if probe.status == "available" else PARTIAL,
-                probe.reason if _SAFE_REASON.fullmatch(probe.reason) else "vscode_status_unknown",
-                {"source": probe.source or "none"},
+        if self.linux_bound:
+            checks.extend(self._linux_binding_checks())
+        else:
+            probe = self.status_probe(self.adapter)
+            checks.append(
+                DoctorCheck(
+                    "vscode_live_status",
+                    PASS if probe.status == "available" else PARTIAL,
+                    probe.reason if _SAFE_REASON.fullmatch(probe.reason) else "vscode_status_unknown",
+                    {"source": probe.source or "none"},
+                )
             )
-        )
-        live_index, live_count = self._live_window_index(probe)
-        checks.append(
-            DoctorCheck(
-                "live_window_discovery",
-                PASS if live_count is not None else PARTIAL,
-                "live_windows_resolved"
-                if live_count is not None
-                else "live_windows_unavailable",
-                {"resolved_window_count": live_count or 0},
+            live_index, live_count = self._live_window_index(probe)
+            checks.append(
+                DoctorCheck(
+                    "live_window_discovery",
+                    PASS if live_count is not None else PARTIAL,
+                    "live_windows_resolved"
+                    if live_count is not None
+                    else "live_windows_unavailable",
+                    {"resolved_window_count": live_count or 0},
+                )
             )
-        )
-        checks.append(self._thread_resolution_check(probe, live_index))
+            checks.append(self._thread_resolution_check(probe, live_index))
         checks.append(self._queue_check(executable, executable_available))
         checks.append(self._hook_check())
 
-        credential_status = PASS if self.adapter.system == "windows" else PARTIAL
+        credential_status = (
+            PASS if self.adapter.system in ("windows", "macos") else PARTIAL
+        )
         checks.append(
             DoctorCheck(
                 "credential_storage",
@@ -184,7 +194,9 @@ class WatchdogDoctor:
                 {"encrypted_store_required": True},
             )
         )
-        launcher_status = PASS if self.adapter.system == "windows" else PARTIAL
+        launcher_status = (
+            PASS if self.adapter.system in ("windows", "macos") else PARTIAL
+        )
         checks.append(
             DoctorCheck(
                 "launcher",
@@ -215,6 +227,54 @@ class WatchdogDoctor:
             tuple(checks),
             utc_now(),
         )
+
+    def _linux_binding_checks(self) -> Tuple[DoctorCheck, ...]:
+        from .linux_binding import LinuxBinding, LinuxBindingError, exact_thread, reservation_path
+        from .linux_owner import kernel_lock_owner, vscode_writer, writer_pid
+
+        if self.adapter.system != "linux":
+            return (DoctorCheck("linux_binding", FAIL, "linux_required", {}),)
+        try:
+            binding = LinuxBinding(self.runtime, self.codex_home)
+            value = binding.load()
+            workspace = binding.workspace(value)
+            exact_thread(self.codex_home, workspace)
+            expired = binding.status()["lease_expired"]
+            binding_check = DoctorCheck(
+                "linux_binding",
+                PASS if value["state"] == "armed" and not expired else PARTIAL,
+                "linux_binding_valid",
+                {"binding_state": value["state"], "lease_expired": expired,
+                 "explicit_operator_binding": True},
+            )
+            controller = kernel_lock_owner(
+                reservation_path(self.codex_home, workspace.session_id).with_suffix(".owner.lock")
+            )
+            controller_check = DoctorCheck(
+                "linux_controller", PASS if controller is not None else PARTIAL,
+                "linux_controller_present" if controller is not None else "linux_controller_not_running",
+                {"live_kernel_lock": controller is not None},
+            )
+            writer = writer_pid(self.codex_home, workspace.session_id)
+            if writer is None:
+                writer_check = DoctorCheck("linux_writer", PARTIAL, "linux_writer_vacant", {})
+            elif vscode_writer(writer):
+                writer_check = DoctorCheck("linux_writer", PASS, "linux_vscode_writer_verified", {})
+            else:
+                process = Path("/proc") / str(writer)
+                before = (process / "stat").read_text().rsplit(")", 1)[1].split()
+                arguments = (process / "cmdline").read_bytes().split(b"\0")
+                after = (process / "stat").read_text().rsplit(")", 1)[1].split()
+                owned = (controller is not None and int(before[1]) == controller
+                         and before[19] == after[19] and b"app-server" in arguments)
+                writer_check = DoctorCheck(
+                    "linux_writer", PASS if owned else FAIL,
+                    "linux_source_writer_verified" if owned else "linux_conflicting_writer", {},
+                )
+            return binding_check, controller_check, writer_check
+        except (LinuxBindingError, OSError, ValueError, IndexError) as exc:
+            reason = str(exc) if isinstance(exc, LinuxBindingError) else "linux_owner_probe_unavailable"
+            return (DoctorCheck("linux_binding", FAIL, reason, {}),)
 
     def _user_data_check(self) -> DoctorCheck:
         if self.user_data_root is None:

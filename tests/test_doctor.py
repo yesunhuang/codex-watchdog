@@ -161,3 +161,31 @@ def test_linux_doctor_identifies_preview_security_and_launcher_boundaries(
     assert checks["credential_storage"].reason == "linux_libsecret_required"
     assert checks["launcher"].status == "PARTIAL"
     assert checks["launcher"].reason == "foreground_cli_only"
+
+
+def test_macos_doctor_reports_native_keychain_launcher_capability(
+    tmp_path: Path,
+) -> None:
+    adapter = detect_platform_adapter(
+        system_name="Darwin",
+        machine="arm64",
+        home=tmp_path,
+        environment={},
+        which=lambda _command: None,
+    )
+    report = WatchdogDoctor(
+        tmp_path / "runtime",
+        adapter=adapter,
+        status_probe=lambda _adapter: VSCodeStatusProbe(
+            "unavailable", "vscode_cli_unavailable"
+        ),
+    ).run()
+    checks = {check.name: check for check in report.checks}
+
+    assert report.platform == "macos"
+    assert report.architecture == "arm64"
+    assert report.support_tier == "preview_native_e2e"
+    assert checks["credential_storage"].status == "PASS"
+    assert checks["credential_storage"].reason == "macos_keychain_slack"
+    assert checks["launcher"].status == "PASS"
+    assert checks["launcher"].reason == "macos_keychain_foreground"

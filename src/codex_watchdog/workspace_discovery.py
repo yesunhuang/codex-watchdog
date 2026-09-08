@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import ctypes
+import errno
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -171,7 +172,11 @@ def _posix_writer_lock_is_held(path: Path) -> bool:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except (BlockingIOError, OSError) as exc:
-            if getattr(exc, "errno", None) in (11, 13):
+            if getattr(exc, "errno", None) in {
+                errno.EACCES,
+                errno.EAGAIN,
+                errno.EWOULDBLOCK,
+            }:
                 return True
             return False
         fcntl.flock(descriptor, fcntl.LOCK_UN)

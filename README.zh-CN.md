@@ -45,13 +45,21 @@
 | Windows x64 本地桌面 | **稳定、已完成端到端验证的打包参考实现** |
 | Linux Remote-SSH 目标 | **真实远程路径已验证** |
 | Linux 本地桌面 | **CI 已验证的预览版；仍需真实桌面端到端验证** |
-| macOS 本地桌面 | **CI 已验证的预览/Beta；仍需真实 Apple Silicon 端到端验证** |
+| Linux 显式绑定的同线程源码工作流 | **已在 Ubuntu ARM64 完成真实端到端验证** |
+| macOS Apple Silicon 源码工作流 | **已完成真实端到端验证；仍有窗口拓扑限制** |
+| macOS 15 ARM64 安装包 | **开发者预览；原生安装包 CI 已验证，等待手动实机验收** |
 
 Linux 与 macOS 源码安装现在共用 POSIX 锁与存储、标准 VS Code 路径、
 原生 `code --status` 和 Codex 可执行文件发现，但仍是前台预览版。
 可运行 `codex-watchdog doctor` 进行只读检查，或用
 `codex-watchdog doctor --export report.json` 生成不含隐私信息的诊断文件。
 详见[平台支持与诊断](docs/PLATFORM_SUPPORT.md)。
+
+Apple Silicon 用户可从 [GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases)
+下载 `codex-watchdog-vX.Y.Z-macos-arm64-preview.zip`，校验 `SHA256SUMS.txt`
+后解压，并运行 `./codex-watchdog macos-install`。安装包自带 Python，复用已有
+运行目录和 Keychain 设置。预览版仅使用 ad-hoc 签名，尚未公证；手动测试步骤见
+[Mac 安装包指南](docs/MACOS_PACKAGE.md)。
 
 ## 它能做什么
 

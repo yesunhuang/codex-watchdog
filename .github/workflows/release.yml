@@ -1,165 +1,215 @@
-name: Release Windows beta
-
-on:
-  workflow_dispatch:
+name: Publish versioned packages
+'on':
+  workflow_dispatch: null
   push:
     branches:
-      - main
+    - main
     paths:
-      - pyproject.toml
-
+    - pyproject.toml
 concurrency:
   group: codex-watchdog-version-release
   cancel-in-progress: false
-
 permissions:
   contents: read
-
+env:
+  PYTHONUTF8: '1'
 jobs:
-  release:
+  version:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.version.outputs.should_release }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      previous_tag: ${{ steps.version.outputs.previous_tag }}
+      previous_version: ${{ steps.version.outputs.previous_version }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - run: python -m pip install --disable-pip-version-check packaging==26.3
+    - name: Detect an unreleased version and upgrade predecessor
+      id: version
+      env:
+        BEFORE_SHA: ${{ github.event.before }}
+        GH_TOKEN: ${{ github.token }}
+      run: python scripts/release_metadata.py
+  tests:
+    needs: version
+    if: needs.version.outputs.should_release == 'true'
+    uses: ./.github/workflows/ci.yml
+  windows:
+    needs: version
+    if: needs.version.outputs.should_release == 'true'
     runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
+      PREVIOUS_TAG: ${{ needs.version.outputs.previous_tag }}
+      PREVIOUS_VERSION: ${{ needs.version.outputs.previous_version }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.9'
+        architecture: x64
+        cache: pip
+        cache-dependency-path: requirements-release.txt
+    - name: Install pinned release environment
+      shell: pwsh
+      run: |
+        python -m pip install --disable-pip-version-check --upgrade pip==26.0.1
+        python -m pip install --disable-pip-version-check -r requirements-release.txt
+        python -m pip install --disable-pip-version-check --no-deps --no-build-isolation .
+        python -m pip check
+    - name: Scan complete public history with Gitleaks
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        $toolRoot = Join-Path $env:RUNNER_TEMP 'gitleaks-8.30.1'
+        New-Item -ItemType Directory -Path $toolRoot -Force | Out-Null
+        gh release download v8.30.1 --repo gitleaks/gitleaks --pattern 'gitleaks_8.30.1_windows_x64.zip' --dir $toolRoot
+        $archive = Join-Path $toolRoot 'gitleaks_8.30.1_windows_x64.zip'
+        $expected = 'd29144deff3a68aa93ced33dddf84b7fdc26070add4aa0f4513094c8332afc4e'
+        $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -ne $expected) { throw "Gitleaks checksum mismatch: $actual" }
+        $expanded = Join-Path $toolRoot 'expanded'
+        Expand-Archive -LiteralPath $archive -DestinationPath $expanded
+        & (Join-Path $expanded 'gitleaks.exe') git --no-banner --no-color --redact=100 --ignore-gitleaks-allow --report-format json --report-path (Join-Path $toolRoot 'report.json') --log-opts='--all --full-history' .
+        if ($LASTEXITCODE -ne 0) { throw "Gitleaks returned exit code $LASTEXITCODE" }
+    - name: Build Windows x64 package
+      shell: pwsh
+      run: |
+        .\scripts\build_windows_release.ps1 -Python (Get-Command python).Source -OutputDirectory dist
+    - name: Verify embedded application icon
+      shell: pwsh
+      run: |
+        python .\tools\verify_windows_executable_icon.py `
+          --executable ".\dist\codex-watchdog-v${{ needs.version.outputs.version }}-windows-x64\codex-watchdog.exe" `
+          --icon ".\images\codex-watchdog.ico"
+    - name: Download and verify the immediately previous public Windows package
+      shell: pwsh
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        $previousRoot = Join-Path $env:RUNNER_TEMP 'previous-release'
+        New-Item -ItemType Directory -Path $previousRoot | Out-Null
+        $name = "codex-watchdog-v$env:PREVIOUS_VERSION-windows-x64.zip"
+        gh release download $env:PREVIOUS_TAG --repo $env:GITHUB_REPOSITORY --pattern $name --pattern SHA256SUMS.txt --dir $previousRoot
+        if ($LASTEXITCODE -ne 0) { throw 'Previous release download failed' }
+        $lines = @(Get-Content -LiteralPath (Join-Path $previousRoot 'SHA256SUMS.txt') | Where-Object { ($_ -split '\s+', 2)[1] -eq $name })
+        if ($lines.Count -ne 1) { throw 'Previous release checksum is missing or ambiguous' }
+        $archive = Join-Path $previousRoot $name
+        if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne ($lines[0] -split '\s+', 2)[0]) { throw 'Previous release checksum mismatch' }
+        Expand-Archive -LiteralPath $archive -DestinationPath $previousRoot
+        "PREVIOUS_PACKAGE=$previousRoot/codex-watchdog-v$env:PREVIOUS_VERSION-windows-x64" >> $env:GITHUB_ENV
+    - name: Test fresh startup and previous-release upgrade without Python
+      shell: pwsh
+      run: |
+        $parameters = @{
+            PackageDirectory = "./dist/codex-watchdog-v$env:RELEASE_VERSION-windows-x64"
+            ExpectedVersion = $env:RELEASE_VERSION
+            PreviousPackageDirectory = $env:PREVIOUS_PACKAGE
+            PreviousVersion = $env:PREVIOUS_VERSION
+        }
+        ./scripts/test_windows_package.ps1 @parameters | Set-Content -LiteralPath dist/windows-package-acceptance.json -Encoding utf8
+    - uses: actions/upload-artifact@v4
+      with:
+        name: windows-release-candidate
+        path: |
+          dist/*.zip
+          dist/SHA256SUMS.txt
+          dist/windows-package-acceptance.json
+        if-no-files-found: error
+        retention-days: 14
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 25
+    env:
+      PYTHONUTF8: '1'
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+        cache: pip
+        cache-dependency-path: requirements-macos-package.txt
+    - name: Install pinned build and test dependencies
+      run: |
+        python -m pip install --disable-pip-version-check pip==26.0.1
+        python -m pip install --disable-pip-version-check -r requirements-macos-package.txt
+        python -m pip install --disable-pip-version-check --no-deps --no-build-isolation .
+        python -m pip check
+    - name: Verify source and existing Mac launcher regressions
+      run: |
+        python -m compileall -q src tools tests packaging scripts
+        python -m pytest --basetemp .pytest-temp-package
+        bash -n watchdog-macos.sh
+        bash -n setup-slack-relay-macos.sh
+    - name: Build ARM64 developer preview
+      run: python scripts/build_macos_package.py
+    - name: Test the package without source Python
+      run: python scripts/test_macos_package.py --package dist/*-macos-arm64-preview
+    - name: Retain tested Mac release candidate
+      uses: actions/upload-artifact@v4
+      with:
+        name: macos-release-candidate
+        path: |
+          dist/*.zip
+          dist/*.sha256
+          dist/macos-package-acceptance.json
+        if-no-files-found: error
+        retention-days: 14
+    needs: version
+    if: needs.version.outputs.should_release == 'true'
+  publish:
+    needs:
+    - version
+    - tests
+    - windows
+    - macos
+    if: needs.version.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ needs.version.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
+      PREVIOUS_TAG: ${{ needs.version.outputs.previous_tag }}
     steps:
-      - name: Check out complete public history
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Set up release Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.9"
-          architecture: x64
-          cache: pip
-          cache-dependency-path: requirements-release.txt
-
-      - name: Detect an unreleased SemVer change
-        id: version
-        shell: pwsh
-        env:
-          BEFORE_SHA: ${{ github.event.before }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          function Read-ProjectVersion([string]$Text) {
-            $project = [regex]::Match($Text, '(?ms)^\[project\]\s*(.*?)(?=^\[|\z)')
-            if (-not $project.Success) { throw 'Missing [project] table.' }
-            $match = [regex]::Match($project.Groups[1].Value, '(?m)^version\s*=\s*"([^"]+)"\s*$')
-            if (-not $match.Success) { throw 'Missing [project] version.' }
-            return $match.Groups[1].Value
-          }
-
-          $current = Read-ProjectVersion (Get-Content -Raw -LiteralPath pyproject.toml)
-          if ($current -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') {
-            throw "Project version is not valid SemVer: $current"
-          }
-          $previous = $null
-          if ($env:BEFORE_SHA -and $env:BEFORE_SHA -notmatch '^0+$') {
-            $previousText = git show "${env:BEFORE_SHA}:pyproject.toml" 2>$null
-            if ($LASTEXITCODE -eq 0) {
-              $previous = Read-ProjectVersion ($previousText -join "`n")
-            }
-          }
-          if ($previous -eq $current) {
-            "should_release=false" >> $env:GITHUB_OUTPUT
-            "version=$current" >> $env:GITHUB_OUTPUT
-            Write-Host "pyproject.toml changed without a version change; no release."
-            exit 0
-          }
-
-          $tag = "v$current"
-          git show-ref --tags --verify --quiet "refs/tags/$tag"
-          if ($LASTEXITCODE -eq 0) {
-            throw "Tag already exists: $tag"
-          }
-          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
-          if ($LASTEXITCODE -eq 0) {
-            throw "Release already exists: $tag"
-          }
-          "should_release=true" >> $env:GITHUB_OUTPUT
-          "version=$current" >> $env:GITHUB_OUTPUT
-          "tag=$tag" >> $env:GITHUB_OUTPUT
-          Write-Host "Version changed from '$previous' to '$current'; release is eligible."
-          exit 0
-
-      - name: Install pinned release environment
-        if: steps.version.outputs.should_release == 'true'
-        shell: pwsh
-        run: |
-          python -m pip install --disable-pip-version-check --upgrade pip==26.0.1
-          python -m pip install --disable-pip-version-check -r requirements-release.txt
-          python -m pip install --disable-pip-version-check --no-deps --no-build-isolation .
-          python -m pip check
-
-      - name: Run source and version gates
-        if: steps.version.outputs.should_release == 'true'
-        shell: pwsh
-        run: |
-          python -m pytest --basetemp .pytest-temp-release
-          python -m compileall -q src tools tests
-          $reported = (python -m codex_watchdog --version | Out-String).Trim()
-          $expected = "codex-watchdog ${{ steps.version.outputs.version }}"
-          if ($LASTEXITCODE -ne 0 -or $reported -ne $expected) {
-            throw "Source CLI version mismatch: '$reported' != '$expected'"
-          }
-
-      - name: Scan complete public history with Gitleaks
-        if: steps.version.outputs.should_release == 'true'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $toolRoot = Join-Path $env:RUNNER_TEMP 'gitleaks-8.30.1'
-          New-Item -ItemType Directory -Path $toolRoot -Force | Out-Null
-          gh release download v8.30.1 --repo gitleaks/gitleaks --pattern 'gitleaks_8.30.1_windows_x64.zip' --dir $toolRoot
-          $archive = Join-Path $toolRoot 'gitleaks_8.30.1_windows_x64.zip'
-          $expected = 'd29144deff3a68aa93ced33dddf84b7fdc26070add4aa0f4513094c8332afc4e'
-          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actual -ne $expected) { throw "Gitleaks checksum mismatch: $actual" }
-          $expanded = Join-Path $toolRoot 'expanded'
-          Expand-Archive -LiteralPath $archive -DestinationPath $expanded
-          & (Join-Path $expanded 'gitleaks.exe') git --no-banner --no-color --redact=100 --ignore-gitleaks-allow --report-format json --report-path (Join-Path $toolRoot 'report.json') --log-opts='--all --full-history' .
-          if ($LASTEXITCODE -ne 0) { throw "Gitleaks returned exit code $LASTEXITCODE" }
-
-      - name: Build Windows x64 package
-        if: steps.version.outputs.should_release == 'true'
-        shell: pwsh
-        run: |
-          .\scripts\build_windows_release.ps1 -Python (Get-Command python).Source -OutputDirectory dist
-
-      - name: Verify embedded application icon
-        if: steps.version.outputs.should_release == 'true'
-        shell: pwsh
-        run: |
-          python .\tools\verify_windows_executable_icon.py `
-            --executable ".\dist\codex-watchdog-v${{ steps.version.outputs.version }}-windows-x64\codex-watchdog.exe" `
-            --icon ".\images\codex-watchdog.ico"
-
-      - name: Test package without Python on PATH
-        if: steps.version.outputs.should_release == 'true'
-        shell: pwsh
-        run: |
-          .\scripts\test_windows_package.ps1 `
-            -PackageDirectory ".\dist\codex-watchdog-v${{ steps.version.outputs.version }}-windows-x64" `
-            -ExpectedVersion "${{ steps.version.outputs.version }}"
-
-      - name: Create immutable beta release
-        if: steps.version.outputs.should_release == 'true'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $version = '${{ steps.version.outputs.version }}'
-          $tag = '${{ steps.version.outputs.tag }}'
-          $zip = ".\dist\codex-watchdog-v$version-windows-x64.zip"
-          gh release create $tag `
-            $zip `
-            '.\dist\SHA256SUMS.txt' `
-            '.\LICENSE' `
-            '.\THIRD_PARTY_NOTICES.md' `
-            '.\ASSETS.md' `
-            --repo $env:GITHUB_REPOSITORY `
-            --target $env:GITHUB_SHA `
-            --title "Codex WatchDog $tag beta" `
-            --prerelease `
-            --generate-notes
+    - uses: actions/checkout@v4
+    - uses: actions/download-artifact@v4
+      with:
+        name: windows-release-candidate
+        path: incoming/windows
+    - uses: actions/download-artifact@v4
+      with:
+        name: macos-release-candidate
+        path: incoming/macos
+    - name: Verify and assemble the tested release assets
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir release-assets
+        cp "incoming/windows/codex-watchdog-v$RELEASE_VERSION-windows-x64.zip" release-assets/
+        cp "incoming/macos/codex-watchdog-v$RELEASE_VERSION-macos-arm64-preview.zip" release-assets/
+        cat incoming/windows/SHA256SUMS.txt "incoming/macos/codex-watchdog-v$RELEASE_VERSION-macos-arm64-preview.zip.sha256" > release-assets/SHA256SUMS.txt
+        (cd release-assets && sha256sum --check SHA256SUMS.txt)
+        cp incoming/windows/windows-package-acceptance.json incoming/macos/macos-package-acceptance.json release-assets/
+        cp LICENSE THIRD_PARTY_NOTICES.md ASSETS.md release-assets/
+    - name: Publish a new beta after every source and package gate passes
+      shell: bash
+      run: |
+        set -euo pipefail
+        gh release create "$RELEASE_TAG" release-assets/* \
+          --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+          --title "Codex WatchDog $RELEASE_TAG beta" --draft --prerelease \
+          --generate-notes --notes-start-tag "$PREVIOUS_TAG" --notes-file docs/RELEASE_NOTES.md
+        gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false

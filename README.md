@@ -47,13 +47,16 @@ watches, wakes, relays, and notifies without becoming another AI agent.
 | --- | --- |
 | Windows x64 local desktop | **Stable, full E2E verified, packaged reference** |
 | Linux Remote-SSH target | **Real remote path verified** |
+| Linux explicit same-thread source owner | **Native E2E verified on Ubuntu ARM64** |
 | Linux local desktop | **CI-verified preview; native desktop E2E pending** |
-| macOS local desktop | **CI-verified preview/beta; real Apple Silicon E2E pending** |
+| macOS Apple Silicon source workflow | **Native E2E verified; topology limitations remain** |
+| macOS 15 ARM64 package | **Developer preview; native package CI verified, manual device acceptance pending** |
 
 Source installs now share POSIX locking/storage, standard VS Code paths, native
 `code --status`, and Codex executable discovery on Linux and macOS. They remain
-foreground previews; no Linux/macOS standalone package or background service is
-claimed. Run the privacy-safe read-only audit with `codex-watchdog doctor` or
+foreground previews. Apple Silicon has a self-contained ZIP; Linux uses the
+[explicit source workflow](docs/LINUX_SOURCE_WORKFLOW.md). No background-service
+installer is included. Run the privacy-safe read-only audit with `codex-watchdog doctor` or
 produce a tester attachment with `codex-watchdog doctor --export report.json`.
 See [platform support and diagnostics](docs/PLATFORM_SUPPORT.md) for exact
 support meanings and the native validation checklist.
@@ -71,6 +74,25 @@ support meanings and the native validation checklist.
 - Optionally relays allowlisted replies from a WatchDog-created Slack thread
   back to Codex (the **Parrot Dog** path).
 - Enforces a zero-Git-mutation boundary in every WatchDog locality.
+
+## Quick start - Apple Silicon developer preview
+
+Download `codex-watchdog-vX.Y.Z-macos-arm64-preview.zip` from
+[GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases), verify
+its entry in `SHA256SUMS.txt`, and extract it. Python is included. This preview
+targets macOS 15 on Apple Silicon and is ad-hoc signed, not notarized.
+
+From the extracted directory:
+
+```sh
+./codex-watchdog --version
+./codex-watchdog macos-install
+"$HOME/Library/Application Support/CodexWatchdog/bin/codex-watchdog" doctor
+```
+
+Existing runtime, routing, and Keychain settings are reused. See the
+[Mac package guide](docs/MACOS_PACKAGE.md) for stable hook installation, normal
+human trust, foreground Slack operation, upgrades, rollback, and manual testing.
 
 ## Quick start - Windows x64 beta
 

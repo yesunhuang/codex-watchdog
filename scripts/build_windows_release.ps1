@@ -81,6 +81,16 @@ try {
     New-Item -ItemType Directory -Path $binaryDirectory -Force | Out-Null
     New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
 
+    # Version discovery needs only Name/Version. Do not bundle pip's checkout URL.
+    $metadataName = "codex_watchdog-$version.dist-info"
+    $metadataDirectory = Join-Path $buildRoot $metadataName
+    New-Item -ItemType Directory -Path $metadataDirectory -Force | Out-Null
+    [IO.File]::WriteAllText(
+        (Join-Path $metadataDirectory 'METADATA'),
+        "Metadata-Version: 2.1`nName: codex-watchdog`nVersion: $version`n",
+        [Text.UTF8Encoding]::new($false)
+    )
+
     $pyinstallerArguments = @(
         "-m", "PyInstaller",
         "--noconfirm",
@@ -93,7 +103,7 @@ try {
         "--distpath", $binaryDirectory,
         "--workpath", $workDirectory,
         "--specpath", $specDirectory,
-        "--copy-metadata", "codex-watchdog",
+        "--add-data", "$metadataDirectory;$metadataName",
         "--collect-submodules", "msal_extensions",
         "--collect-submodules", "slack_bolt",
         "--collect-submodules", "slack_sdk",

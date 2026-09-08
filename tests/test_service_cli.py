@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -46,6 +47,7 @@ def test_service_once_persists_git_blocker_without_initializing_queue(
 ) -> None:
     runtime = tmp_path / "runtime"
     repo = tmp_path / "not-a-git-repository"
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     repo.mkdir()
     WorkspaceRegistry(runtime).add("workspace-1", repo, SESSION)
 
@@ -64,8 +66,8 @@ def test_service_once_persists_git_blocker_without_initializing_queue(
     assert value["workspace_count"] == 1
     assert value["workspaces"][0]["status"] == "persisted"
     assert value["workspaces"][0]["git_status"] == "blocked"
-    # pytest's configured tmp_path is nested beneath this checkout, so Git can
-    # discover the parent repository; the exact-root guard must reject it.
+    # The fixture is nested beneath a separate parent worktree, so Git can
+    # discover that parent; the exact-root guard must reject it.
     assert value["workspaces"][0]["blockers"] == ["repo_root_mismatch"]
     assert (
         RunOnceService(runtime, registry=WorkspaceRegistry(runtime))
@@ -172,6 +174,30 @@ def test_run_foreground_rejects_second_monitor_for_same_runtime(
         "runtime": str(runtime.resolve()),
         "status": "already_running",
     }
+
+
+def test_run_once_reports_service_cycle_lock_contention_with_bounded_reason(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clear_notification_environment(monkeypatch)
+    runtime = tmp_path / "runtime"
+    lock_path = runtime / "locks" / "service-once.lock"
+
+    with FileLock(lock_path):
+        code = cli.main(
+            ["--runtime", str(runtime), "run", "--once", "--manual-only"]
+        )
+
+    output = capsys.readouterr()
+    value = json.loads(output.out)
+    assert code == 1
+    assert output.err == ""
+    assert value["status"] == "error"
+    assert value["reason"] == "service_cycle_lock_held"
+    assert value["workspace_count"] == 0
+    assert value["error_chars"] > 0
+    assert value["error_sha256"] is not None
+    assert str(runtime) not in output.out
 
 
 def test_run_manual_only_disables_automatic_discovery(

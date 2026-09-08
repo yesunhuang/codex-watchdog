@@ -60,6 +60,9 @@ def test_platform_adapters_resolve_standard_user_data_roots(tmp_path: Path) -> N
         / "Application Support"
         / "CodexWatchdog"
     ).resolve()
+    assert macos.support_tier == "preview_native_e2e"
+    assert macos.credential_backend == "macos_keychain_slack"
+    assert macos.launcher_mode == "macos_keychain_foreground"
     assert linux.system == "linux"
     assert linux.architecture == "arm64"
     assert linux.primary_vscode_user_data_root() == (
