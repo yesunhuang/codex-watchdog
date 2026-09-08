@@ -102,6 +102,44 @@ def test_inbox_claim_order_is_creation_order_not_hashed_filename(
     assert claimed.prompt == "First submitted"
 
 
+@pytest.mark.parametrize("clock_values", [
+    ["2026-09-08T05:00:00Z", "2026-09-08T05:00:00Z"],
+    ["2026-09-08T05:00:00Z", "2026-09-08T04:59:59Z"],
+])
+def test_creation_order_survives_clock_ties_rollback_and_store_restart(tmp_path, monkeypatch, clock_values):
+    from codex_watchdog import models
+
+    values = iter(clock_values)
+    monkeypatch.setattr(models, "utc_now", lambda: next(values))
+    first = InstructionStore(tmp_path).submit("z-first", "manual", "First submitted")
+    first_bytes = first.path.read_bytes()
+    second = InstructionStore(tmp_path).submit("a-second", "manual", "Second submitted")
+    assert first.path.read_bytes() == first_bytes
+    assert first.instruction.schema_version == second.instruction.schema_version == 1
+    assert storage_module._creation_time(first.instruction) < storage_module._creation_time(second.instruction)
+    # State transitions may share the wall clock; the ordering allocation is durable.
+    monkeypatch.setattr(models, "utc_now", lambda: "2026-09-08T05:00:00Z")
+    assert InstructionStore(tmp_path).claim_next("session", "turn-1").prompt == "First submitted"
+    assert InstructionStore(tmp_path).claim_next("session", "turn-2").prompt == "Second submitted"
+
+
+def test_upgrade_reads_legacy_timestamps_without_rewriting_existing_queue(tmp_path, monkeypatch):
+    from codex_watchdog import models
+
+    store = InstructionStore(tmp_path)
+    first = store.submit("z-legacy", "manual", "Legacy first")
+    value = json.loads(first.path.read_text())
+    value["created_at"] = "2026-09-08T05:00:00Z"
+    first.path.write_text(json.dumps(value))
+    before = first.path.read_bytes()
+    monkeypatch.setattr(models, "utc_now", lambda: "2026-09-08T05:00:00.000000Z")
+    second = InstructionStore(tmp_path).submit("a-new", "manual", "New second")
+    assert first.path.read_bytes() == before
+    assert json.loads(second.path.read_text())["schema_version"] == 1
+    assert store.claim_next("session", "turn-1").prompt == "Legacy first"
+    assert store.claim_next("session", "turn-2").prompt == "New second"
+
+
 def windows_permission_error(winerror: int) -> PermissionError:
     error = PermissionError(winerror, "simulated Windows replace failure")
     error.winerror = winerror

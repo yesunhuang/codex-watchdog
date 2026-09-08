@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 import errno
 import hashlib
 import json
@@ -43,6 +44,13 @@ class StoreBusyError(RuntimeError):
 
 class InstructionCollisionError(RuntimeError):
     """An existing instruction id was reused with different content."""
+
+
+def _creation_time(instruction: Instruction) -> datetime:
+    value = datetime.fromisoformat(instruction.created_at.replace("Z", "+00:00"))
+    if value.tzinfo is None:
+        raise ValueError("instruction timestamp must include a timezone")
+    return value.astimezone(timezone.utc)
 
 
 class FileLock(AbstractContextManager["FileLock"]):
@@ -170,6 +178,17 @@ class InstructionStore:
                             f"instruction id {instruction_id!r} already exists with different metadata or content"
                         )
                     return SubmitResult(existing, status, path)
+            # Allocate a strictly increasing creation stamp under the existing
+            # store lock. Clock ties/rollback must not reorder newly submitted
+            # instructions. Existing schema-1 records remain byte-for-byte intact.
+            created = _creation_time(proposed)
+            for queued_path in self.inbox.glob("*.json"):
+                try:
+                    previous = _creation_time(self._read_instruction(queued_path))
+                except (OSError, ValueError, TypeError, AttributeError):
+                    continue
+                created = max(created, previous + timedelta(microseconds=1))
+            proposed = replace(proposed, created_at=created.isoformat(timespec="microseconds").replace("+00:00", "Z"))
             path = self.inbox / filename
             self._atomic_json(path, proposed.to_dict())
             return SubmitResult(proposed, "created", path)
@@ -180,7 +199,8 @@ class InstructionStore:
             for path in self.inbox.glob("*.json"):
                 try:
                     instruction = self._read_instruction(path)
-                except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                    created = _creation_time(instruction)
+                except (OSError, ValueError, TypeError, AttributeError, json.JSONDecodeError):
                     # Fail open. A partially published or malformed instruction remains
                     # visible for manual recovery and is never interpreted as a prompt.
                     continue
@@ -191,7 +211,7 @@ class InstructionStore:
                     continue
                 candidates.append(
                     (
-                        instruction.created_at,
+                        created,
                         instruction.instruction_id,
                         path,
                         instruction,
