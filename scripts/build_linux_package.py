@@ -17,6 +17,7 @@ import tomllib
 import zipfile
 
 from linux_package_licenses import add_native_inventory
+from linux_package_compat import verify_glibc_requirements
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -95,12 +96,15 @@ def main() -> None:
     binaries = list(collected_binaries(ast.literal_eval(analysis[0].read_text(encoding="utf-8"))))
     if not binaries:
         raise SystemExit("Build dependency graph contains no native libraries.")
+    minimum_glibc = verify_glibc_requirements(
+        [executable, *(Path(original) for _, original, _ in binaries)], architecture)
     add_native_inventory(package / "THIRD_PARTY_LICENSES", binaries)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     files = {path.relative_to(package).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
              for path in package.rglob("*") if path.is_file()}
     manifest = {"schema_version": 1, "version": version, "platform": "linux", "architecture": architecture,
                 "source_commit": commit, "build_glibc": platform.libc_ver()[1],
+                "minimum_glibc": minimum_glibc,
                 "build_python": platform.python_version(), "pyinstaller": PyInstaller.__version__, "files": files}
     (package / "package-manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     with zipfile.ZipFile(archive, "x", compression=zipfile.ZIP_DEFLATED) as target:

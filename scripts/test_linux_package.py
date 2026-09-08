@@ -95,6 +95,10 @@ def wait_state(runtime: Path, expected: str, process=None, timeout: float = 35) 
 
 def validate_archive(package: Path) -> dict:
     manifest = json.loads((package / "package-manifest.json").read_text())
+    required_glibc = tuple(map(int, manifest["minimum_glibc"].split(".")))
+    host_glibc = tuple(map(int, platform.libc_ver()[1].split(".")))
+    assert required_glibc <= {"x64": (2, 28), "arm64": (2, 35)}[manifest["architecture"]]
+    assert host_glibc >= required_glibc
     architecture, machine = {"aarch64": ("arm64", 183), "x86_64": ("x64", 62)}[platform.machine()]
     assert manifest["platform"] == "linux" and manifest["architecture"] == architecture
     assert manifest["schema_version"] == 1 and len(manifest["source_commit"]) == 40
@@ -360,6 +364,8 @@ def main() -> None:
         assert not any("opaque-test-credential-bytes" in value for value in output_log)
     result = {"schema_version": 1, "status": "passed", "version": manifest["version"],
               "architecture": manifest["architecture"], "source_commit": manifest["source_commit"],
+              "minimum_glibc": manifest["minimum_glibc"], "host_glibc": platform.libc_ver()[1],
+              "glibc_requirement_verified": True,
               "python_hidden": True, "source_free_layout": True, "elf_architecture_verified": True,
               "dependency_and_native_license_inventory": True, "own_bytecode_privacy": True,
               "doctor_privacy": True, "manual_registration_migration": True,

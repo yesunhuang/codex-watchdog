@@ -1,0 +1,4 @@
+*
+!requirements-linux-package.txt
+!packaging/
+!packaging/linux-rhel8.Dockerfile

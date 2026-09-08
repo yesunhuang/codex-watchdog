@@ -5,6 +5,7 @@ name: Linux executable packages
     branches:
       - codex-a/linux-packages
       - codex-a/rebind-and-ca
+      - codex-a/linux-rhel8
   workflow_dispatch:
   workflow_call:
 
@@ -46,15 +47,34 @@ jobs:
           python -m compileall -q src tools tests packaging scripts
           python -m pytest --basetemp .pytest-temp-linux-package
       - name: Build the native ELF package and dependency inventory
+        if: matrix.architecture == 'arm64'
         run: python scripts/build_linux_package.py
+      - name: Build x64 against the RHEL 8 glibc baseline
+        if: matrix.architecture == 'x64'
+        run: |
+          docker build --file packaging/linux-rhel8.Dockerfile --tag watchdog-rhel8-builder .
+          docker run --rm --volume "$PWD:/workspace" --env BUILDER_UID="$(id -u)" --env BUILDER_GID="$(id -g)" watchdog-rhel8-builder bash -euc '
+            python -m pip install --disable-pip-version-check --no-deps --no-build-isolation .
+            python -m compileall -q src tools tests packaging scripts
+            python -m pytest --basetemp .pytest-temp-rhel8-package
+            python scripts/build_linux_package.py
+            chown -R "$BUILDER_UID:$BUILDER_GID" dist build .pytest-temp-rhel8-package
+          '
       - name: Test the package with Python hidden
         run: python scripts/test_linux_package.py --package dist/*-linux-${{ matrix.architecture }}
+      - name: Repeat x64 package acceptance on glibc 2.28
+        if: matrix.architecture == 'x64'
+        run: |
+          cp dist/linux-x64-package-acceptance.json dist/linux-x64-ubuntu-package-acceptance.json
+          docker run --rm --volume "$PWD:/workspace" watchdog-rhel8-builder bash -euc '
+            python scripts/test_linux_package.py --package dist/*-linux-x64
+          '
       - uses: actions/upload-artifact@v4
         with:
           name: linux-${{ matrix.architecture }}-release-candidate
           path: |
             dist/*.zip
             dist/*.sha256
-            dist/linux-${{ matrix.architecture }}-package-acceptance.json
+            dist/linux-${{ matrix.architecture }}*-package-acceptance.json
           if-no-files-found: error
           retention-days: 14

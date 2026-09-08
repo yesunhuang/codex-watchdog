@@ -13,6 +13,33 @@ import sys
 import sysconfig
 
 
+def rpm_license_record(destination: Path, source: Path) -> dict:
+    result = subprocess.run(["rpm", "-qf", "--queryformat", "%{NAME}\n", str(source)],
+                            capture_output=True, text=True)
+    names = set(result.stdout.splitlines())
+    if result.returncode or len(names) != 1:
+        raise RuntimeError("RPM library ownership is missing or ambiguous")
+    package = names.pop()
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.+-]*", package) is None:
+        raise RuntimeError("Invalid RPM package name")
+    version = subprocess.check_output(
+        ["rpm", "-q", "--queryformat", "%{VERSION}-%{RELEASE}", package], text=True).strip()
+    paths = subprocess.check_output(["rpm", "-q", "--licensefiles", package], text=True).splitlines()
+    licenses = sorted({Path(path).resolve(strict=True) for path in paths if Path(path).is_file()})
+    if not licenses:
+        raise RuntimeError("RPM native-library license text is missing: " + package)
+    files = []
+    for index, license_path in enumerate(licenses):
+        relative = "native-rpm-" + package + "/" + str(index) + "-" + license_path.name
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(license_path, target)
+        files.append({"path": relative, "sha256": hashlib.sha256(target.read_bytes()).hexdigest()})
+    return {"name": "rpm-" + package, "version": version,
+            "license": "See copied RPM license text", "url": "https://access.redhat.com/articles/4238681",
+            "license_files": files}
+
+
 def add_native_inventory(destination: Path, binaries: list[tuple[str, str, str]]) -> None:
     inventory_path = destination / "inventory.json"
     inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
@@ -34,6 +61,10 @@ def add_native_inventory(destination: Path, binaries: list[tuple[str, str, str]]
                 raise RuntimeError("Bundled native distribution missing from license inventory: " + owner)
         elif source.name.startswith("libpython") or (stdlib / "lib-dynload") in source.parents:
             owner = "cpython runtime"
+        elif shutil.which("rpm") and not shutil.which("dpkg-query"):
+            record = rpm_license_record(destination, source)
+            owner = record["name"]
+            records[owner] = record
         else:
             candidates = {str(source), str(Path(original))}
             for candidate in tuple(candidates):
