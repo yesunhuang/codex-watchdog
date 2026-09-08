@@ -121,6 +121,7 @@ def _copy_python_license(destination: Path) -> Dict[str, object]:
         Path(sys.base_prefix) / "LICENSE_PYTHON.txt",
         Path(sysconfig.get_path("stdlib")) / "LICENSE.txt",
         Path(sys.base_prefix) / "LICENSE",
+        Path("/usr/share/doc") / ("python" + str(sys.version_info.major) + "." + str(sys.version_info.minor)) / "copyright",
     ]
     source = next((candidate for candidate in candidates if candidate.is_file()), None)
     if source is None:

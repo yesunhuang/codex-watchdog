@@ -8,7 +8,7 @@ import shlex
 
 import pytest
 
-from codex_watchdog import macos_package as package
+from codex_watchdog import linux_package as package
 from codex_watchdog import posix_package
 from codex_watchdog.storage import FileLock, InstructionStore, StoreBusyError
 
@@ -31,6 +31,49 @@ def legacy_hooks(root: Path, runtime: Path) -> dict:
     }}
 
 
+@pytest.mark.parametrize("field,value", [
+    ("schema_version", True), ("schema_version", 2),
+    ("platform", "macos"), ("architecture", "arm64"), ("version", "0.0.0"),
+    ("files", {"codex-watchdog": "0" * 64}),
+])
+def test_candidate_manifest_refuses_wrong_identity_or_hash(tmp_path, monkeypatch, field, value):
+    from codex_watchdog import __version__
+
+    executable = tmp_path / "codex-watchdog"
+    executable.write_bytes(b"\x7fELF\x02\x01" + bytes(12) + (62).to_bytes(2, "little"))
+    manifest = {"schema_version": 1, "platform": "linux", "architecture": "x64",
+                "version": __version__, "files": {"codex-watchdog": package.file_hash(executable)}}
+    monkeypatch.setattr(package, "architecture", lambda: "x64")
+    write_json(tmp_path / "package-manifest.json", manifest)
+    package.validate_bundle(tmp_path)
+    manifest[field] = value
+    write_json(tmp_path / "package-manifest.json", manifest)
+    with pytest.raises(package.PackageError, match="candidate_manifest_invalid"):
+        package.validate_bundle(tmp_path)
+
+
+def test_help_and_runtime_lookup_leave_fresh_user_state_absent(tmp_path, monkeypatch, capsys):
+    config, codex = tmp_path / "config", tmp_path / "codex"
+    monkeypatch.setenv("CODEX_WATCHDOG_LINUX_CONFIG_DIR", str(config))
+    monkeypatch.setenv("CODEX_HOME", str(codex))
+    assert package.select_runtime(config, codex) == config / "runtime"
+    assert package.main(["--help"], tmp_path / "codex-watchdog") == 0
+    assert package.main([], tmp_path / "codex-watchdog") == 0
+    assert not config.exists() and not codex.exists()
+    assert "linux-install" in capsys.readouterr().out
+
+
+def test_invalid_profile_error_has_no_private_path_or_contents(tmp_path, monkeypatch, capsys):
+    config = tmp_path / "private profile"
+    write_json(config / package.PROFILE_NAME, {"schema_version": 99, "secret": "private-value"})
+    monkeypatch.setenv("CODEX_WATCHDOG_LINUX_CONFIG_DIR", str(config))
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    assert package.main(["doctor"], tmp_path / "codex-watchdog") == 1
+    output = capsys.readouterr()
+    assert not output.out
+    assert json.loads(output.err) == {"status": "blocked", "reason": "linux_profile_unsupported"}
+
+
 @pytest.fixture
 def installation(tmp_path: Path, monkeypatch):
     root = tmp_path.resolve()
@@ -46,6 +89,7 @@ def installation(tmp_path: Path, monkeypatch):
     write_json(config / "slack-relay.json", {"schema_version": 1, "channel_id": "G12345678",
                                             "allowed_user_ids": ["U12345678"], "unknown": "preserve"})
     monkeypatch.setattr(package, "validate_executable", lambda path: None)
+    monkeypatch.setattr(package, "validate_bundle", lambda path: None)
     return bundle, config, codex, runtime
 
 
@@ -112,7 +156,7 @@ def test_invalid_candidate_never_replaces_an_install(installation, monkeypatch):
     bundle, config, codex, _ = installation
 
     def fail_validation(path):
-        raise package.PackageError("macos_candidate_validation_failed")
+        raise package.PackageError("linux_candidate_validation_failed")
 
     monkeypatch.setattr(package, "validate_executable", fail_validation)
     with pytest.raises(package.PackageError, match="candidate_validation"):
@@ -221,25 +265,8 @@ def test_fresh_render_adds_hooks_without_replacing_third_party_configuration(ins
     assert len(rendered["hooks"]["Stop"]) == 2
 
 
-def test_read_only_runtime_lookup_and_help_do_not_create_user_state(tmp_path, monkeypatch, capsys):
-    config, codex = tmp_path / "config", tmp_path / "codex"
-    monkeypatch.setenv("CODEX_WATCHDOG_MACOS_CONFIG_DIR", str(config))
-    monkeypatch.setenv("CODEX_HOME", str(codex))
-    assert package.main(["_macos-runtime"], tmp_path / "codex-watchdog") == 0
-    assert package.main(["--help"], tmp_path / "codex-watchdog") == 0
-    assert not config.exists() and not codex.exists()
-    assert "macos-install" in capsys.readouterr().out
 
 
-def test_bad_config_errors_do_not_expose_contents_or_paths(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("CODEX_WATCHDOG_MACOS_CONFIG_DIR", str(tmp_path / "config"))
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
-    config = tmp_path / "private directory/relay.json"
-    write_json(config, {"schema_version": 1, "channel_id": "sensitive invalid value"})
-    assert package.main(["_macos-relay-config", str(config)], tmp_path / "codex-watchdog") == 1
-    output = capsys.readouterr()
-    assert not output.out
-    assert json.loads(output.err) == {"status": "blocked", "reason": "macos_slack_config_invalid"}
 
 
 @pytest.mark.skipif(os.name == "nt", reason="native POSIX symlink semantics")

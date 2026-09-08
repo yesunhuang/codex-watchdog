@@ -168,12 +168,17 @@ jobs:
         retention-days: 14
     needs: version
     if: needs.version.outputs.should_release == 'true'
+  linux:
+    needs: version
+    if: needs.version.outputs.should_release == 'true'
+    uses: ./.github/workflows/linux-package.yml
   publish:
     needs:
     - version
     - tests
     - windows
     - macos
+    - linux
     if: needs.version.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -193,16 +198,27 @@ jobs:
       with:
         name: macos-release-candidate
         path: incoming/macos
-    - name: Verify and assemble the tested release assets
+    - name: Download both tested Linux candidates
+      uses: actions/download-artifact@v4
+      with:
+        pattern: linux-*-release-candidate
+        path: incoming/linux
+        merge-multiple: true
+    - name: Verify and assemble all four tested release assets
       shell: bash
       run: |
         set -euo pipefail
         mkdir release-assets
+        python scripts/verify_linux_release_assets.py --directory incoming/linux --version "$RELEASE_VERSION" --commit "$GITHUB_SHA"
         cp "incoming/windows/codex-watchdog-v$RELEASE_VERSION-windows-x64.zip" release-assets/
         cp "incoming/macos/codex-watchdog-v$RELEASE_VERSION-macos-arm64-preview.zip" release-assets/
+        cp "incoming/linux/codex-watchdog-v$RELEASE_VERSION-linux-arm64.zip" release-assets/
+        cp "incoming/linux/codex-watchdog-v$RELEASE_VERSION-linux-x64.zip" release-assets/
         cat incoming/windows/SHA256SUMS.txt "incoming/macos/codex-watchdog-v$RELEASE_VERSION-macos-arm64-preview.zip.sha256" > release-assets/SHA256SUMS.txt
+        cat "incoming/linux/codex-watchdog-v$RELEASE_VERSION-linux-arm64.zip.sha256" "incoming/linux/codex-watchdog-v$RELEASE_VERSION-linux-x64.zip.sha256" >> release-assets/SHA256SUMS.txt
         (cd release-assets && sha256sum --check SHA256SUMS.txt)
         cp incoming/windows/windows-package-acceptance.json incoming/macos/macos-package-acceptance.json release-assets/
+        cp incoming/linux/linux-arm64-package-acceptance.json incoming/linux/linux-x64-package-acceptance.json release-assets/
         cp LICENSE THIRD_PARTY_NOTICES.md ASSETS.md release-assets/
     - name: Publish a new beta after every source and package gate passes
       shell: bash

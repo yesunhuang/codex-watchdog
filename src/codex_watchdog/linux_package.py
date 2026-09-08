@@ -1,4 +1,4 @@
-"""Small package adapter; the accepted Bash launcher still owns Keychain loading."""
+"""Current-user Linux package installation; the existing core owns every thread."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import shlex
 import subprocess
@@ -21,19 +22,24 @@ from .posix_package import (
 from .storage import FileLock, InstructionStore, StoreBusyError
 
 
-PACKAGE_FILES = ("codex-watchdog", "watchdog-macos.sh", "setup-slack-relay-macos.sh")
-PROFILE_NAME = "macos-launcher.json"
+PROFILE_NAME = "linux-launcher.json"
+PACKAGE_FILES = ("codex-watchdog",)
+
+
+def architecture() -> str:
+    try:
+        return {"aarch64": "arm64", "arm64": "arm64", "x86_64": "x64", "AMD64": "x64"}[platform.machine()]
+    except KeyError as exc:
+        raise PackageError("linux_architecture_unsupported") from exc
 
 
 def config_directory() -> Path:
-    return Path(os.environ.get(
-        "CODEX_WATCHDOG_MACOS_CONFIG_DIR",
-        str(Path.home() / "Library/Application Support/CodexWatchdog"),
-    )).expanduser().resolve()
-
-
-def codex_directory() -> Path:
-    return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser().resolve()
+    override = os.environ.get("CODEX_WATCHDOG_LINUX_CONFIG_DIR")
+    data = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))).expanduser()
+    selected = Path(override).expanduser() if override else data / "codex-watchdog"
+    if not selected.is_absolute():
+        raise PackageError("linux_config_path_not_absolute")
+    return selected.resolve()
 
 
 def load_profile(directory: Path) -> Optional[dict]:
@@ -42,56 +48,83 @@ def load_profile(directory: Path) -> Optional[dict]:
         return None
     value = read_json(path)
     if (type(value.get("schema_version")) is not int or value["schema_version"] != 1
-            or not isinstance(value.get("runtime"), str)
-            or not Path(value["runtime"]).is_absolute()
-            or not isinstance(value.get("install_dir"), str)
-            or not Path(value["install_dir"]).is_absolute()
+            or any(not isinstance(value.get(key), str) or not Path(value[key]).is_absolute()
+                   for key in ("runtime", "install_dir", "codex_home"))
             or not isinstance(value.get("files"), dict)
             or set(value["files"]) != set(PACKAGE_FILES)
             or any(not isinstance(v, str) or re.fullmatch(r"[0-9a-f]{64}", v) is None
                    for v in value["files"].values())):
-        raise PackageError("macos_profile_unsupported")
+        raise PackageError("linux_profile_unsupported")
     return value
+
+
+def codex_directory(directory: Path, override: Optional[Path] = None) -> Path:
+    if override is not None:
+        return override.expanduser().resolve()
+    if os.environ.get("CODEX_HOME"):
+        return Path(os.environ["CODEX_HOME"]).expanduser().resolve()
+    profile = load_profile(directory)
+    return Path(profile["codex_home"]) if profile else (Path.home() / ".codex").resolve()
 
 
 def select_runtime(directory: Path, codex_home: Path, override: Optional[Path] = None) -> Path:
     if override is not None:
         return override.expanduser().resolve()
     profile = load_profile(directory)
-    if profile is not None:
+    if profile:
         return Path(profile["runtime"])
-    hooks = codex_home / "hooks.json"
-    if hooks.exists():
-        matches = own_hooks(read_json(hooks))
+    path = codex_home / "hooks.json"
+    if path.exists():
+        matches = own_hooks(read_json(path))
         runtimes = {str(Path(tail[1]).resolve()) for _, _, tail in matches}
         if len(runtimes) > 1:
-            raise PackageError("macos_legacy_runtime_ambiguous")
+            raise PackageError("linux_legacy_runtime_ambiguous")
         if runtimes:
             return Path(runtimes.pop())
     return directory / "runtime"
 
 
+def validate_bundle(bundle: Path) -> None:
+    executable = bundle / "codex-watchdog"
+    manifest = read_json(bundle / "package-manifest.json")
+    if (type(manifest.get("schema_version")) is not int or manifest["schema_version"] != 1
+            or manifest.get("platform") != "linux"
+            or manifest.get("architecture") != architecture()
+            or manifest.get("version") != __version__
+            or not isinstance(manifest.get("files"), dict)
+            or executable.is_symlink() or not executable.is_file()
+            or manifest["files"].get("codex-watchdog") != file_hash(executable)):
+        raise PackageError("linux_candidate_manifest_invalid")
+    with executable.open("rb") as handle:
+        header = handle.read(20)
+    machine = {"arm64": 183, "x64": 62}[architecture()]
+    if (len(header) != 20 or header[:6] != b"\x7fELF\x02\x01"
+            or int.from_bytes(header[18:20], "little") != machine):
+        raise PackageError("linux_candidate_architecture_invalid")
+
+
 def validate_executable(executable: Path) -> None:
-    # No runtime/provider setup is entered by either command.
     for arguments in (["--version"], ["--help"]):
         result = subprocess.run([str(executable), *arguments], capture_output=True,
-                                text=True, timeout=20, check=False)
+                                text=True, timeout=30, check=False)
         if result.returncode or (arguments == ["--version"]
                                  and result.stdout.strip() != "codex-watchdog " + __version__):
-            raise PackageError("macos_candidate_validation_failed")
+            raise PackageError("linux_candidate_validation_failed")
 
 
 def install_package(bundle: Path, directory: Path, codex_home: Path, *,
                     runtime: Optional[Path] = None, install_dir: Optional[Path] = None) -> dict:
+    validate_bundle(bundle)
     directory = directory.expanduser().resolve()
+    codex_home = codex_home.expanduser().resolve()
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with FileLock(directory / "macos-install.lock"), ExitStack() as owner_lock:
+    with FileLock(directory / "linux-install.lock"), ExitStack() as owner_locks:
         profile = load_profile(directory)
         selected_runtime = select_runtime(directory, codex_home, runtime)
         destination = (install_dir or (Path(profile["install_dir"]) if profile else
                                        directory / "bin")).expanduser().absolute()
         if destination.is_symlink() or destination.resolve() != destination:
-            raise PackageError("macos_symlink_write_refused")
+            raise PackageError("linux_symlink_write_refused")
         expected = {name: file_hash(bundle / name) for name in PACKAGE_FILES}
         for name in PACKAGE_FILES:
             existing = destination / name
@@ -99,11 +132,17 @@ def install_package(bundle: Path, directory: Path, codex_home: Path, *,
                 if (existing.is_symlink() or profile is None
                         or Path(profile["install_dir"]) != destination
                         or file_hash(existing) != profile["files"][name]):
-                    raise PackageError("macos_existing_install_conflict")
-        owner_lock.enter_context(FileLock(selected_runtime / "locks/foreground-run.lock"))
+                    raise PackageError("linux_existing_install_conflict")
+        # An explicit runtime move cannot replace the executable of an old live owner.
+        runtimes = {selected_runtime}
+        if profile:
+            runtimes.add(Path(profile["runtime"]))
+        for owned_runtime in sorted(runtimes, key=str):
+            owner_locks.enter_context(FileLock(owned_runtime / "locks/foreground-run.lock"))
         validate_executable(bundle / "codex-watchdog")
         updated = {**(profile or {}), "schema_version": 1, "runtime": str(selected_runtime),
-                   "install_dir": str(destination), "version": __version__, "files": expected}
+                   "install_dir": str(destination), "codex_home": str(codex_home),
+                   "version": __version__, "files": expected}
         if updated == profile and all((destination / name).is_file() for name in PACKAGE_FILES):
             return {"status": "unchanged", "runtime_reused": True}
         destination.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -118,7 +157,6 @@ def install_package(bundle: Path, directory: Path, codex_home: Path, *,
             validate_executable(destination / "codex-watchdog")
             InstructionStore._atomic_json(profile_path, updated)
         except Exception:
-            # Roll back only exact files this invocation replaced; never clear a directory.
             for name in reversed(replaced):
                 if backups[name] is None:
                     (destination / name).unlink()
@@ -131,10 +169,10 @@ def install_package(bundle: Path, directory: Path, codex_home: Path, *,
 def packaged_hooks(directory: Path, codex_home: Path) -> dict:
     profile = load_profile(directory)
     if profile is None:
-        raise PackageError("macos_install_required")
+        raise PackageError("linux_install_required")
     executable = Path(profile["install_dir"]) / "codex-watchdog"
-    if not executable.is_file() or file_hash(executable) != profile["files"]["codex-watchdog"]:
-        raise PackageError("macos_existing_install_conflict")
+    if executable.is_symlink() or not executable.is_file() or file_hash(executable) != profile["files"]["codex-watchdog"]:
+        raise PackageError("linux_existing_install_conflict")
     path = codex_home / "hooks.json"
     document = copy.deepcopy(read_json(path) if path.exists() else {
         "description": "Codex WatchDog user hooks; trust each definition manually", "hooks": {},
@@ -145,7 +183,6 @@ def packaged_hooks(directory: Path, codex_home: Path) -> dict:
         matching = [entry for entry in matches if entry[0] == event]
         if matching:
             _, definition, tail = matching[0]
-            # Keep grace, polling, timeout, matcher, and all unrelated provider keys.
             tail[1] = profile["runtime"]
             definition["command"] = shlex.join([str(executable), *tail])
         else:
@@ -163,8 +200,7 @@ def packaged_hooks(directory: Path, codex_home: Path) -> dict:
 
 
 def install_packaged_hooks(directory: Path, codex_home: Path) -> dict:
-    # Installation and upgrades share a lock, so the rendered stable path cannot race an install.
-    with FileLock(directory / "macos-install.lock"):
+    with FileLock(directory / "linux-install.lock"):
         document = packaged_hooks(directory, codex_home)
         path = codex_home / "hooks.json"
         if path.exists() and read_json(path) == document:
@@ -174,70 +210,49 @@ def install_packaged_hooks(directory: Path, codex_home: Path) -> dict:
     return {"status": "installed", "trust": "review_exact_definitions_in_codex"}
 
 
-def relay_values(path: Path) -> str:
-    value = read_json(path)
-    channel, users = value.get("channel_id"), value.get("allowed_user_ids")
-    if (type(value.get("schema_version")) is not int or value["schema_version"] != 1
-            or not isinstance(channel, str) or re.fullmatch(r"[CG][A-Z0-9]{8,}", channel) is None
-            or not isinstance(users, list) or not users
-            or any(not isinstance(user, str) or re.fullmatch(r"[UW][A-Z0-9]{8,}", user) is None for user in users)):
-        raise PackageError("macos_slack_config_invalid")
-    return channel + "\t" + ",".join(dict.fromkeys(users))
-
-
 def main(argv: Sequence[str], executable: Path) -> int:
     from .cli import build_parser, main as core_main
 
     arguments = list(argv)
     try:
-        if arguments == ["--help"] or arguments == ["-h"]:
+        if not arguments or arguments in (["--help"], ["-h"]):
             print(build_parser().format_help())
-            print("macOS package commands:\n  macos-install [--runtime PATH] [--install-dir PATH]\n"
-                  "  macos-hooks [--install]\n\n"
-                  "Run watchdog-macos.sh for the saved Keychain Slack foreground workflow.")
+            print("Linux package commands:\n  linux-install [--runtime PATH] [--install-dir PATH] [--codex-home PATH]\n"
+                  "  linux-hooks [--install] [--codex-home PATH]\n\n"
+                  "Install, review/trust hooks, bind the exact existing conversation, then use linux-run.\n"
+                  "Use linux-release and wait for release before reopening that conversation in VS Code.")
             return 0
         if arguments == ["--version"]:
             return core_main(arguments)
-        directory, codex_home = config_directory(), codex_directory()
-        if arguments and arguments[0] == "macos-install":
-            if sys.platform != "darwin":
-                raise PackageError("macos_required")
-            parser = argparse.ArgumentParser(prog="codex-watchdog macos-install")
-            parser.add_argument("--runtime", type=Path)
-            parser.add_argument("--install-dir", type=Path)
+        directory = config_directory()
+        if arguments[0] in ("linux-install", "linux-hooks"):
+            if sys.platform != "linux":
+                raise PackageError("linux_required")
+            parser = argparse.ArgumentParser(prog="codex-watchdog " + arguments[0])
+            parser.add_argument("--codex-home", type=Path)
+            if arguments[0] == "linux-install":
+                parser.add_argument("--runtime", type=Path)
+                parser.add_argument("--install-dir", type=Path)
+            else:
+                parser.add_argument("--install", action="store_true")
             args = parser.parse_args(arguments[1:])
-            print(json.dumps(install_package(executable.parent, directory, codex_home,
-                                             runtime=args.runtime, install_dir=args.install_dir), sort_keys=True))
-            return 0
-        if arguments and arguments[0] == "macos-hooks":
-            if sys.platform != "darwin":
-                raise PackageError("macos_required")
-            parser = argparse.ArgumentParser(prog="codex-watchdog macos-hooks")
-            parser.add_argument("--install", action="store_true")
-            args = parser.parse_args(arguments[1:])
-            result = (install_packaged_hooks(directory, codex_home) if args.install else
-                      packaged_hooks(directory, codex_home))
+            codex_home = codex_directory(directory, args.codex_home)
+            if arguments[0] == "linux-install":
+                result = install_package(executable.parent, directory, codex_home,
+                                         runtime=args.runtime, install_dir=args.install_dir)
+            else:
+                result = install_packaged_hooks(directory, codex_home) if args.install else packaged_hooks(directory, codex_home)
             print(json.dumps(result, indent=2, sort_keys=True))
             return 0
-        # Bounded data bridges for the unchanged Keychain logic in the Bash launcher.
-        if arguments == ["_macos-runtime"]:
-            print(select_runtime(directory, codex_home))
-            return 0
-        if len(arguments) == 2 and arguments[0] == "_macos-relay-config":
-            print(relay_values(Path(arguments[1])))
-            return 0
-        if len(arguments) == 5 and arguments[0] == "_macos-launcher-summary":
-            print(json.dumps({"status": "ready", "runtime": arguments[1], "slack_reply": arguments[2],
-                              "smtp_configured": arguments[3] == "true", "slack_only": arguments[4] == "1"}, sort_keys=True))
-            return 0
-        if not arguments:
-            launcher = executable.with_name("watchdog-macos.sh")
-            return subprocess.run([str(launcher)], check=False).returncode
-        if "--version" not in arguments and not any(v == "--runtime" or v.startswith("--runtime=") for v in arguments):
+        parsed = build_parser().parse_args(arguments)
+        codex_home = codex_directory(directory, parsed.codex_home)
+        if not any(v == "--runtime" or v.startswith("--runtime=") for v in arguments):
             arguments = ["--runtime", str(select_runtime(directory, codex_home)), *arguments]
+        if not any(v == "--codex-home" or v.startswith("--codex-home=") for v in arguments):
+            arguments = ["--codex-home", str(codex_home), *arguments]
         return core_main(arguments)
     except (PackageError, StoreBusyError, OSError, ValueError, subprocess.SubprocessError) as exc:
-        reason = (str(exc).replace("posix_", "macos_", 1) if isinstance(exc, PackageError) else
-                  "macos_install_busy" if isinstance(exc, StoreBusyError) else "macos_package_operation_failed")
+        reason = (str(exc).replace("posix_", "linux_", 1) if isinstance(exc, PackageError) else
+                  "linux_install_busy" if isinstance(exc, StoreBusyError) else "linux_package_operation_failed")
         print(json.dumps({"status": "blocked", "reason": reason}), file=sys.stderr)
         return 1
