@@ -198,25 +198,33 @@ def _default_code_status() -> Optional[str]:
 
 
 def codex_log_owns_session(path: Path, session_id: str) -> bool:
-    """Parse only privacy-safe stream ownership markers for one exact thread."""
+    return codex_log_session_states(path, (session_id,)).get(session_id, (None, None))[0] == "owner"
 
-    canonical = _canonical_session_id(session_id)
-    if canonical is None or not path.is_file():
-        return False
+
+def codex_log_session_states(
+    path: Path, session_ids: Iterable[str],
+) -> Dict[str, Tuple[Optional[str], Optional[bool]]]:
+    """Read exact routing markers from one window and App Server generation."""
+    states = {session: (None, None) for session in session_ids
+              if _canonical_session_id(session) == session}
+    if not states or not path.is_file():
+        return states
     conversation = re.compile(
-        rb"(?:^|\s)conversationId="
-        + re.escape(canonical.encode("ascii"))
-        + rb"(?=\s|$)"
+        rb"(?:^|\s)conversationId=(" + b"|".join(
+            re.escape(session.encode("ascii")) for session in states
+        ) + rb")(?=\s|$)"
     )
-    role: Optional[str] = None
     try:
         with path.open("rb") as handle:
             for line in handle:
                 if b"[CodexMcpConnection] Spawning codex app-server" in line:
-                    role = None
+                    states = dict.fromkeys(states, (None, None))
                     continue
-                if conversation.search(line) is None:
+                matched = conversation.search(line)
+                if matched is None:
                     continue
+                session = matched.group(1).decode("ascii")
+                role, active = states[session]
                 if b"thread_stream_role_changed" in line:
                     role = None
                     match = re.search(rb"(?:^|\s)role=([^\s]+)(?=\s|$)", line)
@@ -231,9 +239,14 @@ def codex_log_owns_session(path: Path, session_id: str) -> bool:
                         role = match.group(1).decode("ascii", errors="ignore")
                 elif b"maybe_resume_failed" in line:
                     role = None
+                    active = None
+                elif b"thread_stream_view_activity_changed" in line:
+                    match = re.search(rb"(?:^|\s)active=(true|false)(?=\s|$)", line)
+                    active = match.group(1) == b"true" if match is not None else None
+                states[session] = (role, active)
     except OSError:
-        return False
-    return role == "owner"
+        return dict.fromkeys(states, (None, None))
+    return states
 
 
 @dataclass(frozen=True)
@@ -449,6 +462,19 @@ class CodexSessionResolver:
                 None,
             )
         if len(database_candidates) > 1:
+            # Switching chats can leave both writer locks and owner roles live.
+            # Only explicit current-window activity can disambiguate them; the
+            # cache and last-used timestamps alone are not ownership evidence.
+            states = codex_log_session_states(codex_log, database_candidates)
+            active = [session for session, (role, view_active) in states.items()
+                      if role == "owner" and view_active is True]
+            if len(active) == 1 and all(
+                role == "owner" and view_active is False
+                for session, (role, view_active) in states.items() if session != active[0]
+            ):
+                return SessionResolution(
+                    "resolved", active[0], "codex_state_vscode_active_owner", None,
+                )
             return SessionResolution(
                 "unresolved", None, None, "ambiguous_loaded_threads"
             )

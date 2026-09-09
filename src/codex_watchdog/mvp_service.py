@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from urllib.parse import quote
@@ -82,6 +83,7 @@ class MvpWorkspaceResult:
     audit_path: Optional[str]
     error_sha256: Optional[str] = None
     error_chars: int = 0
+    reason: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -98,6 +100,7 @@ class MvpWorkspaceResult:
             "audit_path": self.audit_path,
             "error_sha256": self.error_sha256,
             "error_chars": self.error_chars,
+            "reason": self.reason,
         }
 
 
@@ -128,6 +131,8 @@ class MvpCycleResult:
             "started_at": self.started_at,
             "completed_at": self.completed_at,
             "workspace_count": len(self.workspaces),
+            "failed_workspace_count": sum(item.status == "error" for item in self.workspaces),
+            "ok": self.ok,
             "workspaces": [workspace.to_dict() for workspace in self.workspaces],
             "discovery": self.discovery,
             "error_sha256": self.error_sha256,
@@ -317,13 +322,20 @@ class MvpWatchdogService:
                 error_sha256=digest,
                 error_chars=chars,
             )
+        reason = (
+            "workspace_errors" if any(item.status == "error" for item in results)
+            else "discovery_incomplete" if discovery_summary is not None
+            and discovery_summary.get("status") in ("partial", "error")
+            else None
+        )
         return MvpCycleResult(
             cycle_id=cycle_id,
-            status="completed",
+            status="partial" if reason else "completed",
             started_at=started_at,
             completed_at=utc_now(),
             workspaces=results,
             discovery=discovery_summary,
+            reason=reason,
         )
 
     @staticmethod
@@ -876,6 +888,11 @@ class MvpWatchdogService:
             audit_path=None,
             error_sha256=probe.get("error_sha256"),
             error_chars=int(probe.get("error_chars", 0)),
+            reason=(
+                probe["reason"] if isinstance(probe.get("reason"), str)
+                and re.fullmatch(r"[a-z][a-z0-9_]{0,95}", probe["reason"])
+                else "remote_adapter_unavailable" if status == "error" else None
+            ),
         )
         audit_path = self.store.record_audit(
             {
@@ -1075,6 +1092,7 @@ class MvpWatchdogService:
                 audit_path=None,
                 error_sha256=digest,
                 error_chars=chars,
+                reason="workspace_cycle_failed",
             )
 
     def _load_state_and_stops(

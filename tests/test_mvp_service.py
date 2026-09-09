@@ -1198,6 +1198,9 @@ def test_workspace_failure_is_isolated_and_result_is_json_safe(tmp_path: Path) -
     ]
     assert result.workspaces[0].status == "error"
     assert result.workspaces[1].status == "completed"
+    assert result.status == "partial"
+    assert result.to_dict()["failed_workspace_count"] == 1
+    assert result.workspaces[0].to_dict()["reason"] == "workspace_cycle_failed"
     assert "private path detail" not in encoded
     assert not result.ok
 
@@ -1538,6 +1541,7 @@ def test_remote_ssh_unreachable_adapter_still_notifies(tmp_path: Path) -> None:
     second = service.run_once().workspaces[0]
 
     assert first.status == "error"
+    assert first.to_dict()["reason"] == "ssh_authentication_failed"
     assert first.notifications == ()
     assert second.status == "error"
     assert [event.event_type for event in notifier.events] == [
@@ -1720,6 +1724,14 @@ def test_remote_vscode_window_disappearance_and_return_are_notified(
 
     assert [len(result.workspaces) for result in results] == [1, 1, 1, 1]
     assert results[1].workspaces[0].notifications == ()
+    assert results[1].status == "partial"
+    assert results[1].to_dict()["ok"] is False
+    assert results[1].to_dict()["reason"] == "workspace_errors"
+    assert results[1].to_dict()["failed_workspace_count"] == 1
+    assert results[1].workspaces[0].to_dict()["reason"] == "remote_vscode_window_missing"
+    assert results[1].workspaces[0].error_chars == 0
+    assert results[1].workspaces[0].error_sha256 is None
+    assert len(service.remote_ssh_adapter.calls) == 2
     assert [event.event_type for event in notifier.events] == [
         "remote_adapter_attention",
         "remote_adapter_recovered",
@@ -1905,8 +1917,9 @@ def test_discovery_error_makes_an_empty_cycle_unsuccessful(tmp_path: Path) -> No
 
     result = service.run_once()
 
-    assert result.status == "completed"
+    assert result.status == "partial"
     assert result.discovery["status"] == "error"
+    assert result.reason == "discovery_incomplete"
     assert result.ok is False
 
 
