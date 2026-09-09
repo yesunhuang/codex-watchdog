@@ -10,6 +10,8 @@ import subprocess
 from typing import Any, Callable, Dict, Mapping, Optional
 
 from .notifications import notification_workspace_label
+from .control_state import CONTROL_SOURCE
+from .remote_control import REMOTE_CONTROL_SOURCE
 
 
 _REMOTE_AUTHORITY_PREFIX = "ssh-remote+"
@@ -21,7 +23,7 @@ _PLINK_TARGET = re.compile(
 _PRIMARY_TRANSPORT_FAILURES = frozenset(
     {"remote_ssh_failed", "remote_ssh_auth_or_transport_failed"}
 )
-_REMOTE_SCRIPT = r"""
+_REMOTE_SCRIPT = CONTROL_SOURCE + r"""
 import glob
 import hashlib
 import json
@@ -44,6 +46,11 @@ ALLOWED_GIT = frozenset({
     "ls-files", "ls-remote", "remote", "rev-list", "rev-parse", "status",
     "symbolic-ref",
 })
+
+
+def remote_codex_home():
+    selected = os.environ.get("CODEX_HOME")
+    return Path(selected).expanduser().resolve() if selected else Path.home() / ".codex"
 
 
 def emit(value):
@@ -124,6 +131,10 @@ def log_session_state(session):
         try:
             with path.open("rb") as handle:
                 for index, line in enumerate(handle):
+                    if b"[CodexMcpConnection] Spawning codex app-server" in line:
+                        role = active = None
+                        stamp = re.match(rb"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}", line)
+                        latest = (stamp.group(0) if stamp is not None else b"", str(path), index, None, None)
                     if marker.search(line) is None:
                         continue
                     changed = False
@@ -139,11 +150,11 @@ def log_session_state(session):
                         changed = True
                     elif b"maybe_resume_failed" in line:
                         role = None
+                        active = None
                         changed = True
                     if b"thread_stream_view_activity_changed" in line:
                         match = re.search(rb"(?:^|\s)active=(true|false)(?=\s|$)", line)
-                        if match is not None:
-                            active = match.group(1) == b"true"
+                        active = match.group(1) == b"true" if match is not None else None
                         match = re.search(
                             rb"(?:^|\s)streamRole=([^\s]+)(?=\s|$)", line
                         )
@@ -164,9 +175,9 @@ def log_session_state(session):
         if latest is not None:
             states.append(latest)
     if not states:
-        return False, False
+        return False, None
     latest = max(states, key=lambda item: item[:3])
-    return latest[3] == b"owner", latest[4] is True
+    return latest[3] == b"owner", latest[4]
 
 
 def resolve_session(repo_path, storage_key, expected_sessions=None):
@@ -176,7 +187,7 @@ def resolve_session(repo_path, storage_key, expected_sessions=None):
             return None, issue
     else:
         loaded = set(expected_sessions)
-    state = Path.home() / ".codex" / "state_5.sqlite"
+    state = remote_codex_home() / "state_5.sqlite"
     if not state.is_file():
         return None, "remote_codex_state_unavailable"
     try:
@@ -205,7 +216,7 @@ def resolve_session(repo_path, storage_key, expected_sessions=None):
     active_candidates = {
         session for session, active in candidates.items() if active
     }
-    if len(active_candidates) == 1:
+    if len(active_candidates) == 1 and all(active is not None for active in candidates.values()):
         return next(iter(active_candidates)), None
     if expected_sessions is not None:
         return None, "remote_thread_claim_unverified"
@@ -215,7 +226,7 @@ def resolve_session(repo_path, storage_key, expected_sessions=None):
 
 
 def rollout_path(session):
-    matches = list((Path.home() / ".codex" / "sessions").glob(
+    matches = list((remote_codex_home() / "sessions").glob(
         "**/rollout-*" + session + ".jsonl"
     ))
     return matches[0] if len(matches) == 1 else None
@@ -357,7 +368,7 @@ def git_observation(repo):
 
 
 def queue_database():
-    pinned = Path.home() / ".codex" / "queue_1.sqlite"
+    pinned = remote_codex_home() / "queue_1.sqlite"
     return pinned if pinned.is_file() else None
 
 
@@ -399,7 +410,10 @@ def codex_executable():
 
 
 def rollout_started(record):
-    path = Path(record.get("rollout_path", ""))
+    raw_path = record.get("rollout_path")
+    if not isinstance(raw_path, str) or not raw_path:
+        return None
+    path = Path(raw_path)
     baseline = record.get("rollout_baseline_offset")
     if not path.is_file() or not isinstance(baseline, int):
         return None
@@ -441,6 +455,10 @@ def rollout_started(record):
 
 
 def observe_wake(record):
+    thread = canonical_uuid(record.get("thread_id"))
+    if thread is not None and (remote_codex_home() / "watchdog-control" / thread / "owner.json").exists():
+        if _CONTROL_ACTIVE is None or _CONTROL_ACTIVE[0].thread_id != thread:
+            return dict(record, reason="control_owner_capability_required")
     state = record.get("state", "uncertain")
     if state not in ("enqueued", "consumed_or_started", "started"):
         return record
@@ -471,6 +489,9 @@ def observe_wake(record):
 
 
 def dispatch_wake(request, session):
+    if (remote_codex_home() / "watchdog-control" / session / "owner.json").exists():
+        if _CONTROL_ACTIVE is None or _CONTROL_ACTIVE[0].thread_id != session:
+            return {"status": "rejected", "state": "rejected", "reason": "control_owner_capability_required"}
     instruction_id = request["instruction_id"]
     prompt = request["prompt"]
     digest = sha(prompt)
@@ -485,15 +506,20 @@ def dispatch_wake(request, session):
         return observe_wake(record)
     # A Linux-local binding owns new delivery. Remote observers may reconcile
     # their previous receipts but must not become a second sender after handoff.
-    binding_path = Path.home() / ".codex" / "watchdog-linux" / (session + ".json")
+    binding_path = remote_codex_home() / "watchdog-linux" / (session + ".json")
     if binding_path.exists():
         try:
             with binding_path.open("rb") as handle:
                 raw = handle.read(65537)
             binding = json.loads(raw) if len(raw) <= 65536 else None
+            coordinated_remote = (
+                _CONTROL_ACTIVE is not None and _CONTROL_ACTIVE[1]["role"] == "remote"
+                and isinstance(binding, dict) and binding.get("state") == "armed"
+                and binding.get("runtime_sha256") == sha(_CONTROL_ACTIVE[0].read().get("runtime_path", ""))
+            )
             if (not isinstance(binding, dict) or binding.get("schema_version") != 1
                     or binding.get("thread_id") != session
-                    or binding.get("state") != "released"):
+                    or binding.get("state") != "released" and not coordinated_remote):
                 return {"status": "rejected", "reason": "linux_thread_reserved"}
         except (OSError, ValueError):
             return {"status": "rejected", "reason": "linux_thread_reserved"}
@@ -536,7 +562,7 @@ def dispatch_wake(request, session):
             errors="replace",
             timeout=30,
             check=False,
-            env={**os.environ, "CODEX_HOME": str(Path.home() / ".codex")},
+            env={**os.environ, "CODEX_HOME": str(remote_codex_home())},
         )
         output = completed.stdout.strip()
         match = ACK.fullmatch(output)
@@ -581,6 +607,16 @@ def run(request):
     ):
         emit({"status": "error", "reason": "remote_request_invalid"})
         return
+    if request.get("control") is not None:
+        try:
+            if not isinstance(request["control"], dict):
+                raise ControlError("control_request_invalid")
+            emit(run_control(request))
+        except ControlError as exc:
+            emit({"status": "unavailable", "reason": str(exc)})
+        except (OSError, ValueError, TypeError, KeyError, sqlite3.Error) as exc:
+            emit({"status": "unavailable", "reason": "control_remote_failed", "error_sha256": sha(str(exc))})
+        return
     session, issue = resolve_session(repo, storage_key, expected_sessions)
     if session is None:
         emit({"status": "unavailable", "reason": issue})
@@ -603,7 +639,7 @@ def run(request):
     if request.get("action") == "wake":
         result["wake"] = dispatch_wake(request, session)
     emit(result)
-"""
+""" + REMOTE_CONTROL_SOURCE
 
 
 @dataclass(frozen=True)
@@ -612,6 +648,7 @@ class RemoteSshTarget:
     repo_path: str
     storage_key: str
     expected_session_ids: tuple[str, ...] = ()
+    control_workspace_id: Optional[str] = None
 
     @property
     def host(self) -> str:
@@ -624,6 +661,8 @@ class RemoteSshTarget:
 
     @property
     def workspace_id(self) -> str:
+        if self.control_workspace_id is not None:
+            return self.control_workspace_id
         identity = f"{self.authority}\0{self.repo_path}"
         return "vscode-remote-" + hashlib.sha256(identity.encode()).hexdigest()[:32]
 
@@ -637,6 +676,8 @@ class RemoteSshTarget:
 
 class RemoteSshAdapter:
     """Run a compact, fail-closed probe beside one Remote-SSH workspace."""
+
+    supports_control = True
 
     def __init__(
         self,
@@ -655,6 +696,7 @@ class RemoteSshAdapter:
         *,
         pending_instruction_id: Optional[str] = None,
         wake: Optional[Dict[str, str]] = None,
+        control: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         request: Dict[str, Any] = {
             "repo_path": target.repo_path,
@@ -662,6 +704,8 @@ class RemoteSshAdapter:
         }
         if target.expected_session_ids:
             request["expected_session_ids"] = list(target.expected_session_ids)
+        if control is not None:
+            request["control"] = control
         if pending_instruction_id is not None:
             request["pending_instruction_id"] = pending_instruction_id
         if wake is not None:
@@ -725,6 +769,8 @@ class RemoteSshAdapter:
 class SharedPlinkRemoteSshAdapter:
     """Reuse one operator-authenticated PuTTY/Plink SSH-2 upstream."""
 
+    supports_control = True
+
     def __init__(
         self,
         plink_target: str,
@@ -751,6 +797,7 @@ class SharedPlinkRemoteSshAdapter:
         *,
         pending_instruction_id: Optional[str] = None,
         wake: Optional[Dict[str, str]] = None,
+        control: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         if not self.supports(target):
             return RemoteSshAdapter._failure(
@@ -786,6 +833,8 @@ class SharedPlinkRemoteSshAdapter:
         }
         if target.expected_session_ids:
             request["expected_session_ids"] = list(target.expected_session_ids)
+        if control is not None:
+            request["control"] = control
         if pending_instruction_id is not None:
             request["pending_instruction_id"] = pending_instruction_id
         if wake is not None:
@@ -832,6 +881,8 @@ class SharedPlinkRemoteSshAdapter:
 class FallbackRemoteSshAdapter:
     """Keep batch OpenSSH primary and select Plink only on transport failure."""
 
+    supports_control = True
+
     def __init__(
         self, primary: RemoteSshAdapter, fallback: SharedPlinkRemoteSshAdapter,
     ) -> None:
@@ -844,11 +895,14 @@ class FallbackRemoteSshAdapter:
         *,
         pending_instruction_id: Optional[str] = None,
         wake: Optional[Dict[str, str]] = None,
+        control: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         options = {
             "pending_instruction_id": pending_instruction_id,
             "wake": wake,
         }
+        if control is not None:
+            options["control"] = control
         result = self.primary.probe(target, **options)
         if result.get(
             "reason"

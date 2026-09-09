@@ -235,6 +235,7 @@ inspectable, and not presented as conventional human-only development.
 - [Mac package, upgrades, and manual testing](docs/MACOS_PACKAGE.md)
 - [Linux ARM64/x64 packages, upgrades, and rollback](docs/LINUX_PACKAGE.md)
 - [Linux source installation and same-thread lifecycle](docs/LINUX_SOURCE_WORKFLOW.md)
+- [Automatic remote handoff (development candidate; native lifecycle acceptance pending)](docs/AUTOMATIC_REMOTE_HANDOFF.md)
 - [Detailed setup and operations](docs/SETUP.md)
 - [Platform support and privacy-safe doctor](docs/PLATFORM_SUPPORT.md)
 - [Security policy and operational boundary](SECURITY.md)

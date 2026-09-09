@@ -217,6 +217,7 @@ Codex -> Parrot Dog（Slack）-> 人 -> Parrot Dog -> 准确的 Codex 线程
 - [Mac 安装包、升级与手动测试](docs/MACOS_PACKAGE.md)
 - [Linux ARM64/x64 安装包、升级与回滚](docs/LINUX_PACKAGE.md)
 - [Linux 源码安装与同线程生命周期](docs/LINUX_SOURCE_WORKFLOW.md)
+- [远程会话自动交接（开发候选版本，原生生命周期验收尚未完成）](docs/AUTOMATIC_REMOTE_HANDOFF.md)
 - [详细设置与运行](docs/SETUP.md)
 - [平台支持与隐私安全诊断](docs/PLATFORM_SUPPORT.md)
 - [安全策略与运行边界](SECURITY.md)

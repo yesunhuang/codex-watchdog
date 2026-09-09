@@ -16,6 +16,11 @@ THREAD_ID = "11111111-2222-4333-8444-555555555555"
 QUEUE_ID = "99999999-aaaa-4bbb-8ccc-dddddddddddd"
 
 
+@pytest.fixture(autouse=True)
+def isolated_default_codex_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+
+
 class FakeRunner:
     def __init__(self, returncode: int = 0, stdout: str = "") -> None:
         self.returncode = returncode

@@ -16,6 +16,7 @@ import uuid
 
 from .storage import FileLock, InstructionStore
 from .workspace_registry import TrackedWorkspace
+from .control_context import effect_guard
 
 
 class LinuxBindingError(ValueError):
@@ -139,6 +140,10 @@ class LinuxBinding:
             raise LinuxBindingError("linux_binding_mismatch") from exc
 
     def bind(self, workspace: TrackedWorkspace, lease_seconds: float) -> Dict[str, Any]:
+        with effect_guard(self.codex_home, workspace.session_id, "writer"):
+            return self._bind(workspace, lease_seconds)
+
+    def _bind(self, workspace: TrackedWorkspace, lease_seconds: float) -> Dict[str, Any]:
         locality = locality_identity()
         if not 60 <= lease_seconds <= 86400:
             raise LinuxBindingError("linux_lease_must_be_60_to_86400_seconds")
@@ -169,6 +174,7 @@ class LinuxBinding:
                 value.update(
                     schema_version=1, thread_id=workspace.session_id,
                     runtime_sha256=runtime_identity(self.runtime),
+                    runtime_path=str(self.runtime),
                     locality_sha256=locality, workspace=workspace.to_dict(),
                     state="armed", expires_at=time.time() + lease_seconds,
                 )
@@ -183,6 +189,11 @@ class LinuxBinding:
             return value
 
     def set_state(self, state: str) -> Dict[str, Any]:
+        value = self.load()
+        with effect_guard(self.codex_home, value["thread_id"], "writer"):
+            return self._set_state(state)
+
+    def _set_state(self, state: str) -> Dict[str, Any]:
         if state not in ("release_requested", "released"):
             raise LinuxBindingError("linux_invalid_state")
         value = self.load()
@@ -193,6 +204,21 @@ class LinuxBinding:
                 value["state"] = state
                 InstructionStore._atomic_json(path, value)
         return value
+
+    def request_release(self) -> Dict[str, Any]:
+        """Explicit operator request; never grants execution or interrupts a turn."""
+        from .control_state import ControlStore, control_file_lock, control_atomic_json
+        value = self.load()
+        thread = value["thread_id"]
+        path = self.codex_home / "watchdog-control" / thread / "owner.json"
+        if not path.exists():
+            return self.set_state("release_requested")
+        store = ControlStore(self.codex_home, thread, self.workspace(value).repo_root)
+        with control_file_lock(store.lock_path):
+            current = store.read()
+            current["auto_paused"] = True
+            control_atomic_json(store.path, current)
+            return self._set_state("release_requested")
 
     def status(self) -> Dict[str, Any]:
         value = self.load()

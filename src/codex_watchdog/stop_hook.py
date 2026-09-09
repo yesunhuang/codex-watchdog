@@ -1,16 +1,19 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import time
-from typing import Any, Callable, Dict, TextIO
+from typing import Any, Callable, Dict, TextIO, Optional
 import uuid
 
 from .models import sha256_text, utc_now
 from .storage import InstructionStore, StoreBusyError
+from .control_context import current_effect, hook_owner
+from .control_state import ControlBusy, ControlError
 
 
 _STOP_OUTPUT_SCHEMA_VERSION = 1
@@ -26,6 +29,7 @@ class HookSettings:
     grace_seconds: float = DEFAULT_GRACE_SECONDS
     poll_seconds: float = DEFAULT_POLL_SECONDS
     test_mode: bool = False
+    codex_home: Optional[Path] = None
 
     def validate(self) -> None:
         minimum, maximum = (
@@ -60,8 +64,9 @@ def _audit_fields(payload: Dict[str, Any], outcome: str) -> Dict[str, Any]:
 
 
 def _emit(value: Dict[str, Any], stdout: TextIO) -> None:
-    stdout.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
-    stdout.flush()
+    with current_effect("stop"):
+        stdout.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")) + "\n")
+        stdout.flush()
 
 
 def _spool_terminal_output(
@@ -98,6 +103,34 @@ def _spool_terminal_output(
 
 
 def run_hook(
+    settings: HookSettings, stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout,
+    stderr: TextIO = sys.stderr, monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> int:
+    try:
+        raw = stdin.read()
+    except Exception:
+        stderr.write("codex-watchdog hook ignored unreadable input\n")
+        return 0
+    try:
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            raise ValueError()
+    except (ValueError, TypeError):
+        return _run_hook(settings, io.StringIO(raw), stdout, stderr, monotonic, sleep)
+    codex_home = settings.codex_home or Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    try:
+        with hook_owner(settings.runtime, codex_home, payload) as runtime:
+            return _run_hook(replace(settings, runtime=runtime), io.StringIO(raw),
+                             stdout, stderr, monotonic, sleep)
+    except Exception as exc:
+        reason = str(exc) if isinstance(exc, ControlError) else "control_hook_failed"
+        stderr.write(f"codex-watchdog hook fenced: {reason}\n")
+        stdout.write("{}\n")
+        return 0
+
+
+def _run_hook(
     settings: HookSettings,
     stdin: TextIO = sys.stdin,
     stdout: TextIO = sys.stdout,
@@ -136,8 +169,9 @@ def run_hook(
         """Retry only transient cross-process store-lock contention."""
         while True:
             try:
-                return operation()
-            except StoreBusyError:
+                with current_effect("stop"):
+                    return operation()
+            except (StoreBusyError, ControlBusy):
                 remaining = deadline - monotonic()
                 if remaining <= 0:
                     raise
@@ -146,6 +180,9 @@ def run_hook(
                     raise
 
     def record_terminal(event: Dict[str, Any]) -> None:
+        retry_store(lambda: record_owned_terminal(event), monotonic() + 1.0)
+
+    def record_owned_terminal(event: Dict[str, Any]) -> None:
         try:
             _spool_terminal_output(settings.runtime, payload, invocation_id)
         except Exception as exc:
@@ -225,7 +262,7 @@ def run_hook(
                     instruction = retry_store(
                         lambda: store.claim_next(session_id, turn_id), deadline
                     )
-                except StoreBusyError:
+                except (StoreBusyError, ControlBusy):
                     record_terminal(
                         audit_fields("lock_busy_grace_expired_parked", completed=True)
                     )
@@ -255,7 +292,7 @@ def run_hook(
                     _emit({}, stdout)
                     return 0
                 sleep(min(settings.poll_seconds, remaining))
-    except StoreBusyError as exc:
+    except (StoreBusyError, ControlBusy) as exc:
         stderr.write(f"codex-watchdog concurrent hook failed open: {exc}\n")
         try:
             record_terminal(audit_fields("lock_busy_failed_open", completed=True))

@@ -236,6 +236,7 @@ Slack で往復を中継します。
 - [Mac パッケージ、更新、手動検証](docs/MACOS_PACKAGE.md)
 - [Linux ARM64/x64 パッケージ、更新とロールバック](docs/LINUX_PACKAGE.md)
 - [Linux ソース導入と同一スレッドのライフサイクル](docs/LINUX_SOURCE_WORKFLOW.md)
+- [リモート会話の自動引き継ぎ（開発候補版、実機ライフサイクル検証待ち）](docs/AUTOMATIC_REMOTE_HANDOFF.md)
 - [詳細なセットアップと運用](docs/SETUP.md)
 - [プラットフォーム対応とプライバシー安全な診断](docs/PLATFORM_SUPPORT.md)
 - [セキュリティポリシーと運用境界](SECURITY.md)

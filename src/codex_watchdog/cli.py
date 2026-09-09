@@ -79,6 +79,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     linux_run.add_argument("--interval", type=float, default=5)
     linux_run.add_argument("--codex-executable", type=_path)
+    linux_auto = commands.add_parser(
+        "linux-auto-run", help="remain standby while attached and automatically own exact detached remote threads"
+    )
+    linux_auto.add_argument("--interval", type=float, default=5)
+    linux_auto.add_argument("--codex-executable", type=_path)
+    linux_auto.add_argument("--exclude", action="append", default=[], help="exclude an exact repository path or name")
     commands.add_parser("linux-release", help="request idle writer release before VS Code reattachment")
     commands.add_parser("linux-status", help="show privacy-safe Linux binding and owner status")
 
@@ -272,14 +278,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         try:
             locality_identity()
+            if args.command == "linux-auto-run":
+                from .linux_auto import LinuxAutoWatchdog
+                return LinuxAutoWatchdog(
+                    args.runtime, args.codex_home or detect_platform_adapter().default_codex_home(),
+                    executable=str(args.codex_executable) if args.codex_executable else None,
+                    exclude=args.exclude,
+                ).run(args.interval, emit=lambda value: print(json.dumps(value, sort_keys=True), flush=True))
             binding = LinuxBinding(
                 args.runtime, args.codex_home or detect_platform_adapter().default_codex_home()
             )
             if args.command == "linux-bind":
-                binding.bind(TrackedWorkspace.create(args.workspace, args.repo, args.thread), args.lease_seconds)
+                from .linux_auto import bind_for_operator
+                bind_for_operator(binding, TrackedWorkspace.create(args.workspace, args.repo, args.thread),
+                                  args.lease_seconds)
             elif args.command == "linux-release":
-                binding.set_state("release_requested")
+                binding.request_release()
             elif args.command == "linux-run":
+                value = binding.load()
+                if (binding.codex_home / "watchdog-control" / value["thread_id"] / "owner.json").exists():
+                    from .linux_auto import LinuxAutoWatchdog
+                    return LinuxAutoWatchdog(
+                        args.runtime, binding.codex_home, threads=(value["thread_id"],), stop_on_release=True,
+                        executable=str(args.codex_executable) if args.codex_executable else None,
+                    ).run(args.interval, emit=lambda value: print(json.dumps(value, sort_keys=True), flush=True))
                 return LinuxThreadOwner(
                     binding, executable=str(args.codex_executable) if args.codex_executable else None
                 ).run(args.interval, emit=lambda value: print(json.dumps(value, sort_keys=True), flush=True))
@@ -358,6 +380,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 grace_seconds=args.grace_seconds,
                 poll_seconds=args.poll_seconds,
                 test_mode=args.test_mode,
+                codex_home=args.codex_home,
             )
         )
     if args.command == "submit":

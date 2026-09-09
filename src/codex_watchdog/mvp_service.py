@@ -34,6 +34,9 @@ from .slack_relay import SlackReplyRelay
 from .storage import InstructionStore, StoreBusyError, snapshot_state
 from .workspace_discovery import EffectiveWorkspaceCatalog
 from .workspace_registry import TrackedWorkspace, WorkspaceRegistry
+from .control_context import effect_guard
+from .control_state import ControlError
+from .remote_control import RemoteControlClient
 
 
 MVP_STATE_SCHEMA_VERSION = 2
@@ -121,7 +124,7 @@ class MvpCycleResult:
         return (
             self.status == "completed"
             and (self.discovery is None or self.discovery.get("status") != "error")
-            and all(workspace.status == "completed" for workspace in self.workspaces)
+            and all(workspace.status in ("completed", "standby") for workspace in self.workspaces)
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -227,6 +230,11 @@ class MvpWatchdogService:
             if isinstance(value, str) and value.strip()
         )
         self.store = InstructionStore(runtime)
+        self.remote_control = (
+            RemoteControlClient(self.remote_ssh_adapter, runtime)
+            if getattr(self.remote_ssh_adapter, "supports_control", False) else None
+        )
+        self._remote_control_scope = None
         self.observation_service = RunOnceService(
             runtime,
             registry=self.registry,
@@ -371,6 +379,85 @@ class MvpWatchdogService:
     def _run_remote_workspace(
         self, target: RemoteSshTarget, cycle_id: str
     ) -> MvpWorkspaceResult:
+        if self.remote_control is None:
+            return self._run_remote_owned(target, cycle_id)
+        state = self._read_remote_state(self.state_path(target.workspace_id), target)
+        try:
+            mappings = self.slack_reply_relay.thread_store.mappings_for_threads(
+                (*target.expected_session_ids, state.get("session_id")),
+            ) if self.slack_reply_relay is not None else ()
+            probe = self.remote_control.acquire(target, state, relay_mappings=mappings)
+            control = probe["control"]
+            token = control.get("token")
+            if token is None:
+                return self._control_observation(target, cycle_id, "standby", "control_handback_pending", probe)
+            canonical_id = "control-" + sha256_text(token["thread_id"] + "\0" + target.repo_path)[:32]
+            controlled_target = RemoteSshTarget(
+                target.authority, target.repo_path, target.storage_key,
+                (token["thread_id"],), canonical_id,
+            )
+            if self.slack_reply_relay is not None:
+                self.slack_reply_relay.thread_store.cache_mappings(
+                    control.get("relay_mappings", ()), self._remote_relay_target(controlled_target, token["thread_id"]),
+                )
+            authoritative = control.get("state")
+            if not isinstance(authoritative, dict):
+                authoritative = self._read_remote_state(self.state_path(canonical_id), controlled_target)
+            authoritative = {**authoritative, "workspace_id": canonical_id,
+                             "session_id": token["thread_id"], "repo_path": target.repo_path}
+            self._remote_control_scope = (target, token)
+            result = self._run_remote_owned(controlled_target, cycle_id,
+                                            initial_state=authoritative, initial_probe=probe)
+            # This is a presence/ownership observation, not a second set of
+            # authoritative Stop/Git/wake cursors. Keep transport aliases local.
+            mirror = self._read_remote_state(self.state_path(target.workspace_id), target)
+            mirror.update(presence_tracking=True, session_id=token["thread_id"],
+                          control_token=token, last_seen_at=utc_now())
+            self.atomic_writer(self.state_path(target.workspace_id), mirror)
+            return MvpWorkspaceResult(**{**result.__dict__, "workspace_id": target.workspace_id,
+                                         "state_path": str(self.state_path(target.workspace_id))})
+        except ControlError as exc:
+            reason = str(exc)
+            return self._control_observation(target, cycle_id, self._control_status(reason), reason)
+        except Exception as exc:
+            digest, chars = self._error_summary(exc)
+            return MvpWorkspaceResult(
+                workspace_id=target.workspace_id, status="error", reason="control_workspace_failed",
+                stop_count=0, stop_audit_id=None, initial_git=None, final_git=None,
+                wake=None, notifications=(), observation_path="", audit_path=None,
+                state_path=str(self.state_path(target.workspace_id)), error_sha256=digest, error_chars=chars,
+            )
+        finally:
+            self._remote_control_scope = None
+
+    @staticmethod
+    def _control_status(reason):
+        return "standby" if reason in {
+            "control_operation_in_progress", "control_handback_pending", "control_stale_epoch",
+            "control_lease_expired", "control_competing_attached_client",
+            "control_owner_capability_required", "control_activation_changed",
+        } else "error"
+
+    def _control_observation(self, target, cycle_id, status, reason, probe=None):
+        path = self.runtime / "service" / "observations" / (sha256_text(target.workspace_id) + ".json")
+        self.atomic_writer(path, {"status": status, "reason": reason,
+                                 "control": (probe or {}).get("control")})
+        return MvpWorkspaceResult(
+            workspace_id=target.workspace_id, status=status, reason=reason,
+            stop_count=0, stop_audit_id=None, initial_git=None, final_git=None,
+            wake=None, notifications=(), observation_path=str(path),
+            state_path=str(self.state_path(target.workspace_id)), audit_path=None,
+        )
+
+    def _remote_probe(self, target, **options):
+        if self._remote_control_scope is not None:
+            transport_target, token = self._remote_control_scope
+            return self.remote_control.probe(transport_target, token, **options)
+        return self.remote_ssh_adapter.probe(target, **options)
+
+    def _run_remote_owned(
+        self, target: RemoteSshTarget, cycle_id: str, *, initial_state=None, initial_probe=None,
+    ) -> MvpWorkspaceResult:
         workspace_id = target.workspace_id
         state_path = self.state_path(workspace_id)
         observation_path = (
@@ -379,11 +466,11 @@ class MvpWatchdogService:
             / "observations"
             / f"{sha256_text(workspace_id)}.json"
         )
-        state = self._read_remote_state(state_path, target)
+        state = initial_state if initial_state is not None else self._read_remote_state(state_path, target)
         state["presence_tracking"] = True
         state["last_seen_at"] = utc_now()
         pending_instruction = state.get("pending_instruction_id")
-        probe = self.remote_ssh_adapter.probe(
+        probe = initial_probe if initial_probe is not None else self._remote_probe(
             target,
             pending_instruction_id=(
                 pending_instruction if isinstance(pending_instruction, str) else None
@@ -523,7 +610,7 @@ class MvpWatchdogService:
                 instruction_id = (
                     f"git:{sha256_text(workspace_id)[:16]}:{remote_oid.lower()}"
                 )
-                probe = self.remote_ssh_adapter.probe(
+                probe = self._remote_probe(
                     target,
                     wake={
                         "instruction_id": instruction_id,
@@ -688,6 +775,17 @@ class MvpWatchdogService:
             / f"{sha256_text(workspace_id)}.json"
         )
         state = self._read_remote_state(state_path, target)
+        if self.remote_control is not None and isinstance(state.get("control_token"), dict):
+            token = state["control_token"]
+            try:
+                self.remote_control.request(target, "detach", token=token)
+                reason = "control_desktop_detached"
+            except ControlError as exc:
+                # No state mutation or notification is authorized by a lost SSH
+                # connection. The remote process independently checks its lease
+                # and the kernel writer before acquiring the detached role.
+                reason = str(exc)
+            return self._control_observation(target, cycle_id, "standby", reason)
         notifications: List[Dict[str, Any]] = []
         reason = "remote_vscode_window_missing"
         self._record_remote_failure(target, state, cycle_id, reason, notifications)
@@ -872,7 +970,12 @@ class MvpWatchdogService:
             "error_chars": probe.get("error_chars", 0),
         }
         self.atomic_writer(observation_path, safe_probe)
-        self.atomic_writer(state_path, state)
+        if self._remote_control_scope is not None:
+            transport_target, token = self._remote_control_scope
+            state["presence_tracking"] = False
+            self.remote_control.save(transport_target, token, state)
+        else:
+            self.atomic_writer(state_path, state)
         git = probe.get("git") if isinstance(probe.get("git"), dict) else None
         result = MvpWorkspaceResult(
             workspace_id=target.workspace_id,
@@ -947,6 +1050,29 @@ class MvpWatchdogService:
         return 0
 
     def _run_workspace(
+        self, workspace: TrackedWorkspace, cycle_id: str, **options,
+    ) -> MvpWorkspaceResult:
+        try:
+            with effect_guard(self.codex_home, workspace.session_id):
+                return self._run_owned_workspace(workspace, cycle_id, **options)
+        except ControlError as exc:
+            return MvpWorkspaceResult(
+                workspace_id=workspace.workspace_id, status=self._control_status(str(exc)), stop_count=0,
+                stop_audit_id=None, initial_git=None, final_git=None, wake=None,
+                notifications=(), observation_path=str(self.observation_service.observation_path(workspace.workspace_id)),
+                state_path=str(self.state_path(workspace.workspace_id)), audit_path=None,
+                reason=str(exc),
+            )
+        except Exception as exc:
+            digest, chars = self._error_summary(exc)
+            return MvpWorkspaceResult(
+                workspace_id=workspace.workspace_id, status="error", reason="workspace_cycle_failed",
+                stop_count=0, stop_audit_id=None, initial_git=None, final_git=None, wake=None,
+                notifications=(), observation_path="", state_path=str(self.state_path(workspace.workspace_id)),
+                audit_path=None, error_sha256=digest, error_chars=chars,
+            )
+
+    def _run_owned_workspace(
         self,
         workspace: TrackedWorkspace,
         cycle_id: str,
@@ -1836,8 +1962,14 @@ class MvpWatchdogService:
 
     def _safe_notify(self, event: NotificationEvent) -> Dict[str, Any]:
         try:
+            if self._remote_control_scope is not None:
+                target, token = self._remote_control_scope
+                result = self.remote_control.notify(target, token, event, self.notifier)
+                return {"event_type": event.event_type, **result}
             result: NotificationResult = self.notifier.notify(event)
             return {"event_type": event.event_type, **result.to_dict()}
+        except ControlError:
+            raise
         except Exception as exc:
             digest, chars = self._error_summary(exc)
             return {
