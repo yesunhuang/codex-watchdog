@@ -1,13 +1,14 @@
 """Process-local capability context; the remote file record remains authoritative."""
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from pathlib import Path
 import os
 import sys
+import time
 import uuid
 
-from .control_state import ControlError, ControlStore, control_file_lock, control_atomic_json
+from .control_state import ControlBusy, ControlError, ControlStore, control_file_lock, control_atomic_json
 
 
 _capability = ContextVar("watchdog_control_capability", default=None)
@@ -104,7 +105,7 @@ def _hook_descends_from(pid):
 
 
 @contextmanager
-def hook_owner(runtime, codex_home, payload):
+def hook_owner(runtime, codex_home, payload, *, monotonic=time.monotonic, sleep=time.sleep):
     """A hook is delegated by its live first-party writer, never by a saved PID."""
     thread = payload.get("session_id")
     try:
@@ -130,5 +131,20 @@ def hook_owner(runtime, codex_home, payload):
     selected_runtime = value.get("runtime_path")
     if not isinstance(selected_runtime, str) or not Path(selected_runtime).is_absolute():
         raise ControlError("control_hook_runtime_unavailable")
-    with acting_as(store, store._token(value)):
+    # Capture once. A brief observer lock must not discard a trusted Stop before
+    # its grace period, and a retry must never adopt a replacement owner's epoch.
+    token = store._token(value)
+    deadline = monotonic() + 1.0
+    with ExitStack() as scope:
+        while True:
+            try:
+                scope.enter_context(acting_as(store, token))
+                break
+            except ControlBusy:
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    raise
+                sleep(min(0.05, remaining))
+                if monotonic() >= deadline:
+                    raise
         yield Path(selected_runtime)

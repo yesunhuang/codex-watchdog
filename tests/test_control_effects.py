@@ -170,3 +170,63 @@ def test_transient_control_contention_does_not_shorten_stop_grace(tmp_path, monk
     assert tick[0] >= 1
     terminal = [json.loads(p.read_text()) for p in (tmp_path/'audit').glob('*.json')]
     assert any(e.get('outcome') == 'grace_expired_parked' and e.get('hook_duration_ms') >= 1000 for e in terminal)
+
+
+@pytest.mark.parametrize("contention", ["transient", "persistent", "epoch_changed"])
+def test_hook_admission_retries_only_its_captured_epoch(controlled, monkeypatch, contention):
+    from contextlib import contextmanager
+    import io
+    from codex_watchdog import control_context, linux_owner, stop_hook
+    from codex_watchdog.control_state import ControlBusy
+
+    store, token, codex, repo, runtime = controlled
+    value = store.read()
+    value["runtime_path"] = str(runtime)
+    control_atomic_json(store.path, value)
+    monkeypatch.setattr(control_context.sys, "platform", "linux")
+    monkeypatch.setattr(control_context, "ControlStore", lambda *args: store)
+    monkeypatch.setattr(control_context, "_hook_descends_from", lambda pid: pid == 777)
+    monkeypatch.setattr(linux_owner, "writer_pid", lambda *args: 777)
+    monkeypatch.setattr(linux_owner, "vscode_writer", lambda pid: pid == 777)
+    original_guard = store.guard
+    calls, tick = [0], [0.0]
+
+    @contextmanager
+    def contended(captured, **kwargs):
+        calls[0] += 1
+        if calls[0] == 1 or contention == "persistent":
+            raise ControlBusy("control_operation_in_progress")
+        with original_guard(captured, **kwargs) as current:
+            yield current
+
+    monkeypatch.setattr(store, "guard", contended)
+
+    def sleep(seconds):
+        tick[0] += seconds
+        if contention == "epoch_changed" and store.read()["epoch"] == token["epoch"]:
+            store.detach(token)
+            store.claim_remote("remote", "remote-host", "absent")
+            InstructionStore(runtime).submit("new-owner", "test", "keep queued", target_session_id=THREAD)
+
+    output, error = io.StringIO(), io.StringIO()
+    code = stop_hook.run_hook(
+        HookSettings(runtime, grace_seconds=0.2, test_mode=True, codex_home=codex),
+        stdin=io.StringIO(json.dumps(dict(session_id=THREAD, turn_id="turn", cwd=str(repo), hook_event_name="Stop"))),
+        stdout=output, stderr=error, monotonic=lambda: tick[0], sleep=sleep,
+    )
+    assert code == 0 and json.loads(output.getvalue()) == {}
+    assert calls[0] > 1
+    if contention == "transient":
+        assert not error.getvalue() and tick[0] >= 0.25
+        terminal = [json.loads(p.read_text()) for p in (runtime / "audit").glob("*.json")]
+        assert any(e.get("outcome") == "grace_expired_parked" and e.get("hook_duration_ms") >= 200
+                   for e in terminal)
+    else:
+        assert not list((runtime / "audit").glob("*.json"))
+        assert not list((runtime / "inflight").glob("*.json"))
+        if contention == "persistent":
+            assert tick[0] == pytest.approx(1.0)
+            assert "control_operation_in_progress" in error.getvalue()
+        else:
+            assert "control_stale_epoch" in error.getvalue()
+            assert len(list((runtime / "inbox").glob("*.json"))) == 1

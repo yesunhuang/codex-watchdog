@@ -120,7 +120,7 @@ def run_hook(
         return _run_hook(settings, io.StringIO(raw), stdout, stderr, monotonic, sleep)
     codex_home = settings.codex_home or Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
     try:
-        with hook_owner(settings.runtime, codex_home, payload) as runtime:
+        with hook_owner(settings.runtime, codex_home, payload, monotonic=monotonic, sleep=sleep) as runtime:
             return _run_hook(replace(settings, runtime=runtime), io.StringIO(raw),
                              stdout, stderr, monotonic, sleep)
     except Exception as exc:
