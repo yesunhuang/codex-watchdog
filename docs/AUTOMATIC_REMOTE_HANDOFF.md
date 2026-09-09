@@ -1,6 +1,6 @@
 # Automatic remote handoff (development candidate)
 
-This source candidate is awaiting native client detach/reattach acceptance.
+This source candidate is awaiting native client reattachment and safe handback acceptance.
 Published v0.2.6 retains the explicit Linux binding workflow. Upgrade the desktop
 WatchDog, Linux WatchDog and the code behind the existing trusted Stop command
 together before enabling automatic handoff. Existing hook trust is reused only
