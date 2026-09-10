@@ -437,6 +437,59 @@ def test_release_racing_observation_does_not_raise_a_loss_alert(owner):
     assert not instance.health.path.exists()
 
 
+@pytest.mark.parametrize("already_owned", [False, True])
+@pytest.mark.parametrize("already_lost", [False, True])
+def test_queue_admission_defers_owner_without_losing_writer_or_health(owner, already_owned, already_lost, monkeypatch):
+    from contextvars import Context
+    from codex_watchdog import queue_wake
+    instance, client, cycles, pid = owner
+    monkeypatch.setattr(queue_wake, "codex_process_environment", lambda home: {})
+    if already_owned:
+        instance.step(observe=False)
+    if already_lost:
+        instance.report_failure("app_server_exited")
+    health_before = instance.health.path.read_bytes() if already_lost else None
+    requests_before = list(client.requests)
+    reservation = reservation_path(instance.binding.codex_home, THREAD)
+    binding_before = reservation.read_bytes()
+
+    def courier(command, **kwargs):
+        # Exercise the real queue dispatcher's control-lock admission while
+        # the foreground owner tries its next writer check.
+        result = Context().run(instance.step, observe=True)
+        assert result["owner_state"] == "standby"
+        assert result["reason"] == "control_operation_in_progress"
+        assert client.requests == requests_before and not client.closed
+        assert cycles == []
+        after = instance.health.path.read_bytes() if instance.health.path.exists() else None
+        assert after == health_before
+        return subprocess.CompletedProcess(command, 0, f"Queued message {QUEUE} for thread {THREAD}.", "")
+
+    dispatcher = QueueWakeDispatcher(instance.binding.runtime, codex_home=instance.binding.codex_home,
+                                    codex_executable="fixture-codex", runner=courier)
+    receipt = dispatcher.dispatch(THREAD, "owner-contention-test", "Reply only OK", "fixture")
+    assert receipt.status == "enqueued", receipt.stderr
+    assert receipt.queue_message_id == QUEUE
+    assert reservation.read_bytes() == binding_before
+    assert instance.step(observe=False)["owner_state"] == "owned"
+    assert len(client.requests) == 2 and not client.closed
+
+
+def test_control_contention_after_writer_admission_is_not_retried(owner):
+    from codex_watchdog.control_state import ControlBusy
+    instance, client, cycles, pid = owner
+    calls = []
+
+    def uncertain_step(**kwargs):
+        calls.append("entered")
+        raise ControlBusy("control_operation_in_progress")
+
+    instance._owned_step = uncertain_step
+    with pytest.raises(ControlBusy):
+        instance.step(observe=True)
+    assert calls == ["entered"] and client.requests == [] and cycles == []
+
+
 @pytest.mark.parametrize("already_lost", [False, True])
 def test_workspace_control_contention_preserves_health_until_observed(owner, already_lost):
     from codex_watchdog.control_state import control_file_lock
