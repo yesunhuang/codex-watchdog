@@ -189,7 +189,9 @@ class LinuxAutoWatchdog:
                         current["writer_pid"] = owner.client.process.pid if owner.client else None
                         control_atomic_json(store.path, current)
                     if result["owner_state"] == "owned" and observe:
-                        self._cycle(item)
+                        cycle = self._cycle(item)
+                        if cycle.status != "completed":
+                            raise ControlError("control_observation_failed")
                         owner.health.report()
                 if result["owner_state"] == "released":
                     if writer_pid(self.codex_home, thread) is not None:
@@ -204,7 +206,8 @@ class LinuxAutoWatchdog:
             except (ControlError, AppServerError, StoreBusyError, ValueError, OSError) as exc:
                 reason = owner_failure_reason(exc)
                 blocked = dict(thread_sha256=sha256_text(thread), state="blocked", reason=reason)
-                if item is not None and not isinstance(exc, (ControlBusy, StoreBusyError)):
+                if (item is not None and not isinstance(exc, (ControlBusy, StoreBusyError))
+                        and reason != "control_handback_pending"):
                     try:
                         with acting_as(item["store"], item["token"]):
                             blocked["notification"] = item["owner"].report_failure(reason)

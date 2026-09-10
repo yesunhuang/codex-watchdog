@@ -75,7 +75,16 @@ class LinuxOwnerHealth:
             else:
                 # Legacy explicit bindings must also fence first activation.
                 with effect_guard(self.codex_home, thread, "notification"):
-                    notification = self.notifier.notify(event).to_dict()
+                    fingerprint = event.event_fingerprint()
+                    if state.get("notification_attempt") == fingerprint:
+                        notification = state.get("notification")
+                        if not isinstance(notification, dict):
+                            raise ControlError("linux_health_notification_outcome_uncertain")
+                    else:
+                        state["notification_attempt"] = fingerprint
+                        state.pop("notification", None)
+                        InstructionStore._atomic_json(self.path, state)
+                        notification = self.notifier.notify(event).to_dict()
             notification = dict(notification, event_type=event.event_type)
             with effect_guard(self.codex_home, thread, "state"):
                 state["notification"] = notification

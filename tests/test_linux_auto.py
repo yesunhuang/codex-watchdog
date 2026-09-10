@@ -194,7 +194,7 @@ def test_writer_loss_alert_and_recovery_use_configured_transport_once(scenario, 
     assert len(messages) == 1 and len(clients) == 1
     assert len(clients[0].calls) == 2  # No retry/resume, fork, queue or turn start.
     writer[0] = clients[0].process.pid
-    monkeypatch.setattr(agent, "_cycle", lambda item: None)
+    monkeypatch.setattr(agent, "_cycle", lambda item: SimpleNamespace(status="completed"))
     assert agent.step()[0]["state"] == "owned"
     assert len(messages) == 2 and "again" in messages[1]
     agent.step()
@@ -283,7 +283,7 @@ def test_loss_alert_survives_remote_process_restart_without_resending(scenario, 
     assert restarted.step()[0]["notification"]["status"] == "sent"
     assert len(sends) == 1
     writer[0] = replacement.client.process.pid
-    monkeypatch.setattr(restarted, "_cycle", lambda item: None)
+    monkeypatch.setattr(restarted, "_cycle", lambda item: SimpleNamespace(status="completed"))
     restarted.step()
     assert len(sends) == 2
 
@@ -320,6 +320,21 @@ def test_uncertain_alert_keeps_canonical_barrier_and_is_never_replayed(scenario)
     assert store.read()["external_effect"] is not None
     assert agent.step()[0]["notification"]["reason"] == "control_notification_outcome_uncertain"
     assert len(attempts) == 1
+
+
+def test_handback_racing_observation_does_not_raise_a_loss_alert(scenario, monkeypatch):
+    from codex_watchdog.control_state import ControlError
+    store, local, writer, clock, clients, make_agent = scenario
+    agent, owner = detached(scenario)
+
+    def handback(item):
+        assert store.attach("returning-desktop", "desktop-host", "remote") is None
+        raise ControlError("control_handback_pending")
+
+    monkeypatch.setattr(agent, "_cycle", handback)
+    assert "notification" not in agent.step()[0]
+    assert not owner.health.path.exists()
+    assert agent.step()[0]["state"] == "released"
     assert all(call[1]["threadId"] == THREAD for client in clients for call in client.calls)
     assert not any(call[0] in ("thread/start", "turn/start") for client in clients for call in client.calls)
 

@@ -141,8 +141,15 @@ class LinuxThreadOwner:
         with effect_guard(self.binding.codex_home, workspace.session_id, "writer"):
             result = self._owned_step(observe=False)
         if observe and result["owner_state"] == "owned":
-            self.service.run_once()
-            self.health.report()
+            cycle = self.service.run_once()
+            if cycle.reason != "service_cycle_lock_held":
+                if (cycle.status != "completed" or len(cycle.workspaces) != 1
+                        or cycle.workspaces[0].workspace_id != workspace.workspace_id
+                        or cycle.workspaces[0].status != "completed"):
+                    if self.release_requested or self.binding.load()["state"] != "armed":
+                        return result  # An idle release can race the catalog read.
+                    raise LinuxBindingError("linux_observation_failed")
+                self.health.report()
         return result
 
     def _owned_step(self, *, observe: bool) -> Dict[str, Any]:
