@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import pytest
+
 from codex_watchdog.notifications import (
     EnvironmentNotifier,
     NotificationConfig,
@@ -12,6 +14,7 @@ from codex_watchdog.notifications import (
     notification_workspace_label,
 )
 from codex_watchdog.slack_mapping import SlackRelayTarget, SlackThreadStore
+from codex_watchdog.slack_relay import SlackReplyRelay
 
 
 WEBHOOK = "https://hooks.slack.invalid/services/secret/path"
@@ -163,7 +166,7 @@ def test_slack_bot_delivery_persists_exact_reply_thread_without_message_text(
         assert secret not in durable
 
 
-def test_partial_slack_relay_configuration_fails_closed() -> None:
+def test_bot_and_channel_send_notifications_without_a_reply_listener(tmp_path: Path) -> None:
     config = NotificationConfig.from_environment(
         {
             "CODEX_WATCHDOG_SLACK_BOT_TOKEN": SLACK_BOT_TOKEN,
@@ -171,6 +174,56 @@ def test_partial_slack_relay_configuration_fails_closed() -> None:
         }
     )
 
+    assert config.slack_configured is True
+    assert config.slack_relay_configured is False
+    assert config.configuration_issues == ()
+    assert SlackReplyRelay.from_notification_config(
+        tmp_path, config, queue_dispatcher=None, remote_ssh_adapter=None,
+    ) is None
+    assert SLACK_BOT_TOKEN not in repr(config)
+
+    calls = []
+
+    def api_post(token, method, payload, timeout):
+        calls.append((token, method, payload))
+        return {"ok": True, "channel": SLACK_CHANNEL, "ts": "1760000000.000100"}
+
+    notification = NotificationEvent(
+        workspace_id="local-watchdog", event_type="linux_monitoring_lost",
+        transition_fingerprint="notification-only-loss",
+        subject="[Codex Watchdog] Monitoring lost", message="The owner stopped.",
+        relay_target=SlackRelayTarget(
+            workspace_id="local-watchdog", thread_id=OUTLOOK_CLIENT_ID,
+            execution_locality="process_local",
+        ),
+    )
+    notifier = EnvironmentNotifier(tmp_path, config, slack_api_post=api_post)
+    first = notifier.notify(notification)
+    repeated = EnvironmentNotifier(tmp_path, config, slack_api_post=api_post).notify(notification)
+    assert first.status == "sent" and first.channel == "slack"
+    assert repeated.status == "suppressed" and repeated.duplicate is True
+    assert calls == [(SLACK_BOT_TOKEN, "chat.postMessage", {
+        "channel": SLACK_CHANNEL,
+        "text": "[Codex Watchdog] Monitoring lost\nThe owner stopped.",
+        "unfurl_links": False, "unfurl_media": False,
+    })]
+    assert not SlackThreadStore(tmp_path).has_notification_mapping(notification.event_fingerprint())
+    assert SLACK_BOT_TOKEN not in notifier.state_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("updates", [
+    {"slack_bot_token": None},
+    {"slack_bot_token": "invalid"},
+    {"slack_channel_id": None},
+    {"slack_channel_id": "D12345678"},
+    {"slack_app_token": SLACK_APP_TOKEN},
+    {"slack_allowed_user_ids": (SLACK_USER,)},
+    {"slack_app_token": "invalid", "slack_allowed_user_ids": (SLACK_USER,)},
+])
+def test_partial_slack_relay_configuration_fails_closed(updates) -> None:
+    values = dict(slack_bot_token=SLACK_BOT_TOKEN, slack_channel_id=SLACK_CHANNEL)
+    values.update(updates)
+    config = NotificationConfig(**values)
     assert config.slack_configured is False
     assert config.slack_relay_configured is False
     assert config.configuration_issues == ("slack_relay_configuration_incomplete",)
@@ -184,6 +237,22 @@ def test_partial_slack_relay_configuration_fails_closed() -> None:
         slack_allowed_user_ids=(SLACK_USER,),
     )
     assert direct_message.slack_relay_configured is False
+
+
+def test_notification_only_bot_rejects_a_different_returned_channel(tmp_path: Path) -> None:
+    calls = []
+
+    def api_post(*args):
+        calls.append(args)
+        return {"ok": True, "channel": "C87654321", "ts": "1760000000.000100"}
+
+    config = NotificationConfig(slack_bot_token=SLACK_BOT_TOKEN, slack_channel_id=SLACK_CHANNEL)
+    notifier = EnvironmentNotifier(tmp_path, config, slack_api_post=api_post)
+    result = notifier.notify(event())
+    assert result.status == "delivery_failed"
+    assert result.attempted_channels == ("slack",)
+    assert len(calls) == 1
+    assert result.error_sha256 is not None
 
 
 def test_distinct_transition_bypasses_dedupe_immediately(tmp_path: Path) -> None:

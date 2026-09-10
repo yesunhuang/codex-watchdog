@@ -569,6 +569,29 @@ Windows are encrypted using DPAPI; this protection does not apply to CLIXML
 exported on non-Windows systems. See the official
 [`Export-Clixml` documentation][powershell-export-clixml].
 
+### Slack notifications without a reply listener
+
+From v0.2.10, set `CODEX_WATCHDOG_SLACK_BOT_TOKEN` and
+`CODEX_WATCHDOG_SLACK_CHANNEL_ID` in the service's private environment to send
+notifications to that exact channel. Use an existing bot with `chat:write` and
+membership in the destination channel; see [`chat.postMessage`][slack-chat-post-message].
+Leave `CODEX_WATCHDOG_SLACK_APP_TOKEN` and
+`CODEX_WATCHDOG_SLACK_ALLOWED_USER_IDS` unset for notifications only. This mode
+does not start a Socket Mode listener, create reply mappings, or invite replies.
+It can share a destination channel with a separately configured desktop listener.
+
+The bot response must confirm the selected channel and a valid message timestamp.
+Duplicate suppression, provider-error handling and configured SMTP fallback still
+apply. Supplying only part of the reply configuration remains an error; complete
+existing reply configurations keep their previous behavior.
+
+An incoming webhook retains its own fixed destination; setting a channel ID does
+not retarget it. If a saved webhook points elsewhere, omit
+`CODEX_WATCHDOG_SLACK_WEBHOOK_URL` from this notification-only service to prevent
+fallback into that other channel. Test the service environment with `notify-test`
+and confirm the message in the intended channel. Existing credentials remain in
+their current secure store during upgrades; host setup is a separate operation.
+
 ### Slack quick-reply relay
 
 The optional relay adds inbound replies without replacing the incoming webhook

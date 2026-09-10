@@ -63,13 +63,21 @@ recovery notification. Normal idle handback, planned release and healthy standby
 do not create loss alerts. An expired or replaced owner has no authority to send.
 
 The Linux **service process** must have its own existing notification environment:
-`CODEX_WATCHDOG_SLACK_WEBHOOK_URL`, or the Slack relay variables from the setup
-guide, and/or `CODEX_WATCHDOG_SMTP_HOST`, `CODEX_WATCHDOG_SMTP_FROM` and
+`CODEX_WATCHDOG_SLACK_WEBHOOK_URL`, or (from v0.2.10) just
+`CODEX_WATCHDOG_SLACK_BOT_TOKEN` and `CODEX_WATCHDOG_SLACK_CHANNEL_ID` for
+notification-only delivery to a selected channel, or the complete Slack relay
+variables from the [setup guide](SETUP.md#slack-notifications-without-a-reply-listener),
+and/or `CODEX_WATCHDOG_SMTP_HOST`, `CODEX_WATCHDOG_SMTP_FROM` and
 `CODEX_WATCHDOG_SMTP_TO` with the provider's existing TLS/authentication settings.
 Slack is preferred; configured SMTP is the fallback. An interactive shell's
 variables are not automatically inherited by a systemd user service. Keep these
 settings in the host's existing private service configuration; do not paste
 credentials into command lines or copy another host's secure store.
+
+Notification-only bot delivery does not start another Socket Mode listener or
+create reply mappings. Keep app-token and reply-allowlist variables unset in that
+service. A webhook has its own fixed destination; omit it if fallback to that
+destination would be incorrect. The selected channel ID does not retarget a webhook.
 
 Automatic status output includes the notification result for a blocked owner.
 The runtime also retains schema-1 `linux/health/*.json` records. `sent` or
