@@ -15,7 +15,7 @@ from .mvp_service import MvpWatchdogService
 from .queue_wake import QueueWakeDispatcher, _resolve_codex_executable
 from .storage import FileLock, InstructionStore
 from .control_context import effect_guard, record_writer_pid
-from .control_state import ControlError
+from .control_state import ControlBusy, ControlError
 from .linux_health import LinuxOwnerHealth, owner_failure_reason
 
 
@@ -138,7 +138,13 @@ class LinuxThreadOwner:
 
     def step(self, *, observe: bool) -> Dict[str, Any]:
         workspace = self.binding.workspace(self.binding.load())
-        with effect_guard(self.binding.codex_home, workspace.session_id, "writer"):
+        with ExitStack() as admitted:
+            try:
+                admitted.enter_context(effect_guard(self.binding.codex_home, workspace.session_id, "writer"))
+            except ControlBusy:
+                # Queue/release admission can briefly hold this lock. No writer
+                # operation has begun; retain the client and recheck next cycle.
+                return self._status("standby", "control_operation_in_progress")
             result = self._owned_step(observe=False)
         if observe and result["owner_state"] == "owned":
             cycle = self.service.run_once()
