@@ -145,6 +145,8 @@ try {
         "duo-upstream.ps1",
         "WINDOWS_PACKAGE.md",
         "README.md",
+        "README.zh-CN.md",
+        "README.ja.md",
         "LICENSE",
         "SECURITY.md",
         "THIRD_PARTY_NOTICES.md",
@@ -154,16 +156,20 @@ try {
     }
     $packageDocs = Join-Path $packageDirectory "docs"
     New-Item -ItemType Directory -Path $packageDocs -Force | Out-Null
-    Copy-Item `
-        -LiteralPath (Join-Path $repoRoot "docs\PLATFORM_SUPPORT.md") `
-        -Destination $packageDocs
+    foreach ($name in @("PLATFORM_SUPPORT.md", "AUTOMATIC_REMOTE_HANDOFF.md")) {
+        Copy-Item -LiteralPath (Join-Path $repoRoot "docs\$name") -Destination $packageDocs
+    }
     $packageImages = Join-Path $packageDirectory "images"
     New-Item -ItemType Directory -Path $packageImages -Force | Out-Null
     foreach ($name in @(
         "parrotDogLogo.png",
         "codex-watchdog.ico",
         "watchdog_workflow_en.png",
-        "parrot_workflow_en.png"
+        "parrot_workflow_en.png",
+        "watchdog_workflow_cn.png",
+        "parrot_workflow_cn.png",
+        "watchdog_workflow_jp.png",
+        "parrot_workflow_jp.png"
     )) {
         Copy-Item -LiteralPath (Join-Path $repoRoot "images\$name") -Destination $packageImages
     }
