@@ -833,8 +833,9 @@ def test_live_window_log_requires_latest_exact_extension_host_pid(
     exthost.mkdir(parents=True)
     (exthost / "exthost.log").write_text(
         "Extension host with pid 999 started\n"
-        "loading workspaceStorage/storage-key/extension-state\n"
-        "Extension host with pid 1000 started\n",
+        "loading workspaceStorage/previous-key/extension-state\n"
+        "Extension host with pid 1000 started\n"
+        "loading workspaceStorage/storage-key/extension-state\n",
         encoding="utf-8",
     )
     codex_log = exthost / "openai.chatgpt" / "Codex.log"
@@ -850,6 +851,110 @@ def test_live_window_log_requires_latest_exact_extension_host_pid(
     snapshot = VSCodeLiveWindowIndex(user_data, status_runner=lambda: status).snapshot()
 
     assert snapshot == {"storage-key": LiveVSCodeWindow("4", 1000, 1001, codex_log)}
+
+
+@pytest.mark.parametrize("current_log", [
+    "Extension host with pid 1000 started\n",
+    "Extension host with pid 1000 started\n"
+    "loading workspaceStorage/first-key/state\n"
+    "loading workspaceStorage/second-key/state\n",
+    "Extension host with pid 1000 started\n"
+    "loading workspaceStorage/previous-key/state\n"
+    "Extension host with pid 1002 started\n"
+    "loading workspaceStorage/previous-key/state\n",
+])
+def test_current_host_never_borrows_or_guesses_workspace_storage(
+    tmp_path: Path, current_log: str,
+) -> None:
+    user_data = tmp_path / "Code" / "User"
+    exthost = user_data.parent / "logs" / "20260901T100000" / "window4" / "exthost"
+    exthost.mkdir(parents=True)
+    (exthost / "exthost.log").write_text(
+        "Extension host with pid 999 started\n"
+        "loading workspaceStorage/previous-key/state\n"
+        "Extension host with pid 999 exiting with code 0\n" + current_log,
+        encoding="utf-8",
+    )
+    status = "0\t100\t1000\textension-host [4]\n"
+
+    assert VSCodeLiveWindowIndex(user_data, status_runner=lambda: status).snapshot() == {}
+
+
+def test_reused_window_tracks_local_and_remote_same_name_independently(
+    tmp_path: Path,
+) -> None:
+    repo = (tmp_path / "project").resolve()
+    repo.mkdir()
+    local_uri = repo.as_uri()
+    remote_uri = "vscode-remote://ssh-remote%2Bexample.invalid/home/user/project"
+    previous_uri = "vscode-remote://ssh-remote%2Bexample.invalid/home/user/other"
+    user_data = tmp_path / "Code" / "User"
+    write_windows_state(user_data / "globalStorage" / "storage.json", [
+        {"folder": local_uri}, {"folder": remote_uri},
+    ])
+    for key, uri in (("local-key", local_uri), ("remote-key", remote_uri),
+                     ("previous-key", previous_uri)):
+        write_workspace(user_data / "workspaceStorage", key, uri)
+    write_threads(tmp_path / ".codex", [
+        (SESSION_CURRENT, str(repo), "vscode", "user", 0),
+        (SESSION_OTHER, "/home/user/project", "vscode", "user", 0),
+    ])
+    for key, session in (("local-key", SESSION_CURRENT), ("remote-key", SESSION_OTHER)):
+        with sqlite3.connect(str(user_data / "workspaceStorage" / key / "state.vscdb")) as db:
+            db.execute("UPDATE ItemTable SET value = ? WHERE key = ?", (
+                json.dumps([{"providerType": "openai-codex",
+                             "resource": f"openai-codex://route/local/{session}"}]),
+                "agentSessions.model.cache",
+            ))
+    logs = user_data.parent / "logs" / "20260901T100000"
+    for window, host, key in (("1", 1000, "local-key"), ("2", 2000, "remote-key")):
+        exthost = logs / ("window" + window) / "exthost"
+        exthost.mkdir(parents=True)
+        previous = (
+            "Extension host with pid 999 started\n"
+            "loading workspaceStorage/previous-key/state\n"
+            "Extension host terminating: received terminate message from renderer\n"
+            "Extension host with pid 999 exiting with code 0\n"
+        ) if window == "1" else ""
+        (exthost / "exthost.log").write_text(
+            previous + f"Extension host with pid {host} started\n"
+            f"loading workspaceStorage/{key}/state\n", encoding="utf-8",
+        )
+        if window == "1":
+            codex_log = exthost / "openai.chatgpt" / "Codex.log"
+            codex_log.parent.mkdir()
+            codex_log.write_text(
+                f"thread_stream_role_changed conversationId={SESSION_CURRENT} role=owner\n",
+                encoding="utf-8",
+            )
+    status = (
+        "0\t100\t1000\textension-host [1]\n"
+        "0\t100\t1001\t     /home/user/.vscode/extensions/openai.chatgpt-1/"
+        "bin/linux-x64/codex app-server\n"
+        "0\t100\t2000\textension-host [2]\n"
+    )
+    git = GitRootResolver(repo)
+    discovery = VSCodeWorkspaceDiscovery(
+        tmp_path / "runtime", codex_home=tmp_path / ".codex", user_data_root=user_data,
+        session_resolver=CodexSessionResolver(
+            tmp_path / "runtime", tmp_path / ".codex",
+            lock_probe=lambda path: path.stem == SESSION_CURRENT,
+        ),
+        live_window_index=VSCodeLiveWindowIndex(user_data, status_runner=lambda: status),
+        git_root_resolver=git,
+    )
+
+    snapshot = discovery.snapshot()
+
+    assert snapshot.status == "ok"
+    assert [(w.repo_root, w.session_id) for w in snapshot.effective_workspaces] == [
+        (repo, SESSION_CURRENT),
+    ]
+    assert [(w.locality, w.tracking_status, w.session_id) for w in snapshot.windows] == [
+        ("process_local", "tracked", SESSION_CURRENT),
+        ("remote_ssh", "remote_adapter", SESSION_OTHER),
+    ]
+    assert git.calls == [repo]
 
 
 def test_newest_window_log_pid_mismatch_does_not_fall_back_to_stale_log(

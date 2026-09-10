@@ -1,4 +1,21 @@
-Version 0.2.11 fixes a false monitoring failure reproduced during native Linux
+Version 0.2.13 restores tracking when VS Code reuses a window for a different
+workspace. Extension-host logs can contain both the previous workspace's storage
+ID and the current workspace's ID. Discovery previously combined these IDs across
+host generations and rejected the current window as ambiguous. It now accepts
+only the storage ID recorded for the exact current extension-host generation.
+Missing or conflicting current-generation evidence still fails closed.
+
+This fixes a reproduced case where a local thread disappeared while a separate
+Remote-SSH thread in a repository with the same name stayed tracked. Local and
+remote identities remain independent. The underlying bug predates the recent
+handoff releases: replaying the same log against v0.2.0, v0.2.3, v0.2.6, v0.2.10,
+v0.2.11 and v0.2.12 reproduces the failure. Existing thread ownership, handoff,
+queues, hooks, credentials and notification receipts retain their behavior.
+
+This release retains v0.2.12's fix for control-lock contention during Linux queue
+admission. A busy admission keeps the owner alive without replaying queue effects.
+
+Version 0.2.11 fixed a false monitoring failure reproduced during native Linux
 package acceptance. A queue/release command can briefly hold the control lock
 between the owner's writer check and its workspace observation. That exact
 contention now skips the observation, keeping the owner running without issuing
@@ -60,4 +77,4 @@ x64, macOS 15 ARM64 preview, Linux ARM64/glibc 2.35 and Linux x64/glibc 2.28.
 The Mac package remains ad-hoc signed and not notarized. Automatic publication
 requires three-OS tests, all four package gates, complete-history secret scanning,
 the approved embedded Windows icon and upgrade from the actual immediately
-previous public Windows v0.2.10 executable. Earlier releases remain immutable.
+previous public Windows v0.2.12 executable. Earlier releases remain immutable.

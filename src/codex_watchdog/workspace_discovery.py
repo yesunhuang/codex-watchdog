@@ -362,16 +362,15 @@ class VSCodeLiveWindowIndex:
                     target_started = False
                     pending_terminations = 0
                     for line in handle:
-                        storage_keys.update(
-                            match.group(1).decode("ascii", errors="ignore")
-                            for match in marker.finditer(line)
-                        )
                         start = host_marker.search(line)
                         exited = exit_marker.search(line)
                         if start is not None:
-                            if int(start.group(1)) == extension_host_pid:
-                                target_started = True
-                                pending_terminations = 0
+                            # A reused window can switch workspace/locality while
+                            # appending to the same log. Bind storage only to the
+                            # current exact host generation, never an older one.
+                            storage_keys.clear()
+                            target_started = int(start.group(1)) == extension_host_pid
+                            pending_terminations = 0
                         elif termination_marker.search(line) is not None:
                             if target_started:
                                 pending_terminations += 1
@@ -384,6 +383,11 @@ class VSCodeLiveWindowIndex:
                                 # A replacement can start before the old host emits
                                 # its generic termination plus exact-PID exit.
                                 pending_terminations -= 1
+                        if target_started:
+                            storage_keys.update(
+                                match.group(1).decode("ascii", errors="ignore")
+                                for match in marker.finditer(line)
+                            )
             except OSError:
                 return None
             if not target_started or pending_terminations or len(storage_keys) != 1:
