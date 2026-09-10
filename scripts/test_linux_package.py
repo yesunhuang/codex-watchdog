@@ -38,6 +38,8 @@ if "queue" in sys.argv:
     thread = sys.argv[sys.argv.index("--thread") + 1]
     message = sys.argv[sys.argv.index("--message") + 1]
     queued = str(uuid.uuid4())
+    with (home / "fixture-queue-invocations.jsonl").open("a") as calls:
+        calls.write(json.dumps({"thread_id":thread, "queue_id":queued}) + "\\n")
     with sqlite3.connect(home / "queue_1.sqlite") as db:
         db.execute("INSERT INTO queued_items VALUES (?, ?, ?)", (queued, thread, json.dumps({"message":message})))
         db.execute("UPDATE queued_thread_revisions SET revision=revision+1 WHERE thread_id=?", (thread,))
@@ -364,9 +366,40 @@ def main() -> None:
             assert "linux_install_busy" in blocked.stderr
             run([installed, "linux-run", "--codex-executable", fake_codex], accepted=(1,))
             queue = [installed, "queue", "--thread", THREAD, "--id", "fixture-queue", "--message", "PACKAGE_FIXTURE_QUEUE"]
-            receipt = json.loads(run(queue).stdout)
+            queue_admission_rejections = 0
+
+            def queue_snapshot():
+                with sqlite3.connect(codex / "queue_1.sqlite") as db:
+                    rows = db.execute("SELECT * FROM queued_items ORDER BY id").fetchall()
+                    revisions = db.execute("SELECT * FROM queued_thread_revisions ORDER BY thread_id").fetchall()
+                records = {p.name: p.read_bytes() for p in (runtime / "wake/records").glob("*.json")}
+                calls = codex / "fixture-queue-invocations.jsonl"
+                return rows, revisions, records, calls.read_bytes() if calls.exists() else b""
+
+            def admitted_queue():
+                nonlocal queue_admission_rejections
+                deadline = time.monotonic() + 15
+                while True:
+                    before = queue_snapshot()
+                    attempt = run(queue, accepted=(0, 1))
+                    value = json.loads(attempt.stdout)
+                    if attempt.returncode == 0:
+                        return value
+                    # The CLI intentionally bounds admission to one second.
+                    # Slow native observations can exceed that bound. A fresh
+                    # fixture attempt is allowed only after a proven rejection
+                    # with no courier, queue, revision or journal side effect.
+                    assert value["status"] == "rejected"
+                    assert value["stderr"] == "control_operation_in_progress"
+                    assert value["queue_message_id"] is None
+                    assert queue_snapshot() == before
+                    queue_admission_rejections += 1
+                    assert time.monotonic() < deadline, "fixture queue remained busy"
+                    time.sleep(0.1)
+
+            receipt = admitted_queue()
             assert receipt["status"] == "enqueued"
-            assert json.loads(run(queue).stdout)["deduplicated"]
+            assert admitted_queue()["deduplicated"]
             foreign = run([installed, "--runtime", root / "foreign runtime", *queue[1:]], accepted=(0, 1))
             assert json.loads(foreign.stdout)["status"] == "rejected"
             with sqlite3.connect(codex / "queue_1.sqlite") as db:
@@ -387,7 +420,7 @@ def main() -> None:
             (runtime / "linux/status.json").unlink()
             process = start_owner()
             wait_state(runtime, "owned", process)
-            assert json.loads(run(queue).stdout)["deduplicated"]
+            assert admitted_queue()["deduplicated"]
             run([installed, "linux-release"])
             wait_state(runtime, "releasing", process)
             with sqlite3.connect(codex / "queue_1.sqlite") as db:
@@ -460,6 +493,8 @@ def main() -> None:
         methods = [json.loads(line) for line in (codex / "fixture-methods.jsonl").read_text().splitlines()]
         resumes = [item for item in methods if item["method"] == "thread/resume"]
         assert len(resumes) == 4 and all(item["params"] == {"threadId": THREAD, "excludeTurns": True} for item in resumes)
+        courier_calls = (codex / "fixture-queue-invocations.jsonl").read_text().splitlines()
+        assert len(courier_calls) == 1 and json.loads(courier_calls[0])["thread_id"] == THREAD
         assert json.loads(reservation.read_text())["future_setting"] == "retain"
         assert git_state() == before_git
         assert all(digest(path) == sha for path, sha in hashes.items())
@@ -477,6 +512,8 @@ def main() -> None:
               "replacement_and_stable_hooks": True, "foreground_and_writer_locks": True,
               "fixture_exact_thread_resume_restart_release": True, "fixture_queue_deduplication": True,
               "bounded_release_lock_admission": True,
+              "queue_courier_invocations": len(courier_calls),
+              "queue_admission_rejections_without_side_effects": queue_admission_rejections,
               "detached_owner_loss_and_recovery_notifications": True,
               "notification_fixture_transport": "loopback_http_no_provider_credentials",
               "watchdog_git_read_only": True, "production_fixture_stop_ms": terminal[0]["hook_duration_ms"],
