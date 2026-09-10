@@ -179,6 +179,10 @@ WatchDog 在 Remote-SSH 断开后接管同一会话，并在安全的空闲边�
 v0.2.9 还会让 `linux-release` 短暂等待监控锁释放；若持续忙碌，则返回
 `linux_release_busy`，不会更改绑定状态。
 
+从 v0.2.10 起，Linux 服务只需配置 Bot Token 和频道 ID，即可向指定 Slack 频道发送通知，
+无需再启动回复监听器。Incoming Webhook 仍使用其自身固定的目标频道。
+配置方法见[仅发送通知的 Slack 设置](docs/SETUP.md#slack-notifications-without-a-reply-listener)。
+
 ARM64 安装包已在真实 Ubuntu ARM64 机器上完成原生验收；x64 安装包已通过托管
 Ubuntu/UBI 验收和真实 RHEL 8.10 机器上的隔离验收。这些检查包含 HTTPS 信任、
 所有权与 Stop 测试。通用 Linux 桌面发现仍是 CI 已验证

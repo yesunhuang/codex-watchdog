@@ -194,6 +194,10 @@ Slack／メールで通知します。同じ障害は一度だけ通知し、監
 v0.2.9 では `linux-release` が監視ロックの解放を短時間待ちます。競合が続く場合は
 `linux_release_busy` を返し、バインド状態を変更しません。
 
+v0.2.10 以降、Linux サービスは Bot Token とチャンネル ID だけで指定の Slack チャンネルへ
+通知を送信でき、別の返信リスナーは不要です。Incoming Webhook の送信先は個別に固定されています。
+設定方法は[通知専用の Slack 設定](docs/SETUP.md#slack-notifications-without-a-reply-listener)を参照してください。
+
 ARM64 パッケージは実際の Ubuntu ARM64 マシンで、x64 パッケージはホスト型の
 Ubuntu/UBI 環境と実際の RHEL 8.10 マシンの隔離環境で検証済みです。
 検証には HTTPS の信頼、所有権と Stop のテストを含みます。一般的な Linux

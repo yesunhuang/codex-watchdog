@@ -1,4 +1,16 @@
-Version 0.2.9 fixes a transient `linux-release` failure found during native x64
+Version 0.2.10 adds notification-only Slack bot delivery. A service can use its
+bot token and an explicit channel ID without an app token or reply allowlist.
+This fixes setup where an existing incoming webhook points to a different channel
+from the desktop reply configuration. The bot response must confirm the requested
+channel; notification-only posts do not create reply mappings or start a competing
+Socket Mode listener. Partially configured replies still fail closed, and complete
+existing reply configurations keep their previous behavior.
+
+Incoming webhooks retain their own destination. Omit a webhook from a bot-only
+service when fallback to that destination would be incorrect. No upgrade copies
+or changes credentials, channel selections, provider settings, or durable receipts.
+
+This release retains v0.2.9's fix for a transient `linux-release` failure found during native x64
 acceptance. The command now waits up to one second for initial control/sender
 lock admission before changing state. Persistent contention returns the bounded
 `linux_release_busy` reason. Binding changes and first activation during that
@@ -40,4 +52,4 @@ x64, macOS 15 ARM64 preview, Linux ARM64/glibc 2.35 and Linux x64/glibc 2.28.
 The Mac package remains ad-hoc signed and not notarized. Automatic publication
 requires three-OS tests, all four package gates, complete-history secret scanning,
 the approved embedded Windows icon and upgrade from the actual immediately
-previous public Windows v0.2.8 executable. Earlier releases remain immutable.
+previous public Windows v0.2.9 executable. Earlier releases remain immutable.

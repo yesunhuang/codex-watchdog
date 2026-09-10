@@ -251,7 +251,19 @@ class NotificationConfig:
 
     @property
     def slack_configured(self) -> bool:
-        return self.slack_webhook_url is not None or self.slack_relay_configured
+        return self.slack_webhook_url is not None or self.slack_post_configured
+
+    @property
+    def slack_post_configured(self) -> bool:
+        # Bot + channel alone deliberately opts into notifications only. A
+        # partially configured reply listener must still fail closed.
+        if self.slack_app_token or self.slack_allowed_user_ids:
+            return self.slack_relay_configured
+        return (
+            isinstance(self.slack_bot_token, str)
+            and self.slack_bot_token.startswith("xoxb-")
+            and valid_slack_channel_id(self.slack_channel_id)
+        )
 
     @property
     def slack_relay_configured(self) -> bool:
@@ -305,7 +317,7 @@ class NotificationConfig:
                 self.slack_allowed_user_ids,
             )
         )
-        if relay_values_present and not self.slack_relay_configured:
+        if relay_values_present and not self.slack_post_configured:
             issues.append("slack_relay_configuration_incomplete")
         smtp_values_present = self.smtp_auth == "outlook_oauth2" or any(
             (
@@ -676,11 +688,12 @@ class EnvironmentNotifier:
 
     def _send_slack(self, event: NotificationEvent) -> None:
         text = f"{event.subject.strip()}\n{event.message}"
-        if self.config.slack_relay_configured:
+        if self.config.slack_post_configured:
             assert self.config.slack_bot_token is not None
             assert self.config.slack_channel_id is not None
+            relay_target = event.relay_target if self.config.slack_relay_configured else None
             relay_text = text
-            if event.relay_target is not None:
+            if relay_target is not None:
                 relay_text += (
                     "\n\n_Reply in this Slack thread to send text to this exact "
                     "existing Codex thread._"
@@ -715,11 +728,11 @@ class EnvironmentNotifier:
                 raise RuntimeError(
                     "Slack chat.postMessage response identity is invalid"
                 )
-            if event.relay_target is not None:
+            if relay_target is not None:
                 self.slack_thread_store.record_thread(
                     channel_id,
                     thread_ts,
-                    event.relay_target,
+                    relay_target,
                     event.event_fingerprint(),
                 )
             return
