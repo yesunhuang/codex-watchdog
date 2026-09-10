@@ -143,6 +143,14 @@ class LinuxThreadOwner:
         if observe and result["owner_state"] == "owned":
             cycle = self.service.run_once()
             if cycle.reason != "service_cycle_lock_held":
+                if (cycle.status == "completed" and len(cycle.workspaces) == 1
+                        and cycle.workspaces[0].workspace_id == workspace.workspace_id
+                        and cycle.workspaces[0].status == "standby"
+                        and cycle.workspaces[0].reason == "control_operation_in_progress"):
+                    # A queue/release command can briefly hold the control lock
+                    # after our writer check. No observation ran, so report
+                    # neither an outage nor recovery; the next cycle rechecks.
+                    return result
                 if (cycle.status != "completed" or len(cycle.workspaces) != 1
                         or cycle.workspaces[0].workspace_id != workspace.workspace_id
                         or cycle.workspaces[0].status != "completed"):

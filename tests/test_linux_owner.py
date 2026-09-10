@@ -437,6 +437,51 @@ def test_release_racing_observation_does_not_raise_a_loss_alert(owner):
     assert not instance.health.path.exists()
 
 
+@pytest.mark.parametrize("already_lost", [False, True])
+def test_workspace_control_contention_preserves_health_until_observed(owner, already_lost):
+    from codex_watchdog.control_state import control_file_lock
+    from codex_watchdog.mvp_service import MvpWatchdogService
+    instance, client, cycles, pid = owner
+    workspace = instance.binding.workspace(instance.binding.load())
+    service = MvpWatchdogService(
+        instance.binding.runtime, codex_home=instance.binding.codex_home,
+        registry=SimpleNamespace(list_workspaces=lambda: (workspace,)),
+        notifier=instance.service.notifier,
+    )
+    if already_lost:
+        instance.report_failure("linux_observation_failed")
+    before = instance.health.path.read_bytes() if already_lost else None
+
+    def contended_observation():
+        # The owner has finished its writer check. A concurrent queue/release
+        # command can hold this lock when the service begins its own guard.
+        lock = instance.binding.codex_home / "watchdog-control" / THREAD / "owner.lock"
+        with control_file_lock(lock):
+            cycle = service.run_once()
+        assert cycle.status == "completed" and len(cycle.workspaces) == 1
+        assert cycle.workspaces[0].status == "standby"
+        assert cycle.workspaces[0].reason == "control_operation_in_progress"
+        return cycle
+
+    instance.service.run_once = contended_observation
+    assert instance.step(observe=True)["owner_state"] == "owned"
+    after = instance.health.path.read_bytes() if instance.health.path.exists() else None
+    assert after == before  # Neither a false outage nor a false recovery.
+
+
+@pytest.mark.parametrize("reason", ["control_stale_epoch", "control_lease_expired", "control_activation_changed"])
+def test_workspace_authority_failure_is_not_transient_contention(owner, reason):
+    instance, client, cycles, pid = owner
+    workspace = instance.binding.workspace(instance.binding.load())
+    instance.service.run_once = lambda: SimpleNamespace(
+        status="completed", reason=None, workspaces=(SimpleNamespace(
+            workspace_id=workspace.workspace_id, status="standby", reason=reason),),
+    )
+    with pytest.raises(LinuxBindingError, match="linux_observation_failed"):
+        instance.step(observe=True)
+    assert not instance.health.path.exists()
+
+
 @pytest.mark.parametrize("coordinated", [False, True])
 @pytest.mark.parametrize("lock_kind", ["control", "sender"])
 def test_operator_release_waits_for_initial_lock_admission(setup, coordinated, lock_kind, monkeypatch):

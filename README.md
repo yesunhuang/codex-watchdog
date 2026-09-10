@@ -200,6 +200,8 @@ contention returns `linux_release_busy` without changing the binding.
 From v0.2.10, a Linux service can send notifications to a chosen Slack channel
 using only its bot token and channel ID, without another reply listener. Incoming
 webhooks keep their own fixed destination. See the [notification setup](docs/SETUP.md#slack-notifications-without-a-reply-listener).
+v0.2.11 also prevents a brief queue/release control-lock conflict from being
+reported as lost monitoring; recovery requires a successful observation.
 
 ARM64 packages pass native acceptance on a real Ubuntu ARM64 machine; x64
 packages pass hosted Ubuntu/UBI acceptance and isolated acceptance on a real
