@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import types
 import zipfile
@@ -59,6 +61,7 @@ for line in sys.stdin:
             path.parent.mkdir(exist_ok=True)
             lock = path.open("a+b")
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            (home / "fixture-writer.pid").write_text(str(os.getpid()))
         result = {"thread":{"id":thread, "cwd":cwd, "status":{"type":"idle"}}}
     elif method != "initialize":
         raise RuntimeError("unsupported fixture method")
@@ -339,9 +342,9 @@ def main() -> None:
             assert "linux_conflicting_writer" in blocked.stdout
         # Discard only the fixture's old observation before waiting for a new one.
         (runtime / "linux/status.json").unlink()
-        def start_owner():
+        def start_owner(env=None):
             return subprocess.Popen([str(installed), "linux-run", "--interval", "1", "--codex-executable", str(fake_codex)],
-                                    cwd=work, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    cwd=work, env=env or environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     text=True, start_new_session=True)
         process = start_owner()
         try:
@@ -382,6 +385,56 @@ def main() -> None:
             wait_state(runtime, "released")
             process.communicate(timeout=15)
             assert process.returncode == 0
+            # Exercise the frozen notification path against a loopback-only
+            # Slack-compatible receiver, with no provider credentials/accounts.
+            alerts = []
+
+            class AlertReceiver(BaseHTTPRequestHandler):
+                def do_POST(self):
+                    assert self.path == "/fixture-alert"
+                    alerts.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b"ok")
+
+                def log_message(self, *args):
+                    pass
+
+            with HTTPServer(("127.0.0.1", 0), AlertReceiver) as receiver:
+                server = threading.Thread(target=receiver.serve_forever, daemon=True)
+                server.start()
+                alert_env = dict(environment, CODEX_WATCHDOG_SLACK_WEBHOOK_URL=
+                    f"http://127.0.0.1:{receiver.server_port}/fixture-alert")
+                try:
+                    run(bind)
+                    (runtime / "linux/status.json").unlink()
+                    process = start_owner(alert_env)
+                    wait_state(runtime, "owned", process)
+                    fixture_pid = int((codex / "fixture-writer.pid").read_text())
+                    assert os.getpgid(fixture_pid) == process.pid
+                    os.kill(fixture_pid, signal.SIGKILL)
+                    stdout, stderr = process.communicate(timeout=20)
+                    assert process.returncode == 1, (stdout, stderr)
+                    failure = json.loads(stdout.splitlines()[-1])
+                    assert failure["owner_state"] == "blocked"
+                    assert failure["notification"]["status"] == "sent"
+                    assert len(alerts) == 1 and "can no longer watch or control" in alerts[0]["text"]
+                    (runtime / "linux/status.json").unlink()
+                    process = start_owner(alert_env)
+                    wait_state(runtime, "owned", process)
+                    deadline = time.monotonic() + 10
+                    while len(alerts) < 2 and time.monotonic() < deadline:
+                        time.sleep(0.1)
+                    assert len(alerts) == 2 and "again" in alerts[1]["text"]
+                    run([installed, "linux-release"])
+                    wait_state(runtime, "released")
+                    process.communicate(timeout=15)
+                    assert process.returncode == 0 and len(alerts) == 2
+                finally:
+                    receiver.shutdown()
+                    server.join(timeout=5)
+            manifest["detached_owner_loss_and_recovery_notifications"] = True
+            manifest["notification_fixture_transport"] = "loopback_http_no_provider_credentials"
         except BaseException:
             # Only this generated fixture's diagnostics; never real server output.
             if fixture_stderr.exists():
@@ -397,7 +450,7 @@ def main() -> None:
                     process.communicate(timeout=10)
         methods = [json.loads(line) for line in (codex / "fixture-methods.jsonl").read_text().splitlines()]
         resumes = [item for item in methods if item["method"] == "thread/resume"]
-        assert len(resumes) == 2 and all(item["params"] == {"threadId": THREAD, "excludeTurns": True} for item in resumes)
+        assert len(resumes) == 4 and all(item["params"] == {"threadId": THREAD, "excludeTurns": True} for item in resumes)
         assert json.loads(reservation.read_text())["future_setting"] == "retain"
         assert git_state() == before_git
         assert all(digest(path) == sha for path, sha in hashes.items())

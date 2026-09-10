@@ -9,9 +9,10 @@ import uuid
 
 from .control_context import acting_as
 from .app_server import AppServerError
-from .control_state import ControlError, ControlStore, control_atomic_json, control_read_json
+from .control_state import ControlBusy, ControlError, ControlStore, control_atomic_json, control_read_json
 from .linux_binding import LinuxBinding, exact_thread, locality_identity, reservation_path
 from .linux_owner import LinuxThreadOwner, writer_pid
+from .linux_health import owner_failure_reason
 from .models import sha256_text
 from .mvp_service import MvpWatchdogService
 from .remote_ssh import RemoteSshTarget, _REMOTE_SCRIPT
@@ -189,6 +190,7 @@ class LinuxAutoWatchdog:
                         control_atomic_json(store.path, current)
                     if result["owner_state"] == "owned" and observe:
                         self._cycle(item)
+                        owner.health.report()
                 if result["owner_state"] == "released":
                     if writer_pid(self.codex_home, thread) is not None:
                         raise ControlError("control_writer_not_released")
@@ -200,8 +202,15 @@ class LinuxAutoWatchdog:
                 results.append(dict(thread_sha256=sha256_text(thread), epoch=token["epoch"],
                                     state=result["owner_state"], thread_status=result["thread_status"]))
             except (ControlError, AppServerError, StoreBusyError, ValueError, OSError) as exc:
-                reason = str(exc) if isinstance(exc, ControlError) else "control_remote_owner_blocked"
-                results.append(dict(thread_sha256=sha256_text(thread), state="blocked", reason=reason))
+                reason = owner_failure_reason(exc)
+                blocked = dict(thread_sha256=sha256_text(thread), state="blocked", reason=reason)
+                if item is not None and not isinstance(exc, (ControlBusy, StoreBusyError)):
+                    try:
+                        with acting_as(item["store"], item["token"]):
+                            blocked["notification"] = item["owner"].report_failure(reason)
+                    except (ControlError, OSError, ValueError) as error:
+                        blocked["notification"] = dict(status="blocked", reason=owner_failure_reason(error))
+                results.append(blocked)
         return results
 
     def run(self, interval_seconds=5, emit=None):

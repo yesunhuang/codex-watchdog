@@ -285,7 +285,9 @@ def owner(setup, monkeypatch):
     monkeypatch.setattr(linux_owner, "vscode_writer", lambda p: p == 777)
     client = FakeClient(workspace, pid)
     cycles = []
-    service = SimpleNamespace(run_once=lambda: cycles.append("read-only-service"))
+    from codex_watchdog.notifications import EnvironmentNotifier, NotificationConfig
+    service = SimpleNamespace(run_once=lambda: cycles.append("read-only-service"),
+        notifier=EnvironmentNotifier(binding.runtime, config=NotificationConfig()))
     owner = LinuxThreadOwner(binding, service=service, client_factory=lambda *a: client)
     return owner, client, cycles, pid
 
@@ -367,3 +369,24 @@ def test_lost_writer_does_not_respawn_or_send(owner):
     with pytest.raises(LinuxBindingError, match="writer_changed"):
         instance.step(observe=True)
     assert len(client.requests) == 2 and cycles == []
+
+
+def test_foreground_owner_reports_app_server_exit_before_stopping(owner):
+    from codex_watchdog.app_server import AppServerError
+    from codex_watchdog.notifications import EnvironmentNotifier, NotificationConfig
+    instance, client, cycles, pid = owner
+    messages = []
+    instance.health.notifier = EnvironmentNotifier(instance.binding.runtime,
+        config=NotificationConfig(slack_webhook_url="https://hooks.slack.invalid/fixture"),
+        http_post=lambda *args: messages.append(args) or 200)
+
+    def exited(**kwargs):
+        raise AppServerError("app_server_exited")
+
+    client.pump = exited
+    results = []
+    assert instance.run(emit=results.append) == 1
+    assert results[-1]["reason"] == "app_server_exited"
+    assert results[-1]["notification"]["status"] == "sent"
+    assert len(messages) == 1 and client.closed
+    assert len(client.requests) == 2
