@@ -45,6 +45,7 @@
 | Windows x64 本地桌面 | **稳定、已完成端到端验证的打包参考实现** |
 | Linux Remote-SSH 目标 | **真实远程路径已验证** |
 | Linux 显式绑定的同线程源码工作流 | **已在 Ubuntu ARM64 完成真实端到端验证** |
+| Linux 远程会话自动交接 | **已在 Ubuntu ARM64 完成源码实机 E2E；重新连接时可能需要重载 VS Code 窗口** |
 | Linux ARM64 可执行安装包 | **已在 Ubuntu ARM64 实机完成安装包验收；使用显式同线程工作流** |
 | Linux x64 可执行安装包 | **Ubuntu 与 RHEL 8.10 原生安装包验收通过；真实用户桌面端到端验证待完成** |
 | Linux 本地桌面 | **CI 已验证的预览版；仍需真实桌面端到端验证** |
@@ -67,6 +68,7 @@ Apple Silicon 和两种 Linux 架构均提供自带运行环境的 ZIP。Linux �
 - 以只读的远端 Git OID 检查充当 GitHub 更新门铃，再由 Codex 完成同步。
 - 发送 Slack 通知，支持 Outlook/SMTP 回退，并保留本地审计记录。
 - 自动发现符合条件的本地与 VS Code Remote-SSH 工作区。
+- 当旧的已加载会话明确处于非活动状态时，跟踪当前活动会话，并报告跟踪异常的原因。
 - 可选地把 WatchDog 创建的 Slack 线程中的白名单回复转发回 Codex，也就是
   **Parrot Dog（鹦鹉狗）**路径。
 - 在所有运行位置强制遵守“WatchDog 不修改 Git”的边界。
@@ -165,6 +167,12 @@ watchdog="${XDG_DATA_HOME:-$HOME/.local/share}/codex-watchdog/bin/codex-watchdog
 前台 `linux-run`、空闲时 `linux-release`、升级与回滚步骤见
 [Linux 安装包指南](docs/LINUX_PACKAGE.md)。
 
+从 v0.2.7 起，[远程会话自动交接](docs/AUTOMATIC_REMOTE_HANDOFF.md)支持常驻 Linux
+WatchDog 在 Remote-SSH 断开后接管同一会话，并在安全的空闲边界交回控制权。
+请一起升级桌面端、远程 WatchDog 和已信任 Hook 对应的实现。使用现有运行目录，
+通过用户服务运行 `linux-auto-run --interval 5`；指南提供完整命令，此路径无需手动绑定。
+如果交接后 VS Code 的首次恢复一直未完成，请重载该工作区窗口并重新打开原有会话。
+
 ARM64 安装包已在真实 Ubuntu ARM64 机器上完成原生验收；x64 安装包已通过托管
 Ubuntu/UBI 验收和真实 RHEL 8.10 机器上的隔离验收。这些检查包含 HTTPS 信任、
 所有权与 Stop 测试。通用 Linux 桌面发现仍是 CI 已验证
@@ -217,7 +225,7 @@ Codex -> Parrot Dog（Slack）-> 人 -> Parrot Dog -> 准确的 Codex 线程
 - [Mac 安装包、升级与手动测试](docs/MACOS_PACKAGE.md)
 - [Linux ARM64/x64 安装包、升级与回滚](docs/LINUX_PACKAGE.md)
 - [Linux 源码安装与同线程生命周期](docs/LINUX_SOURCE_WORKFLOW.md)
-- [远程会话自动交接（开发候选版本，原生生命周期验收尚未完成）](docs/AUTOMATIC_REMOTE_HANDOFF.md)
+- [远程会话自动交接、常驻启动与安全重连](docs/AUTOMATIC_REMOTE_HANDOFF.md)
 - [详细设置与运行](docs/SETUP.md)
 - [平台支持与隐私安全诊断](docs/PLATFORM_SUPPORT.md)
 - [安全策略与运行边界](SECURITY.md)

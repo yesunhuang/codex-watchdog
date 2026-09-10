@@ -48,6 +48,7 @@
 | Windows x64 ローカルデスクトップ | **安定版・完全 E2E 検証済みのパッケージ基準実装** |
 | Linux Remote-SSH ターゲット | **実機のリモート経路を検証済み** |
 | Linux の明示的な同一スレッド・ソース実行 | **Ubuntu ARM64 実機 E2E 検証済み** |
+| Linux リモート会話の自動引き継ぎ | **Ubuntu ARM64 のソース実機 E2E 検証済み。再接続時に VS Code の再読み込みが必要な場合あり** |
 | Linux ARM64 実行ファイルパッケージ | **Ubuntu ARM64 実機でパッケージ検証済み。明示的な同一スレッド手順に対応** |
 | Linux x64 実行ファイルパッケージ | **Ubuntu と RHEL 8.10 でネイティブパッケージ検証済み。実ユーザーのデスクトップ E2E は未完了** |
 | Linux ローカルデスクトップ | **CI 検証済みプレビュー。実機デスクトップ E2E は未完了** |
@@ -73,6 +74,7 @@ Linux/macOS では、POSIX ロックとストレージ、標準 VS Code
   Codex に任せます。
 - Slack 通知、Outlook／SMTP フォールバック、ローカル監査記録に対応します。
 - ローカルと VS Code Remote-SSH の対象ワークスペースを検出します。
+- 以前に読み込んだ会話が明示的に非アクティブな場合、現在のアクティブな会話を追跡し、追跡異常の理由を表示します。
 - WatchDog が作成した Slack スレッドから、許可された返信だけを Codex に戻す
   **Parrot Dog** 中継を任意で利用できます。
 - どの実行環境でも WatchDog による Git 変更を禁止します。
@@ -178,6 +180,14 @@ watchdog="${XDG_DATA_HOME:-$HOME/.local/share}/codex-watchdog/bin/codex-watchdog
 `linux-run`、アイドル時の `linux-release`、更新とロールバックは
 [Linux パッケージガイド](docs/LINUX_PACKAGE.md)を参照してください。
 
+v0.2.7 以降の[リモート会話の自動引き継ぎ](docs/AUTOMATIC_REMOTE_HANDOFF.md)では、
+常駐する Linux WatchDog が Remote-SSH 切断後に同じ会話を引き継ぎ、安全なアイドル状態で
+制御を戻します。デスクトップ側、リモート側 WatchDog、信頼済みフックの実装を一緒に更新し、
+既存ランタイムを指定してユーザーサービスから `linux-auto-run --interval 5` を実行します。
+完全なコマンドはガイドを参照してください。この経路では手動バインドは不要です。
+引き継ぎ後も VS Code の最初の再開が完了しない場合は、そのワークスペースウィンドウを
+再読み込みして既存の会話を開き直してください。
+
 ARM64 パッケージは実際の Ubuntu ARM64 マシンで、x64 パッケージはホスト型の
 Ubuntu/UBI 環境と実際の RHEL 8.10 マシンの隔離環境で検証済みです。
 検証には HTTPS の信頼、所有権と Stop のテストを含みます。一般的な Linux
@@ -236,7 +246,7 @@ Slack で往復を中継します。
 - [Mac パッケージ、更新、手動検証](docs/MACOS_PACKAGE.md)
 - [Linux ARM64/x64 パッケージ、更新とロールバック](docs/LINUX_PACKAGE.md)
 - [Linux ソース導入と同一スレッドのライフサイクル](docs/LINUX_SOURCE_WORKFLOW.md)
-- [リモート会話の自動引き継ぎ（開発候補版、実機ライフサイクル検証待ち）](docs/AUTOMATIC_REMOTE_HANDOFF.md)
+- [リモート会話の自動引き継ぎ、常駐起動、安全な再接続](docs/AUTOMATIC_REMOTE_HANDOFF.md)
 - [詳細なセットアップと運用](docs/SETUP.md)
 - [プラットフォーム対応とプライバシー安全な診断](docs/PLATFORM_SUPPORT.md)
 - [セキュリティポリシーと運用境界](SECURITY.md)
