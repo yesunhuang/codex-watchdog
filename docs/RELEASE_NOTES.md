@@ -16,6 +16,11 @@ admission, without adopting a replacement owner's epoch or shortening the
 production grace period. Unknown notification outcomes remain blocked instead
 of being blindly resent. Provider credentials stay in their existing stores.
 
+Queue commands likewise wait up to one second for initial ownership-lock
+admission, so a brief owner observation does not reject an existing queue receipt.
+The retry retains the caller's capability and stops before any dispatch begins;
+stale epochs, new control activation and uncertain sends remain fenced.
+
 Native Ubuntu ARM64 source acceptance covers attached priority, actual client
 close, autonomous same-thread queue and trusted Stop at 30,004 ms, idle remote
 restart, stale-owner rejection, and handback. VS Code's first resume during

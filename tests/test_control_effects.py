@@ -230,3 +230,73 @@ def test_hook_admission_retries_only_its_captured_epoch(controlled, monkeypatch,
         else:
             assert "control_stale_epoch" in error.getvalue()
             assert len(list((runtime / "inbox").glob("*.json"))) == 1
+
+
+@pytest.mark.parametrize("scenario", ["coordinated", "uncoordinated", "persistent", "epoch_changed", "activation_changed"])
+def test_queue_admission_preserves_capability_and_existing_receipt(controlled, monkeypatch, scenario):
+    from contextlib import contextmanager, nullcontext
+    from codex_watchdog import queue_wake
+    from codex_watchdog.control_state import ControlBusy
+
+    store, token, codex, repo, runtime = controlled
+    uncoordinated = scenario in ("uncoordinated", "activation_changed")
+    if uncoordinated:
+        codex = runtime / "uncoordinated-home"
+    sent = []
+    def send(argv, **kwargs):
+        sent.append(argv)
+        return subprocess.CompletedProcess(argv, 0, f"Queued message {QUEUE} for thread {THREAD}.\n", "")
+    dispatcher = QueueWakeDispatcher(runtime, codex_home=codex, runner=send)
+    def scope():
+        return nullcontext() if uncoordinated else acting_as(store, token)
+    with scope():
+        assert dispatcher.dispatch(THREAD, "one", "hello", "test").status == "enqueued"
+    journal = dispatcher.records / (sha256_text("one") + ".json")
+    before = journal.read_bytes()
+    original_guard = queue_wake.effect_guard
+    attempts, tick = [0], [0.0]
+    @contextmanager
+    def contended(*args, **kwargs):
+        attempts[0] += 1
+        if attempts[0] == 1 or scenario == "persistent":
+            raise ControlBusy("control_operation_in_progress")
+        with original_guard(*args, **kwargs):
+            yield
+    def sleep(seconds):
+        tick[0] += seconds
+        if scenario == "epoch_changed":
+            store.detach(token)
+            store.claim_remote("replacement", "remote-host", "absent")
+        elif scenario == "activation_changed":
+            ControlStore(codex, THREAD, repo, clock=lambda: 100, boot_id="boot").attach("new-desktop", "desktop-host", "vscode")
+    monkeypatch.setattr(queue_wake, "effect_guard", contended)
+    monkeypatch.setattr(queue_wake, "monotonic", lambda: tick[0], raising=False)
+    monkeypatch.setattr(queue_wake, "sleep", sleep, raising=False)
+    with scope():
+        receipt = dispatcher.dispatch(THREAD, "one", "hello", "test")
+    assert len(sent) == 1
+    assert attempts[0] > 1
+    if scenario in ("coordinated", "uncoordinated"):
+        assert receipt.status == "enqueued" and receipt.deduplicated
+    else:
+        assert receipt.status == "rejected" and journal.read_bytes() == before
+        assert receipt.stderr == {"persistent": "control_operation_in_progress", "epoch_changed": "control_stale_epoch", "activation_changed": "control_owner_capability_required"}[scenario]
+    if scenario == "persistent":
+        assert tick[0] == pytest.approx(1.0)
+
+
+def test_queue_never_retries_contention_after_dispatch_started(controlled, monkeypatch):
+    from codex_watchdog import queue_wake
+    from codex_watchdog.control_state import ControlBusy
+    store, token, codex, repo, runtime = controlled
+    sent, sleeps = [], []
+    def uncertain_send(argv, **kwargs):
+        sent.append(argv)
+        raise ControlBusy("control_operation_in_progress")
+    monkeypatch.setattr(queue_wake, "sleep", sleeps.append, raising=False)
+    dispatcher = QueueWakeDispatcher(runtime, codex_home=codex, runner=uncertain_send)
+    with acting_as(store, token):
+        receipt = dispatcher.dispatch(THREAD, "uncertain", "hello", "test")
+    assert receipt.status == "rejected" and len(sent) == 1 and sleeps == []
+    journal = json.loads((dispatcher.records / (sha256_text("uncertain") + ".json")).read_text())
+    assert journal["state"] == "dispatching"

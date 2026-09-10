@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import ExitStack
 from dataclasses import dataclass
 import json
 import os
@@ -8,13 +9,14 @@ import re
 import shutil
 import sqlite3
 import subprocess
+from time import monotonic, sleep
 from typing import Any, Callable, Dict, List, Optional, Tuple
 import uuid
 
 from .models import sha256_text, utc_now, validate_instruction_id, validate_prompt
 from .linux_binding import LinuxBindingError, sender_guard
 from .control_context import effect_guard
-from .control_state import ControlError
+from .control_state import ControlBusy, ControlError
 from .platform_adapters import detect_platform_adapter
 from .process_environment import codex_process_environment
 from .storage import InstructionCollisionError, InstructionStore, StoreBusyError
@@ -184,7 +186,22 @@ class QueueWakeDispatcher:
     ) -> QueueReceipt:
         thread_id = _canonical_uuid(thread_id, "thread id")
         try:
-            with effect_guard(self.codex_home, thread_id, "queue"):
+            with ExitStack() as scope:
+                # A brief owner observation may hold the same fence. Retry only
+                # admission, keeping the caller's capability; never repeat a
+                # dispatch or adopt an owner epoch published while we waited.
+                deadline = monotonic() + 1.0
+                while True:
+                    try:
+                        scope.enter_context(effect_guard(self.codex_home, thread_id, "queue"))
+                        break
+                    except ControlBusy:
+                        remaining = deadline - monotonic()
+                        if remaining <= 0:
+                            raise
+                        sleep(min(0.05, remaining))
+                        if monotonic() >= deadline:
+                            raise
                 return self._guarded_dispatch(thread_id, instruction_id, prompt, source, timeout_seconds)
         except ControlError as exc:
             return QueueReceipt(instruction_id, thread_id, "rejected", "", str(exc), 1)
