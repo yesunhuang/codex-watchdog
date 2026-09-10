@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, ExitStack
 import hashlib
 import json
 import math
@@ -14,7 +14,7 @@ import time
 from typing import Any, Dict, Iterator
 import uuid
 
-from .storage import FileLock, InstructionStore
+from .storage import FileLock, InstructionStore, StoreBusyError
 from .workspace_registry import TrackedWorkspace
 from .control_context import effect_guard
 
@@ -205,20 +205,52 @@ class LinuxBinding:
                 InstructionStore._atomic_json(path, value)
         return value
 
-    def request_release(self) -> Dict[str, Any]:
+    def request_release(self, *, monotonic=time.monotonic, sleep=time.sleep) -> Dict[str, Any]:
         """Explicit operator request; never grants execution or interrupts a turn."""
-        from .control_state import ControlStore, control_file_lock, control_atomic_json
+        from .control_state import ControlBusy, ControlStore, control_file_lock, control_atomic_json
         value = self.load()
         thread = value["thread_id"]
+        workspace = self.workspace(value)
         path = self.codex_home / "watchdog-control" / thread / "owner.json"
-        if not path.exists():
-            return self.set_state("release_requested")
-        store = ControlStore(self.codex_home, thread, self.workspace(value).repo_root)
-        with control_file_lock(store.lock_path):
-            current = store.read()
-            current["auto_paused"] = True
-            control_atomic_json(store.path, current)
-            return self._set_state("release_requested")
+        coordinated = path.exists()
+        reservation = reservation_path(self.codex_home, thread)
+        deadline = monotonic() + 1.0
+        with ExitStack() as admitted:
+            while True:
+                attempt = ExitStack()
+                try:
+                    attempt.enter_context(control_file_lock(path.with_name("owner.lock")))
+                    attempt.enter_context(FileLock(reservation.with_suffix(".send.lock")))
+                except (ControlBusy, StoreBusyError) as exc:
+                    attempt.close()
+                    remaining = deadline - monotonic()
+                    if remaining <= 0:
+                        raise LinuxBindingError("linux_release_busy") from exc
+                    sleep(min(0.05, remaining))
+                    if monotonic() >= deadline:
+                        raise LinuxBindingError("linux_release_busy") from exc
+                except BaseException:
+                    attempt.close()
+                    raise
+                else:
+                    admitted.callback(attempt.close)
+                    break
+            # Retry only admission, before either durable write. Never switch
+            # to a rebound thread or adopt first activation during the wait.
+            value = self.load()
+            if not workspace.has_same_registration(self.workspace(value)):
+                raise LinuxBindingError("linux_release_binding_changed")
+            if not coordinated and path.exists():
+                raise LinuxBindingError("control_activation_changed")
+            if coordinated:
+                store = ControlStore(self.codex_home, thread, workspace.repo_root)
+                current = store.read()
+                current["auto_paused"] = True
+                control_atomic_json(store.path, current)
+            if value["state"] != "released":
+                value["state"] = "release_requested"
+                InstructionStore._atomic_json(reservation, value)
+            return value
 
     def status(self) -> Dict[str, Any]:
         value = self.load()

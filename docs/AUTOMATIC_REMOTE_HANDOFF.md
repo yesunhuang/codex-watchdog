@@ -86,7 +86,11 @@ record for inspection; deleting it or editing epochs is not a safe recovery step
 Completed receipts recover automatically, including a crash during final cleanup.
 
 `linux-release` requests idle release and pauses automatic takeover for that bound
-thread. `linux-bind` can explicitly rearm a released, vacant target; `linux-run`
+thread. From v0.2.9 it waits up to one second for initial control/sender lock
+admission before changing state. Persistent contention returns `linux_release_busy`;
+inspect the owner and retry the command. A changed binding or first activation
+during the wait fails closed. An operation that already started writing is never
+replayed. `linux-bind` can explicitly rearm a released, vacant target; `linux-run`
 then uses the same ownership protocol. An active owner or unknown writer is a
 reason to wait, not to force a takeover. Ordinary explicit bindings without an
 automatic control record keep their existing workflow.
