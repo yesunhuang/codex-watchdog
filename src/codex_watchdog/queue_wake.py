@@ -13,6 +13,8 @@ import uuid
 
 from .models import sha256_text, utc_now, validate_instruction_id, validate_prompt
 from .linux_binding import LinuxBindingError, sender_guard
+from .control_context import effect_guard
+from .control_state import ControlError
 from .platform_adapters import detect_platform_adapter
 from .process_environment import codex_process_environment
 from .storage import InstructionCollisionError, InstructionStore, StoreBusyError
@@ -181,6 +183,16 @@ class QueueWakeDispatcher:
         timeout_seconds: float = 30.0,
     ) -> QueueReceipt:
         thread_id = _canonical_uuid(thread_id, "thread id")
+        try:
+            with effect_guard(self.codex_home, thread_id, "queue"):
+                return self._guarded_dispatch(thread_id, instruction_id, prompt, source, timeout_seconds)
+        except ControlError as exc:
+            return QueueReceipt(instruction_id, thread_id, "rejected", "", str(exc), 1)
+
+    def _guarded_dispatch(
+        self, thread_id: str, instruction_id: str, prompt: str, source: str,
+        timeout_seconds: float,
+    ) -> QueueReceipt:
         instruction_id = validate_instruction_id(instruction_id)
         # Existing records are observation/dedup only, including uncertain sends.
         if (self.records / (sha256_text(instruction_id) + ".json")).exists():
@@ -353,6 +365,15 @@ class QueueWakeDispatcher:
 
     def observe_delivery(
         self, instruction_id: str, queue_database: Optional[Path] = None
+    ) -> QueueReceipt:
+        instruction_id = validate_instruction_id(instruction_id)
+        path = self.records / (sha256_text(instruction_id) + ".json")
+        record = json.loads(path.read_text(encoding="utf-8"))
+        with effect_guard(self.codex_home, record["thread_id"], "state"):
+            return self._guarded_observe_delivery(instruction_id, queue_database)
+
+    def _guarded_observe_delivery(
+        self, instruction_id: str, queue_database: Optional[Path] = None,
     ) -> QueueReceipt:
         """Passively promote an enqueue using queue and rollout evidence."""
         instruction_id = validate_instruction_id(instruction_id)
@@ -621,6 +642,10 @@ class QueueWakeDispatcher:
     def claim_and_dispatch_resume_prompt(
         self, thread_id: str
     ) -> Optional[QueueReceipt]:
+        with effect_guard(self.codex_home, thread_id, "queue"):
+            return self._guarded_claim_resume_prompt(thread_id)
+
+    def _guarded_claim_resume_prompt(self, thread_id: str) -> Optional[QueueReceipt]:
         source = self.runtime / "resume_prompt.md"
         if not source.exists():
             return None

@@ -48,6 +48,7 @@ watches, wakes, relays, and notifies without becoming another AI agent.
 | Windows x64 local desktop | **Stable, full E2E verified, packaged reference** |
 | Linux Remote-SSH target | **Real remote path verified** |
 | Linux explicit same-thread source owner | **Native E2E verified on Ubuntu ARM64** |
+| Linux automatic remote handoff | **Native source E2E verified on Ubuntu ARM64; reattachment may need a VS Code reload** |
 | Linux ARM64 executable package | **Native package acceptance on Ubuntu ARM64; explicit same-thread workflow** |
 | Linux x64 executable package | **Native package acceptance on Ubuntu and RHEL 8.10; real-user desktop E2E pending** |
 | Linux local desktop | **CI-verified preview; native desktop E2E pending** |
@@ -74,6 +75,8 @@ support meanings and the native validation checklist.
   Codex perform any synchronization.
 - Sends Slack notifications with Outlook/SMTP fallback and a local audit trail.
 - Discovers eligible local and VS Code Remote-SSH workspaces.
+- Tracks the explicitly active chat when older loaded chats are inactive, and
+  reports degraded tracking reasons.
 - Optionally relays allowlisted replies from a WatchDog-created Slack thread
   back to Codex (the **Parrot Dog** path).
 - Enforces a zero-Git-mutation boundary in every WatchDog locality.
@@ -178,6 +181,15 @@ in Codex. The stable executable path supports spaces. See the
 [Linux package guide](docs/LINUX_PACKAGE.md) for exact-thread binding,
 foreground `linux-run`, idle `linux-release`, upgrades, and rollback.
 
+From v0.2.7, [automatic remote handoff](docs/AUTOMATIC_REMOTE_HANDOFF.md) lets a
+persistent Linux WatchDog take over the same conversation after Remote-SSH
+detaches and return control at a safe idle boundary. Upgrade the desktop,
+remote WatchDog and trusted hook implementation together. Run
+`linux-auto-run --interval 5` from a user service with the existing runtime;
+the guide includes the complete command. No manual bind is needed for this path.
+If VS Code's first resume remains pending after handback, reload that workspace
+window and reopen the existing conversation.
+
 ARM64 packages pass native acceptance on a real Ubuntu ARM64 machine; x64
 packages pass hosted Ubuntu/UBI acceptance and isolated acceptance on a real
 RHEL 8.10 machine. These checks include HTTPS trust, owner and Stop fixtures. General Linux desktop discovery remains a CI-verified preview;
@@ -235,6 +247,7 @@ inspectable, and not presented as conventional human-only development.
 - [Mac package, upgrades, and manual testing](docs/MACOS_PACKAGE.md)
 - [Linux ARM64/x64 packages, upgrades, and rollback](docs/LINUX_PACKAGE.md)
 - [Linux source installation and same-thread lifecycle](docs/LINUX_SOURCE_WORKFLOW.md)
+- [Automatic remote handoff, persistent startup, and safe reattachment](docs/AUTOMATIC_REMOTE_HANDOFF.md)
 - [Detailed setup and operations](docs/SETUP.md)
 - [Platform support and privacy-safe doctor](docs/PLATFORM_SUPPORT.md)
 - [Security policy and operational boundary](SECURITY.md)

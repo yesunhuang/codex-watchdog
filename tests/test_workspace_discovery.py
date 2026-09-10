@@ -256,6 +256,46 @@ def test_two_held_user_threads_for_same_exact_cwd_fail_closed(tmp_path: Path,) -
     assert snapshot.windows[0].session_id is None
 
 
+@pytest.mark.parametrize("old_active,current_active,expected", [
+    ("false", "true", SESSION_CURRENT),
+    ("true", "false", SESSION_OLD),
+    ("true", "true", None),
+    ("false", "false", None),
+    (None, "true", None),
+    ("true", None, None),
+    ("invalid", "true", None),
+])
+def test_multiple_loaded_owners_require_one_explicit_active_view(
+    tmp_path, old_active, current_active, expected,
+):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    codex_home = tmp_path / ".codex"
+    write_threads(codex_home, [
+        (SESSION_OLD, str(repo), "vscode", "user", 0),
+        (SESSION_CURRENT, str(repo), "vscode", "user", 0),
+    ])
+    log = tmp_path / "Codex.log"
+    lines = []
+    for session, active in ((SESSION_OLD, old_active), (SESSION_CURRENT, current_active)):
+        lines.append(f"thread_stream_role_changed conversationId={session} role=owner")
+        if active is not None:
+            lines.append(f"thread_stream_view_activity_changed conversationId={session} active={active} streamRole=owner")
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    resolver = CodexSessionResolver(tmp_path / "runtime", codex_home, lock_probe=lambda _: True)
+    result = resolver.resolve((repo,), codex_log=log, window_state_database=None)
+    assert result.session_id == expected
+    assert result.source == ("codex_state_vscode_active_owner" if expected else None)
+    assert result.reason == (None if expected else "ambiguous_loaded_threads")
+
+    # Replacing the App Server invalidates activity as well as stream ownership.
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write("[CodexMcpConnection] Spawning codex app-server\n")
+        for session in (SESSION_OLD, SESSION_CURRENT):
+            handle.write(f"thread_stream_role_changed conversationId={session} role=owner\n")
+    assert resolver.resolve((repo,), codex_log=log, window_state_database=None).session_id is None
+
+
 def test_query_filters_archived_non_vscode_subagent_and_other_cwd_threads(
     tmp_path: Path,
 ) -> None:

@@ -175,6 +175,34 @@ class SlackThreadStore:
                 entry["event_fingerprint"] == event_fingerprint for entry in threads
             )
 
+    def lookup_reply(self, event_key: str) -> Optional[Dict[str, Any]]:
+        with FileLock(self.lock_path):
+            value = self._read_state()["events"].get(sha256_text(event_key))
+            return dict(value) if value is not None else None
+
+    def notification_mappings(self, fingerprint):
+        with FileLock(self.lock_path):
+            return [{name: entry[name] for name in ("channel_id", "thread_ts", "event_fingerprint")}
+                    for entry in self._read_state()["threads"].values()
+                    if entry["event_fingerprint"] == fingerprint]
+
+    def mappings_for_threads(self, thread_ids):
+        with FileLock(self.lock_path):
+            return [dict(thread_id=entry["target"]["thread_id"], **{
+                        name: entry[name] for name in ("channel_id", "thread_ts", "event_fingerprint")})
+                    for entry in self._read_state()["threads"].values()
+                    if entry["target"]["thread_id"] in thread_ids]
+
+    def cache_mappings(self, entries, target):
+        """Cache immutable observed routing; delivery still requires the remote fence."""
+        for entry in entries:
+            existing = self.lookup_thread(entry["channel_id"], entry["thread_ts"])
+            if existing is not None:
+                if existing.target.thread_id != target.thread_id:
+                    raise ValueError("Slack thread mapping collision")
+                continue
+            self.record_thread(entry["channel_id"], entry["thread_ts"], target, entry["event_fingerprint"])
+
     def claim_reply(
         self,
         *,

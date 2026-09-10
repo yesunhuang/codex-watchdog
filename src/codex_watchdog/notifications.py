@@ -22,6 +22,7 @@ from .slack_mapping import (
     valid_slack_user_id,
 )
 from .storage import FileLock, InstructionStore
+from .control_context import current_effect
 
 
 NOTIFICATION_STATE_SCHEMA_VERSION = 1
@@ -535,6 +536,10 @@ class EnvironmentNotifier:
         )
 
     def notify(self, event: NotificationEvent) -> NotificationResult:
+        with current_effect("notification"):
+            return self._guarded_notify(event)
+
+    def _guarded_notify(self, event: NotificationEvent) -> NotificationResult:
         fingerprint = event.event_fingerprint()
         dedupe_key = event.dedupe_key()
         with FileLock(self.lock_path):

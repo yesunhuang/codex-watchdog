@@ -90,7 +90,31 @@ The initial source-to-executable move needs human trust because the exact hook
 command changes. Installation does not alter Codex's trust state. Later package
 replacements keep the command/path stable, so unchanged hooks retain their trust.
 
-## Bind and run the existing conversation
+## Automatic Remote-SSH handoff
+
+From v0.2.7, upgrade the desktop WatchDog, remote executable and trusted hook
+implementation together. Keep the remote owner running under an existing
+current-user supervisor whose lifetime is independent of the SSH client:
+
+```sh
+watchdog="${XDG_DATA_HOME:-$HOME/.local/share}/codex-watchdog/bin/codex-watchdog"
+"$watchdog" linux-auto-run --interval 5
+```
+
+The desktop resolves the exact open Remote-SSH conversation and has control
+priority. Linux remains standby while VS Code is attached, takes over that same
+thread after a clean detach, and releases at a safe idle boundary when the desktop
+returns. Normal automatic operation does not require `linux-bind`. If VS Code's
+resume remains pending after handback, reload that window and reopen the same
+conversation. The native source acceptance needed this reload before VS Code
+reacquired its writer.
+
+See the [automatic handoff guide](https://github.com/yesunhuang/codex-watchdog/blob/main/docs/AUTOMATIC_REMOTE_HANDOFF.md)
+for the persistence example, fencing semantics, exclusions, and recovery steps.
+Run `linux-release` with the same runtime and wait for `linux-status` to report
+`released` before stopping its supervisor or replacing the executable.
+
+## Bind and run the existing conversation manually
 
 Follow the [explicit Linux workflow](LINUX_SOURCE_WORKFLOW.md) to select the
 exact existing VS Code conversation ID and repository. Using the stable

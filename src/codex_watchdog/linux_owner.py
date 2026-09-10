@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 from contextlib import closing
-import errno
-import os
 from pathlib import Path
 import signal
 import sqlite3
@@ -16,6 +14,8 @@ from .linux_binding import LinuxBinding, LinuxBindingError, exact_thread, reserv
 from .mvp_service import MvpWatchdogService
 from .queue_wake import QueueWakeDispatcher, _resolve_codex_executable
 from .storage import FileLock, InstructionStore
+from .control_context import effect_guard, record_writer_pid
+from .control_state import ControlError
 
 
 def writer_pid(codex_home: Path, thread: str) -> Optional[int]:
@@ -23,61 +23,16 @@ def writer_pid(codex_home: Path, thread: str) -> Optional[int]:
 
 
 def kernel_lock_owner(lock: Path) -> Optional[int]:
-    """Return the exact kernel FLOCK owner, None when vacant; ambiguity raises."""
-    import fcntl
-
+    from .control_state import ControlError, control_kernel_owner
     try:
-        with lock.open("rb") as handle:
-            try:
-                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError as exc:
-                if exc.errno not in (errno.EACCES, errno.EAGAIN):
-                    raise
-            else:
-                fcntl.flock(handle, fcntl.LOCK_UN)
-                return None
-        identity = lock.stat()
-        owners = set()
-        with Path("/proc/locks").open("rb") as handle:
-            raw = handle.read(1024 * 1024 + 1)
-        if len(raw) > 1024 * 1024:
-            raise LinuxBindingError("linux_writer_unavailable")
-        # Kernel device/inode/PID evidence avoids opening unrelated same-UID
-        # processes' FDs, which can legitimately be inaccessible on native Linux.
-        for line in raw.splitlines():
-            fields = line.split()
-            if len(fields) < 6 or fields[1:4] != [b"FLOCK", b"ADVISORY", b"WRITE"]:
-                continue
-            try:
-                major, minor, inode = fields[5].split(b":")
-                if (int(major, 16), int(minor, 16), int(inode)) == (
-                    os.major(identity.st_dev), os.minor(identity.st_dev), identity.st_ino
-                ):
-                    owners.add(int(fields[4]))
-            except ValueError:
-                raise LinuxBindingError("linux_writer_unavailable")
-        if len(owners) == 1:
-            pid = owners.pop()
-            after = lock.stat()
-            if ((identity.st_dev, identity.st_ino) == (after.st_dev, after.st_ino)
-                    and pid > 0 and (Path("/proc") / str(pid)).stat().st_uid == os.getuid()):
-                return pid
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        raise LinuxBindingError("linux_writer_unavailable") from exc
-    raise LinuxBindingError("linux_writer_ambiguous")
+        return control_kernel_owner(lock)
+    except ControlError as exc:
+        raise LinuxBindingError(str(exc)) from exc
 
 
 def vscode_writer(pid: int) -> bool:
-    try:
-        proc = Path("/proc") / str(pid)
-        args = (proc / "cmdline").read_bytes().split(b"\0")
-        stat = (proc / "stat").read_text().rsplit(")", 1)[1].split()
-        parent_args = (Path("/proc") / stat[1] / "cmdline").read_bytes().split(b"\0")
-        return b"app-server" in args and b"--type=extensionHost" in parent_args
-    except (OSError, ValueError, IndexError):
-        return False
+    from .control_state import control_vscode_writer
+    return control_vscode_writer(pid)
 
 
 def pending_count(codex_home: Path, thread: str) -> int:
@@ -162,6 +117,7 @@ class LinuxThreadOwner:
         self._check_thread(before, workspace)
         if writer_pid(self.binding.codex_home, self.thread) is not None:
             raise LinuxBindingError("linux_writer_changed_before_resume")
+        record_writer_pid(self.client.process.pid)
         # No thread/start, fork, history/path, cwd, model, or permission override.
         resumed = self.client.request("thread/resume", {"threadId": self.thread, "excludeTurns": True})
         self._check_thread(resumed, workspace)
@@ -177,6 +133,14 @@ class LinuxThreadOwner:
             raise LinuxBindingError("linux_app_server_thread_mismatch")
 
     def step(self, *, observe: bool) -> Dict[str, Any]:
+        workspace = self.binding.workspace(self.binding.load())
+        with effect_guard(self.binding.codex_home, workspace.session_id, "writer"):
+            result = self._owned_step(observe=False)
+        if observe and result["owner_state"] == "owned":
+            self.service.run_once()
+        return result
+
+    def _owned_step(self, *, observe: bool) -> Dict[str, Any]:
         value = self.binding.load()
         workspace = self.binding.workspace(value)
         self.thread = workspace.session_id
@@ -215,6 +179,7 @@ class LinuxThreadOwner:
                         and pending_count(self.binding.codex_home, self.thread) == 0):
                     self.client.close()
                     self.client = None
+                    record_writer_pid(None)
                     self.binding.set_state("released")
                     return self._status("released")
             return self._status("releasing")
@@ -249,8 +214,8 @@ class LinuxThreadOwner:
                         self.client.pump(timeout=1)
                     else:
                         time.sleep(0.5)
-        except (LinuxBindingError, AppServerError, OSError) as exc:
-            reason = str(exc) if isinstance(exc, (LinuxBindingError, AppServerError)) else "linux_owner_io_failed"
+        except (LinuxBindingError, AppServerError, ControlError, OSError) as exc:
+            reason = str(exc) if isinstance(exc, (LinuxBindingError, AppServerError, ControlError)) else "linux_owner_io_failed"
             # No retry after an uncertain resume. Journals and reservation survive.
             result = self._status("blocked", reason)
             if emit is not None:

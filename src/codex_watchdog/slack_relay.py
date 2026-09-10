@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 from pathlib import Path
 from typing import Any, Dict, Optional
+from types import SimpleNamespace
 
 from .models import sha256_text
 from .queue_wake import QueueWakeDispatcher
@@ -16,6 +17,9 @@ from .slack_mapping import (
     valid_slack_user_id,
 )
 from .storage import FileLock
+from .control_state import ControlError, control_read_json
+from .remote_control import RemoteControlClient
+from .notifications import NotificationEvent
 
 
 _DELIVERED_STATES = frozenset({"enqueued", "consumed_or_started", "started"})
@@ -29,6 +33,7 @@ class SlackReplyResult:
     delivery_status: Optional[str] = None
     duplicate: bool = False
     error_sha256: Optional[str] = None
+    control: Optional[tuple] = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -149,13 +154,22 @@ class SlackReplyRelay:
             and valid_slack_channel_id(channel)
             and valid_slack_timestamp(thread_ts)
         ):
-            client.chat_postMessage(
-                channel=channel,
-                thread_ts=thread_ts,
-                text=response,
-                unfurl_links=False,
-                unfurl_media=False,
-            )
+            def send_ack(_event):
+                client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=response,
+                                        unfurl_links=False, unfurl_media=False)
+                return SimpleNamespace(to_dict=lambda: {"status": "sent", "channel": "slack"})
+
+            if result.control is None:
+                send_ack(None)
+            else:
+                control, target, token = result.control
+                acknowledgement = NotificationEvent(result.workspace_id, "slack_reply_ack",
+                                                       result.instruction_id, "Reply queued", response)
+                try:
+                    control.notify(target, token, acknowledgement, SimpleNamespace(notify=send_ack))
+                except ControlError:
+                    # A stale or uncertain acknowledgement is never resent.
+                    return
 
     def handle_message(
         self, event: Any, *, event_id: Optional[str] = None
@@ -189,6 +203,13 @@ class SlackReplyRelay:
 
         stable_event_id = self._event_key(event, event_id)
         instruction_id = "slack:" + sha256_text(stable_event_id)[:40]
+        try:
+            controlled = self._controlled_reply(mapping, stable_event_id, instruction_id, text)
+        except Exception as exc:
+            return SlackReplyResult("deferred", mapping.target.workspace_id, instruction_id,
+                                     error_sha256=self._error_digest(exc))
+        if controlled is not None:
+            return controlled
         claimed, previous_status = self.thread_store.claim_reply(
             event_key=stable_event_id,
             channel_id=channel_id,
@@ -234,6 +255,46 @@ class SlackReplyRelay:
             workspace_id=mapping.target.workspace_id,
             instruction_id=instruction_id,
             delivery_status=delivery_status,
+        )
+
+    def _controlled_reply(self, mapping, event_key, instruction_id, text):
+        target = mapping.target
+        if target.execution_locality == "remote_ssh":
+            adapter = self.remote_ssh_adapter
+            if not getattr(adapter, "supports_control", False):
+                return None
+            remote = RemoteSshTarget(target.remote_authority, target.remote_repo_path,
+                                     target.remote_storage_key, (target.thread_id,))
+        else:
+            codex_home = getattr(self.queue_dispatcher, "codex_home", None)
+            if codex_home is None:
+                return None
+            path = Path(codex_home) / "watchdog-control" / target.thread_id / "owner.json"
+            if not path.exists():
+                return None
+            value = control_read_json(path)
+            from .linux_auto import HostRemoteAdapter
+            adapter = HostRemoteAdapter(codex_home)
+            remote = RemoteSshTarget("ssh-remote+localhost", value["repo_path"], "0" * 32, (target.thread_id,))
+        # Preserve an old runtime's terminal/uncertain reply receipt. The new
+        # authoritative relay journal must not resurrect a pre-upgrade request.
+        old = self.thread_store.lookup_reply(event_key)
+        if old is not None:
+            return SlackReplyResult("duplicate", target.workspace_id, instruction_id,
+                                     old.get("delivery_status"), duplicate=True)
+        probe = adapter.probe(remote, control=dict(action="relay", thread_id=target.thread_id),
+                              wake=dict(instruction_id=instruction_id, prompt=text))
+        if probe.get("legacy") is True:
+            return None
+        if probe.get("status") != "ok":
+            return SlackReplyResult("deferred", target.workspace_id, instruction_id,
+                                     probe.get("reason", "control_transport_unavailable"))
+        delivery = probe.get("wake", {}).get("state", "uncertain")
+        control = RemoteControlClient(adapter, self.runtime)
+        return SlackReplyResult(
+            "duplicate" if probe.get("duplicate") else "queued" if delivery in _DELIVERED_STATES else "uncertain",
+            target.workspace_id, instruction_id, delivery, duplicate=bool(probe.get("duplicate")),
+            control=(control, remote, probe["control"]["token"]),
         )
 
     def _dispatch(

@@ -1,38 +1,43 @@
-Version 0.2.6 fixes Linux x64 startup on RHEL 8.10. The v0.2.5 x64 executable
-required glibc 2.35 and could not start on a glibc 2.28 host. The new x64 package
-builds Python 3.12.14 and its native dependencies against UBI 8.10. Every bundled
-ELF library and the executable bootloader must fit the glibc 2.28 limit, and the
-manifest records the measured requirement. No host glibc replacement is needed.
+Version 0.2.7 fixes tracking of an active VS Code conversation when an older,
+inactive conversation remains loaded. Discovery selects the unique explicitly
+active owner only when competing loaded chats are explicitly inactive; ambiguous
+cases still fail closed. Monitoring cycles now expose degraded workspace reasons.
 
-Frozen Linux App Server and queue commands also restore the original library
-search path for the external Codex executable. This prevents bundled libraries
-from conflicting with that executable's host dependencies while leaving
-WatchDog's own loader environment and user-supplied library settings intact.
+Linux gains automatic handoff for the same existing Remote-SSH conversation.
+A persistent remote WatchDog waits while the desktop has control, takes over
+after detach and writer release, and returns control at a safe idle boundary.
+Remote-host file locks, owner leases and increasing epochs fence queue delivery,
+Stop consumption, writer claims, cursors and notifications. Queue receipts, Slack
+reply routing and compatible runtime state survive ownership changes. Explicit
+Linux bind/run/release commands remain available.
 
-The frozen Linux process selects the current host's Ubuntu or RHEL CA bundle,
-falling back to bundled certifi roots only when a supported host bundle is
-absent. Explicit certificate settings are preserved. A credential-free HTTPS
-acceptance check verifies this path without sending a Slack message or changing
-saved credentials, profiles, or system trust.
+Trusted Stop hooks retry brief ownership-lock contention, including initial
+admission, without adopting a replacement owner's epoch or shortening the
+production grace period. Unknown notification outcomes remain blocked instead
+of being blindly resent. Provider credentials stay in their existing stores.
 
-x64 package acceptance runs on both Ubuntu 22.04 and UBI 8. Linux ARM64 retains
-its Ubuntu 22.04/glibc 2.35 baseline. All packages include dependency and native
-library notices with hashes; the RPM inventory uses the vendor's license files
-and the upstream SQLite public-domain notice only when the exact SQLite runtime
-RPM declares that license. See the
-[Linux package guide](https://github.com/yesunhuang/codex-watchdog/blob/main/docs/LINUX_PACKAGE.md).
+Native Ubuntu ARM64 source acceptance covers attached priority, actual client
+close, autonomous same-thread queue and trusted Stop at 30,004 ms, idle remote
+restart, stale-owner rejection, and handback. VS Code's first resume during
+handback remained pending; reloading that workspace and reopening the same chat
+completed execution reattachment. See the
+[automatic handoff guide](https://github.com/yesunhuang/codex-watchdog/blob/main/docs/AUTOMATIC_REMOTE_HANDOFF.md)
+for persistent startup, coordinated upgrades and this retry. Other native desktop
+topologies and packaged real-user lifecycle tests remain separate acceptance paths.
 
-This release changes packaging, not persistent runtime schemas or thread
-ownership. Compatible profiles, provider settings, credential stores, runtimes,
-and trusted stable hook paths continue to be reused. The v0.2.5 Mac certificate
-discovery and manual thread-rebind fixes remain included. Windows x64, macOS 15
-ARM64 preview, Linux ARM64, and Linux x64 continue to ship as separate executable
-ZIPs. The Mac asset remains ad-hoc signed and not notarized; real-user desktop
-and detached lifecycle acceptance remain distinct from isolated package tests.
+Upgrade the desktop, remote WatchDog and trusted hook implementation together
+before enabling automatic handoff. Compatible profiles, unknown settings,
+runtime paths and stable trusted commands are preserved; a changed hook command
+still requires normal user trust. No secrets are migrated or reauthorization
+fabricated.
 
-English, Chinese, and Japanese READMEs remain together at the repository root,
-with matching Quick Start structure and updated Linux requirements. Automatic
-publication on a new version retains the three-OS source matrix, all four native
-packages, complete-history secret scan, embedded Windows icon verification, and
-upgrade from the actual immediately previous public Windows v0.2.5 executable.
-Published v0.2.3, v0.2.4, and v0.2.5 tags and assets remain unchanged.
+Windows x64, macOS 15 ARM64 preview, Linux ARM64 and Linux x64 remain separate
+executable ZIPs. Linux x64 retains the RHEL 8/glibc 2.28 baseline; ARM64 retains
+glibc 2.35. The Mac package remains ad-hoc signed and not notarized. This release
+retains automatic publication gates for three-OS source tests, all four packages,
+full-history secret scanning, the embedded approved Windows icon and upgrade from
+the actual immediately previous public Windows v0.2.6 executable.
+
+English, Chinese and Japanese READMEs remain together at the repository root,
+with matching Quick Start sections and automatic-handoff guidance. Previous
+published versions and assets are not overwritten.

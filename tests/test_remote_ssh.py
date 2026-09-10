@@ -174,6 +174,9 @@ def test_remote_log_state_retains_owner_and_latest_view_activity(
     namespace["Path"] = type("HomePath", (), {"home": staticmethod(lambda: tmp_path)})
 
     assert namespace["log_session_state"](session) == (True, False)
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write("\n2026-09-03 01:29:00.000 [info] [CodexMcpConnection] Spawning codex app-server\n")
+    assert namespace["log_session_state"](session) == (False, None)
 
 
 def test_remote_request_rejects_malformed_session_claims_without_crashing() -> None:
