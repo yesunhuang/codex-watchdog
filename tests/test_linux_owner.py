@@ -435,3 +435,80 @@ def test_release_racing_observation_does_not_raise_a_loss_alert(owner):
     assert instance.step(observe=True)["owner_state"] == "owned"
     assert instance.step(observe=True)["owner_state"] == "released"
     assert not instance.health.path.exists()
+
+
+@pytest.mark.parametrize("coordinated", [False, True])
+@pytest.mark.parametrize("lock_kind", ["control", "sender"])
+def test_operator_release_waits_for_initial_lock_admission(setup, coordinated, lock_kind, monkeypatch):
+    from codex_watchdog import control_state
+    from codex_watchdog.control_state import ControlStore, control_file_lock
+    binding, workspace = setup
+    store = ControlStore(binding.codex_home, THREAD, workspace.repo_root, boot_id="fixture-boot")
+    monkeypatch.setattr(control_state, "ControlStore", lambda *args: store)
+    if coordinated:
+        store.attach("desktop", "host", "vscode")
+    lock = (control_file_lock(store.lock_path) if lock_kind == "control" else
+            FileLock(reservation_path(binding.codex_home, THREAD).with_suffix(".send.lock")))
+    lock.__enter__()
+    tick = [0.0]
+    before = reservation_path(binding.codex_home, THREAD).read_bytes()
+
+    def unlock(seconds):
+        assert reservation_path(binding.codex_home, THREAD).read_bytes() == before
+        if coordinated:
+            assert store.read().get("auto_paused") is not True
+        tick[0] += seconds
+        lock.__exit__(None, None, None)
+
+    result = binding.request_release(monotonic=lambda: tick[0], sleep=unlock)
+    assert result["state"] == "release_requested" and tick[0] == 0.05
+    if coordinated:
+        assert store.read()["auto_paused"] is True
+
+
+def test_operator_release_contention_is_bounded_and_preserves_state(setup):
+    from codex_watchdog.control_state import ControlStore, control_file_lock
+    binding, workspace = setup
+    store = ControlStore(binding.codex_home, THREAD, workspace.repo_root, boot_id="fixture-boot")
+    tick = [0.0]
+    before = reservation_path(binding.codex_home, THREAD).read_bytes()
+    with control_file_lock(store.lock_path):
+        with pytest.raises(LinuxBindingError, match="linux_release_busy"):
+            binding.request_release(monotonic=lambda: tick[0], sleep=lambda seconds: tick.__setitem__(0, tick[0]+seconds))
+    assert tick[0] == 1.0
+    assert reservation_path(binding.codex_home, THREAD).read_bytes() == before
+
+
+def test_operator_release_does_not_adopt_first_activation_during_wait(setup):
+    from codex_watchdog.control_state import ControlStore, control_file_lock
+    binding, workspace = setup
+    store = ControlStore(binding.codex_home, THREAD, workspace.repo_root, boot_id="fixture-boot")
+    held = control_file_lock(store.lock_path)
+    held.__enter__()
+    tick = [0.0]
+    before = reservation_path(binding.codex_home, THREAD).read_bytes()
+
+    def activate(seconds):
+        tick[0] += seconds
+        held.__exit__(None, None, None)
+        store.attach("new-desktop", "host", "vscode")
+
+    with pytest.raises(LinuxBindingError, match="control_activation_changed"):
+        binding.request_release(monotonic=lambda: tick[0], sleep=activate)
+    assert store.read().get("auto_paused") is not True
+    assert reservation_path(binding.codex_home, THREAD).read_bytes() == before
+
+
+def test_operator_release_never_retries_after_admission(setup, monkeypatch):
+    from codex_watchdog.control_state import ControlBusy
+    binding, workspace = setup
+    writes = []
+
+    def interrupted(*args):
+        writes.append(args)
+        raise ControlBusy("fixture_write_interrupted")
+
+    monkeypatch.setattr(InstructionStore, "_atomic_json", interrupted)
+    with pytest.raises(ControlBusy, match="fixture_write_interrupted"):
+        binding.request_release(sleep=lambda seconds: pytest.fail("must not replay a write"))
+    assert len(writes) == 1

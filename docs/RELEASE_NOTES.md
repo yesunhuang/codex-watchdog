@@ -1,4 +1,11 @@
-Version 0.2.8 fixes missing notifications when a detached Linux WatchDog loses
+Version 0.2.9 fixes a transient `linux-release` failure found during native x64
+acceptance. The command now waits up to one second for initial control/sender
+lock admission before changing state. Persistent contention returns the bounded
+`linux_release_busy` reason. Binding changes and first activation during that
+wait still fail closed; writes that have already started are never replayed.
+The package harness now exercises the frozen release command under a held lock.
+
+This release retains v0.2.8's notifications when a detached Linux WatchDog loses
 control or monitoring of its existing Codex thread. App Server exit, a changed
 writer, missing exact-thread metadata and observation errors now produce an
 immediate loss alert through the Linux process's configured Slack/email transport.
@@ -33,4 +40,4 @@ x64, macOS 15 ARM64 preview, Linux ARM64/glibc 2.35 and Linux x64/glibc 2.28.
 The Mac package remains ad-hoc signed and not notarized. Automatic publication
 requires three-OS tests, all four package gates, complete-history secret scanning,
 the approved embedded Windows icon and upgrade from the actual immediately
-previous public Windows v0.2.7 executable. Earlier releases remain immutable.
+previous public Windows v0.2.8 executable. Earlier releases remain immutable.

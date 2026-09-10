@@ -194,6 +194,8 @@ From v0.2.8, detached Linux owners report loss of thread control or monitoring t
 existing local Slack/email configuration, with one alert per outage and a recovery
 alert after monitoring succeeds again. See the handoff guide for service settings
 and delivery-status checks.
+v0.2.9 also lets `linux-release` wait briefly for a busy observer; persistent
+contention returns `linux_release_busy` without changing the binding.
 
 ARM64 packages pass native acceptance on a real Ubuntu ARM64 machine; x64
 packages pass hosted Ubuntu/UBI acceptance and isolated acceptance on a real
