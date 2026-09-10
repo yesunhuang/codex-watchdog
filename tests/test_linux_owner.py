@@ -285,7 +285,13 @@ def owner(setup, monkeypatch):
     monkeypatch.setattr(linux_owner, "vscode_writer", lambda p: p == 777)
     client = FakeClient(workspace, pid)
     cycles = []
-    service = SimpleNamespace(run_once=lambda: cycles.append("read-only-service"))
+    from codex_watchdog.notifications import EnvironmentNotifier, NotificationConfig
+    def observe():
+        cycles.append("read-only-service")
+        return SimpleNamespace(status="completed", reason=None, workspaces=(
+            SimpleNamespace(workspace_id=workspace.workspace_id, status="completed"),))
+    service = SimpleNamespace(run_once=observe,
+        notifier=EnvironmentNotifier(binding.runtime, config=NotificationConfig()))
     owner = LinuxThreadOwner(binding, service=service, client_factory=lambda *a: client)
     return owner, client, cycles, pid
 
@@ -367,3 +373,65 @@ def test_lost_writer_does_not_respawn_or_send(owner):
     with pytest.raises(LinuxBindingError, match="writer_changed"):
         instance.step(observe=True)
     assert len(client.requests) == 2 and cycles == []
+
+
+def test_foreground_owner_reports_app_server_exit_before_stopping(owner):
+    from codex_watchdog.app_server import AppServerError
+    from codex_watchdog.notifications import EnvironmentNotifier, NotificationConfig
+    instance, client, cycles, pid = owner
+    messages = []
+    instance.health.notifier = EnvironmentNotifier(instance.binding.runtime,
+        config=NotificationConfig(slack_webhook_url="https://hooks.slack.invalid/fixture"),
+        http_post=lambda *args: messages.append(args) or 200)
+
+    def exited(**kwargs):
+        raise AppServerError("app_server_exited")
+
+    client.pump = exited
+    results = []
+    assert instance.run(emit=results.append) == 1
+    assert results[-1]["reason"] == "app_server_exited"
+    assert results[-1]["notification"]["status"] == "sent"
+    assert len(messages) == 1 and client.closed
+    assert len(client.requests) == 2
+
+
+def test_uncoordinated_owner_does_not_replay_an_uncertain_health_notification(owner):
+    instance, client, cycles, pid = owner
+    attempts = []
+
+    class UncertainNotifier:
+        def notify(self, event):
+            attempts.append(event)
+            raise RuntimeError("fixture interrupted after a possibly sent request")
+
+    instance.health.notifier = UncertainNotifier()
+    assert instance.report_failure("app_server_exited")["status"] == "blocked"
+    assert instance.report_failure("app_server_exited")["reason"] == "linux_health_notification_outcome_uncertain"
+    assert len(attempts) == 1
+
+
+@pytest.mark.parametrize("busy", [False, True])
+def test_failed_observation_cannot_report_recovery(owner, busy):
+    instance, client, cycles, pid = owner
+    instance.service.run_once = lambda: SimpleNamespace(status="error", workspaces=(),
+        reason="service_cycle_lock_held" if busy else None)
+    if busy:
+        assert instance.step(observe=True)["owner_state"] == "owned"
+    else:
+        with pytest.raises(LinuxBindingError, match="linux_observation_failed"):
+            instance.step(observe=True)
+    assert not instance.health.path.exists()
+
+
+def test_release_racing_observation_does_not_raise_a_loss_alert(owner):
+    instance, client, cycles, pid = owner
+
+    def releasing():
+        instance.binding.set_state("release_requested")
+        return SimpleNamespace(status="completed", workspaces=(), reason=None)
+
+    instance.service.run_once = releasing
+    assert instance.step(observe=True)["owner_state"] == "owned"
+    assert instance.step(observe=True)["owner_state"] == "released"
+    assert not instance.health.path.exists()

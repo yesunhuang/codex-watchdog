@@ -190,6 +190,11 @@ the guide includes the complete command. No manual bind is needed for this path.
 If VS Code's first resume remains pending after handback, reload that workspace
 window and reopen the existing conversation.
 
+From v0.2.8, detached Linux owners report loss of thread control or monitoring through their
+existing local Slack/email configuration, with one alert per outage and a recovery
+alert after monitoring succeeds again. See the handoff guide for service settings
+and delivery-status checks.
+
 ARM64 packages pass native acceptance on a real Ubuntu ARM64 machine; x64
 packages pass hosted Ubuntu/UBI acceptance and isolated acceptance on a real
 RHEL 8.10 machine. These checks include HTTPS trust, owner and Stop fixtures. General Linux desktop discovery remains a CI-verified preview;

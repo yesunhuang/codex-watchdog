@@ -54,6 +54,31 @@ as immutable metadata; incoming replies still pass allowlist and ownership check
 Tokens, OAuth credentials and provider configuration are not copied between hosts.
 A detached Linux process uses its existing local notification settings.
 
+From v0.2.8, detached-owner loss is reported immediately when the owner detects an App Server
+exit, a changed writer, unavailable exact-thread metadata, or an observation
+failure. Automatic mode remains blocked without creating a replacement thread;
+the explicit foreground owner reports the failure before exiting. Repeated checks
+and restarts reuse the same outage identity. Successful monitoring sends one
+recovery notification. Normal idle handback, planned release and healthy standby
+do not create loss alerts. An expired or replaced owner has no authority to send.
+
+The Linux **service process** must have its own existing notification environment:
+`CODEX_WATCHDOG_SLACK_WEBHOOK_URL`, or the Slack relay variables from the setup
+guide, and/or `CODEX_WATCHDOG_SMTP_HOST`, `CODEX_WATCHDOG_SMTP_FROM` and
+`CODEX_WATCHDOG_SMTP_TO` with the provider's existing TLS/authentication settings.
+Slack is preferred; configured SMTP is the fallback. An interactive shell's
+variables are not automatically inherited by a systemd user service. Keep these
+settings in the host's existing private service configuration; do not paste
+credentials into command lines or copy another host's secure store.
+
+Automatic status output includes the notification result for a blocked owner.
+The runtime also retains schema-1 `linux/health/*.json` records. `sent` or
+`sent_fallback` records delivery; `audit_only` means no external transport was
+configured. Failed/uncertain delivery is not reported as successful suppression
+and is not blindly retried. A running owner can report lost thread monitoring;
+a terminated process or an unreachable host cannot send its own alert. Use the
+host's existing service supervision/host monitoring for those outages.
+
 An external notification has a durable in-progress record until its result is
 recorded. A timeout or disconnected desktop cannot revoke a possibly sent request.
 An uncertain outcome blocks takeover instead of sending again. Preserve that

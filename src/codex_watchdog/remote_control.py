@@ -226,17 +226,45 @@ class RemoteControlClient:
         return result
 
     def notify(self, target, token, event, notifier):
-        fingerprint = event.event_fingerprint()
-        prepared = self.request(target, "notification_prepare", token=token,
-                                event_id=fingerprint, fingerprint=fingerprint)["receipt"]
-        if prepared["duplicate"]:
-            result = prepared.get("result")
-            if isinstance(result, dict):
-                return dict(result, status="suppressed", duplicate=True)
-            raise ControlError("control_notification_outcome_uncertain")
-        result = notifier.notify(event).to_dict()
-        mappings = getattr(notifier, "slack_thread_store", None)
-        mappings = mappings.notification_mappings(fingerprint) if mappings is not None else ()
-        self.request(target, "notification_finish", token=token, event_id=fingerprint,
-                     operation_id=prepared["operation_id"], result=result, relay_mappings=mappings)
-        return result
+        return _notify_with_receipt(
+            event, notifier,
+            lambda fingerprint: self.request(target, "notification_prepare", token=token,
+                event_id=fingerprint, fingerprint=fingerprint)["receipt"],
+            lambda fingerprint, operation, result, mappings: self.request(
+                target, "notification_finish", token=token, event_id=fingerprint,
+                operation_id=operation, result=result, relay_mappings=mappings),
+        )
+
+
+def notify_local_control(store, token, event, notifier):
+    """Report owner health even if the thread database is unavailable.
+
+    The captured canonical capability and external-send barrier still apply;
+    this grants no thread discovery, writer, queue or replacement authority.
+    """
+    return _notify_with_receipt(
+        event, notifier,
+        lambda fingerprint: store.prepare_notification(token, fingerprint, fingerprint),
+        lambda fingerprint, operation, result, mappings: store.finish_notification(
+            token, fingerprint, operation, result, mappings),
+    )
+
+
+def _notify_with_receipt(event, notifier, prepare, finish):
+    fingerprint = event.event_fingerprint()
+    prepared = prepare(fingerprint)
+    if prepared["duplicate"]:
+        result = prepared.get("result")
+        if isinstance(result, dict):
+            # A failed send is not successful suppression. An uncertain result
+            # is never replayed, including by a restarted or replacement owner.
+            status = result.get("status")
+            if status in ("sent", "sent_fallback", "audit_only", "suppressed"):
+                status = "suppressed"
+            return dict(result, status=status, duplicate=True)
+        raise ControlError("control_notification_outcome_uncertain")
+    result = notifier.notify(event).to_dict()
+    mappings = getattr(notifier, "slack_thread_store", None)
+    mappings = mappings.notification_mappings(fingerprint) if mappings is not None else ()
+    finish(fingerprint, prepared["operation_id"], result, mappings)
+    return result

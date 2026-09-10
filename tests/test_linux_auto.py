@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import sqlite3
 from types import SimpleNamespace
 
@@ -8,6 +9,7 @@ from codex_watchdog import linux_auto, linux_binding, linux_owner
 from codex_watchdog.control_state import ControlStore, control_atomic_json
 from codex_watchdog.linux_auto import LinuxAutoWatchdog
 from codex_watchdog.linux_owner import LinuxThreadOwner
+from codex_watchdog.notifications import EnvironmentNotifier, NotificationConfig
 
 
 THREAD = "11111111-2222-4333-8444-555555555555"
@@ -76,7 +78,10 @@ def scenario(tmp_path, monkeypatch):
             tmp_path / "agent-runtime", home, executable="fixture-codex", exclude=exclude,
             store_factory=factory,
             owner_factory=lambda binding, **kwargs: LinuxThreadOwner(binding, client_factory=Client, **kwargs),
-            service_factory=lambda *args, **kwargs: SimpleNamespace(run_once=lambda: pytest.fail("unexpected cycle")),
+            service_factory=lambda runtime, **kwargs: SimpleNamespace(
+                run_once=lambda: pytest.fail("unexpected cycle"),
+                notifier=EnvironmentNotifier(runtime, config=NotificationConfig()),
+            ),
         )
 
     agents = []
@@ -142,6 +147,194 @@ def test_desktop_crash_takeover_and_remote_crash_restart_keep_same_thread(scenar
     result = restarted.step(observe=False)[0]
     assert result["state"] == "owned" and result["epoch"] == 3
     assert len(clients) == 2
+
+
+def detached(scenario):
+    store, local, writer, clock, clients, make_agent = scenario
+    store.detach(local)
+    writer[0] = None
+    agent = make_agent()
+    assert agent.step(observe=False)[0]["state"] == "owned"
+    return agent, agent.controllers[THREAD]["owner"]
+
+
+@pytest.mark.parametrize("transport", ["slack", "smtp", "fallback"])
+def test_writer_loss_alert_and_recovery_use_configured_transport_once(scenario, monkeypatch, transport):
+    store, local, writer, clock, clients, make_agent = scenario
+    agent, owner = detached(scenario)
+    messages = []
+
+    def post(url, payload, timeout):
+        if transport == "fallback":
+            raise OSError("fixture provider unavailable")
+        messages.append(json.loads(payload)["text"])
+        return 200
+
+    class Smtp:
+        def ehlo(self): pass
+        def send_message(self, message):
+            messages.append(str(message))
+            return {}
+        def quit(self): pass
+
+    config = NotificationConfig(
+        slack_webhook_url="https://hooks.slack.invalid/fixture" if transport != "smtp" else None,
+        smtp_host="smtp.invalid", smtp_sender="watchdog@example.invalid",
+        smtp_recipients=("operator@example.invalid",), smtp_security="plain",
+    )
+    owner.health.notifier = EnvironmentNotifier(owner.binding.runtime, config=config,
+        http_post=post, smtp_factory=lambda *args: Smtp())
+    writer[0] = None
+    first = agent.step(observe=False)[0]
+    assert first["reason"] == "linux_writer_changed"
+    assert first["notification"]["status"] == ("sent_fallback" if transport == "fallback" else "sent")
+    assert first["notification"]["channel"] == ("slack" if transport == "slack" else "smtp")
+    assert len(messages) == 1 and "can no longer watch or control" in messages[0]
+    assert agent.step(observe=False)[0]["state"] == "blocked"
+    assert len(messages) == 1 and len(clients) == 1
+    assert len(clients[0].calls) == 2  # No retry/resume, fork, queue or turn start.
+    writer[0] = clients[0].process.pid
+    monkeypatch.setattr(agent, "_cycle", lambda item: SimpleNamespace(status="completed"))
+    assert agent.step()[0]["state"] == "owned"
+    assert len(messages) == 2 and "again" in messages[1]
+    agent.step()
+    assert len(messages) == 2
+    assert len(list((store.directory / "effects").glob("*.json"))) == 2
+
+
+def test_missing_thread_metadata_still_reports_under_original_capability(scenario):
+    store, local, writer, clock, clients, make_agent = scenario
+    agent, owner = detached(scenario)
+    messages = []
+    owner.health.notifier = EnvironmentNotifier(owner.binding.runtime,
+        config=NotificationConfig(slack_webhook_url="https://hooks.slack.invalid/fixture"),
+        http_post=lambda *args: messages.append(args) or 200)
+    with sqlite3.connect(owner.binding.codex_home / "state_5.sqlite") as db:
+        db.execute("DELETE FROM threads WHERE id=?", (THREAD,))
+    assert agent.step()[0]["notification"]["status"] == "sent"
+    assert agent.step()[0]["reason"] == "linux_exact_thread_unavailable"
+    assert len(messages) == 1 and len(clients) == 1
+    assert store.read()["epoch"] == 2
+
+
+def test_stale_or_expired_owner_cannot_send_health_alert_or_change_health_state(scenario, monkeypatch):
+    from codex_watchdog import control_state
+    store, local, writer, clock, clients, make_agent = scenario
+    monkeypatch.setattr(control_state, "control_kernel_owner", lambda path: writer[0])
+    agent, owner = detached(scenario)
+    clock[0] += 121
+    writer[0] = None
+    assert agent.step()[0]["notification"]["status"] == "blocked"
+    assert not owner.health.path.exists()
+    replacement = store.claim_remote("replacement", "remote-host", "absent")
+    assert replacement["epoch"] == 3
+    before = store.path.read_bytes()
+    assert agent.step()[0]["reason"] == "control_stale_epoch"
+    assert not owner.health.path.exists() and store.path.read_bytes() == before
+
+
+def test_normal_handback_does_not_create_loss_alert(scenario):
+    store, local, writer, clock, clients, make_agent = scenario
+    agent, owner = detached(scenario)
+    assert store.attach("desktop-returned", "desktop-host", "remote") is None
+    assert agent.step(observe=False)[0]["state"] == "released"
+    assert not owner.health.path.exists()
+    assert not list((store.directory / "effects").glob("*.json"))
+
+
+def test_failed_alert_does_not_become_successful_suppression(scenario):
+    store, local, writer, clock, clients, make_agent = scenario
+    agent, owner = detached(scenario)
+    sends = []
+
+    def fail(*args):
+        sends.append(1)
+        raise OSError("fixture secret must not appear in health status")
+
+    owner.health.notifier = EnvironmentNotifier(owner.binding.runtime,
+        config=NotificationConfig(slack_webhook_url="https://hooks.slack.invalid/fixture"), http_post=fail)
+    writer[0] = None
+    assert agent.step()[0]["notification"]["status"] == "delivery_failed"
+    assert agent.step()[0]["notification"]["status"] == "delivery_failed"
+    assert sends == [1]  # Never replay an external send with an uncertain outcome.
+    state = json.loads(owner.health.path.read_text())
+    assert state["pending"] and "fixture secret" not in owner.health.path.read_text()
+
+
+def test_loss_alert_survives_remote_process_restart_without_resending(scenario, monkeypatch):
+    store, local, writer, clock, clients, make_agent = scenario
+    agent, owner = detached(scenario)
+    sends = []
+    notifier = EnvironmentNotifier(owner.binding.runtime,
+        config=NotificationConfig(slack_webhook_url="https://hooks.slack.invalid/fixture"),
+        http_post=lambda *args: sends.append(args) or 200)
+    owner.health.notifier = notifier
+    writer[0] = None
+    assert agent.step()[0]["notification"]["status"] == "sent"
+    item = agent.controllers.pop(THREAD)
+    item["owner"].client.close()
+    item["locks"].close()
+    clock[0] += 121
+    restarted = make_agent()
+    assert restarted.step(observe=False)[0]["state"] == "owned"
+    replacement = restarted.controllers[THREAD]["owner"]
+    replacement.health.notifier = notifier
+    writer[0] = None
+    assert restarted.step()[0]["notification"]["status"] == "sent"
+    assert len(sends) == 1
+    writer[0] = replacement.client.process.pid
+    monkeypatch.setattr(restarted, "_cycle", lambda item: SimpleNamespace(status="completed"))
+    restarted.step()
+    assert len(sends) == 2
+
+
+@pytest.mark.parametrize("busy", [False, True])
+def test_observation_failure_reports_but_brief_contention_does_not(scenario, monkeypatch, busy):
+    from codex_watchdog.control_state import ControlBusy, ControlError
+    agent, owner = detached(scenario)
+
+    def fail(item):
+        raise (ControlBusy("control_operation_in_progress") if busy else ControlError("control_probe_failed"))
+
+    monkeypatch.setattr(agent, "_cycle", fail)
+    result = agent.step()[0]
+    assert result["state"] == "blocked"
+    assert owner.health.path.exists() is not busy
+    if not busy:
+        assert result["notification"]["status"] == "audit_only"
+
+
+def test_uncertain_alert_keeps_canonical_barrier_and_is_never_replayed(scenario):
+    store, local, writer, clock, clients, make_agent = scenario
+    agent, owner = detached(scenario)
+    attempts = []
+
+    class UncertainNotifier:
+        def notify(self, event):
+            attempts.append(event)
+            raise RuntimeError("fixture interrupted before recording an external outcome")
+
+    owner.health.notifier = UncertainNotifier()
+    writer[0] = None
+    assert agent.step()[0]["notification"]["status"] == "blocked"
+    assert store.read()["external_effect"] is not None
+    assert agent.step()[0]["notification"]["reason"] == "control_notification_outcome_uncertain"
+    assert len(attempts) == 1
+
+
+def test_handback_racing_observation_does_not_raise_a_loss_alert(scenario, monkeypatch):
+    from codex_watchdog.control_state import ControlError
+    store, local, writer, clock, clients, make_agent = scenario
+    agent, owner = detached(scenario)
+
+    def handback(item):
+        assert store.attach("returning-desktop", "desktop-host", "remote") is None
+        raise ControlError("control_handback_pending")
+
+    monkeypatch.setattr(agent, "_cycle", handback)
+    assert "notification" not in agent.step()[0]
+    assert not owner.health.path.exists()
+    assert agent.step()[0]["state"] == "released"
     assert all(call[1]["threadId"] == THREAD for client in clients for call in client.calls)
     assert not any(call[0] in ("thread/start", "turn/start") for client in clients for call in client.calls)
 

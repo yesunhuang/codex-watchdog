@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import closing, ExitStack
 from pathlib import Path
 import signal
 import sqlite3
@@ -16,6 +16,7 @@ from .queue_wake import QueueWakeDispatcher, _resolve_codex_executable
 from .storage import FileLock, InstructionStore
 from .control_context import effect_guard, record_writer_pid
 from .control_state import ControlError
+from .linux_health import LinuxOwnerHealth, owner_failure_reason
 
 
 def writer_pid(codex_home: Path, thread: str) -> Optional[int]:
@@ -82,6 +83,9 @@ class LinuxThreadOwner:
         self.release_requested = False
         self.status_path = binding.runtime / "linux" / "status.json"
         self._last_status: Optional[dict] = None
+        self.health = LinuxOwnerHealth(
+            binding.runtime, binding.codex_home, binding.workspace(binding.load()), self.service.notifier,
+        )
 
     def _event(self, message: Dict[str, Any]) -> None:
         method = message.get("method")
@@ -137,7 +141,15 @@ class LinuxThreadOwner:
         with effect_guard(self.binding.codex_home, workspace.session_id, "writer"):
             result = self._owned_step(observe=False)
         if observe and result["owner_state"] == "owned":
-            self.service.run_once()
+            cycle = self.service.run_once()
+            if cycle.reason != "service_cycle_lock_held":
+                if (cycle.status != "completed" or len(cycle.workspaces) != 1
+                        or cycle.workspaces[0].workspace_id != workspace.workspace_id
+                        or cycle.workspaces[0].status != "completed"):
+                    if self.release_requested or self.binding.load()["state"] != "armed":
+                        return result  # An idle release can race the catalog read.
+                    raise LinuxBindingError("linux_observation_failed")
+                self.health.report()
         return result
 
     def _owned_step(self, *, observe: bool) -> Dict[str, Any]:
@@ -196,28 +208,32 @@ class LinuxThreadOwner:
         previous_handlers = {}
         next_observation = 0.0
         last = None
+        locks = ExitStack()
         try:
-            with FileLock(self.binding.runtime / "locks" / "foreground-run.lock"), FileLock(lock):
-                for signum in (signal.SIGTERM, signal.SIGINT):
-                    previous_handlers[signum] = signal.signal(signum, self._signal_release)
-                while True:
-                    now = time.monotonic()
-                    result = self.step(observe=now >= next_observation)
-                    if now >= next_observation:
-                        next_observation = now + interval_seconds
-                    if emit is not None and result != last:
-                        emit(result)
-                        last = result
-                    if result["owner_state"] == "released":
-                        return 0
-                    if self.client is not None:
-                        self.client.pump(timeout=1)
-                    else:
-                        time.sleep(0.5)
+            locks.enter_context(FileLock(self.binding.runtime / "locks" / "foreground-run.lock"))
+            locks.enter_context(FileLock(lock))
+            for signum in (signal.SIGTERM, signal.SIGINT):
+                previous_handlers[signum] = signal.signal(signum, self._signal_release)
+            while True:
+                now = time.monotonic()
+                result = self.step(observe=now >= next_observation)
+                if now >= next_observation:
+                    next_observation = now + interval_seconds
+                if emit is not None and result != last:
+                    emit(result)
+                    last = result
+                if result["owner_state"] == "released":
+                    return 0
+                if self.client is not None:
+                    self.client.pump(timeout=1)
+                else:
+                    time.sleep(0.5)
         except (LinuxBindingError, AppServerError, ControlError, OSError) as exc:
-            reason = str(exc) if isinstance(exc, (LinuxBindingError, AppServerError, ControlError)) else "linux_owner_io_failed"
+            reason = owner_failure_reason(exc)
             # No retry after an uncertain resume. Journals and reservation survive.
+            notification = self.report_failure(reason)
             result = self._status("blocked", reason)
+            result["notification"] = notification
             if emit is not None:
                 emit(result)
             return 1
@@ -225,8 +241,15 @@ class LinuxThreadOwner:
             if self.client is not None:
                 self.client.close()
                 self.client = None
+            locks.close()
             for signum, handler in previous_handlers.items():
                 signal.signal(signum, handler)
+
+    def report_failure(self, reason):
+        try:
+            return self.health.report(reason)
+        except (ControlError, OSError, ValueError, RuntimeError) as exc:
+            return {"status": "blocked", "reason": owner_failure_reason(exc)}
 
     def _signal_release(self, signum, frame) -> None:
         self.release_requested = True
