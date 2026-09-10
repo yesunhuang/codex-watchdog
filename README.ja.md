@@ -197,6 +197,8 @@ v0.2.9 では `linux-release` が監視ロックの解放を短時間待ちま�
 v0.2.10 以降、Linux サービスは Bot Token とチャンネル ID だけで指定の Slack チャンネルへ
 通知を送信でき、別の返信リスナーは不要です。Incoming Webhook の送信先は個別に固定されています。
 設定方法は[通知専用の Slack 設定](docs/SETUP.md#slack-notifications-without-a-reply-listener)を参照してください。
+v0.2.11 では、キュー操作や解放処理による一時的な制御ロックの競合を監視喪失と誤判定しません。
+復旧通知は監視が正常に完了した後にのみ送信します。
 
 ARM64 パッケージは実際の Ubuntu ARM64 マシンで、x64 パッケージはホスト型の
 Ubuntu/UBI 環境と実際の RHEL 8.10 マシンの隔離環境で検証済みです。

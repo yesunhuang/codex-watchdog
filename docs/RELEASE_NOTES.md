@@ -1,4 +1,12 @@
-Version 0.2.10 adds notification-only Slack bot delivery. A service can use its
+Version 0.2.11 fixes a false monitoring failure reproduced during native Linux
+package acceptance. A queue/release command can briefly hold the control lock
+between the owner's writer check and its workspace observation. That exact
+contention now skips the observation, keeping the owner running without issuing
+a loss or recovery alert. The next cycle checks ownership again. Stale epochs,
+expired leases and changed activation remain failures; skipped observations do
+not establish recovery.
+
+This release retains v0.2.10's notification-only Slack bot delivery. A service can use its
 bot token and an explicit channel ID without an app token or reply allowlist.
 This fixes setup where an existing incoming webhook points to a different channel
 from the desktop reply configuration. The bot response must confirm the requested
@@ -52,4 +60,4 @@ x64, macOS 15 ARM64 preview, Linux ARM64/glibc 2.35 and Linux x64/glibc 2.28.
 The Mac package remains ad-hoc signed and not notarized. Automatic publication
 requires three-OS tests, all four package gates, complete-history secret scanning,
 the approved embedded Windows icon and upgrade from the actual immediately
-previous public Windows v0.2.9 executable. Earlier releases remain immutable.
+previous public Windows v0.2.10 executable. Earlier releases remain immutable.

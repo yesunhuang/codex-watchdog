@@ -62,6 +62,12 @@ and restarts reuse the same outage identity. Successful monitoring sends one
 recovery notification. Normal idle handback, planned release and healthy standby
 do not create loss alerts. An expired or replaced owner has no authority to send.
 
+From v0.2.11, a brief queue/release control-lock conflict at the workspace
+observation guard also skips that observation without ending the explicit owner
+or reporting loss/recovery. The next cycle rechecks the writer and authority.
+Stale epochs, expired leases and changed activation still fail closed; a skipped
+observation cannot establish recovery.
+
 The Linux **service process** must have its own existing notification environment:
 `CODEX_WATCHDOG_SLACK_WEBHOOK_URL`, or (from v0.2.10) just
 `CODEX_WATCHDOG_SLACK_BOT_TOKEN` and `CODEX_WATCHDOG_SLACK_CHANNEL_ID` for
