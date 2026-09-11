@@ -1227,6 +1227,80 @@ def test_held_cached_thread_without_exact_window_owner_fails_closed(
     assert snapshot.windows[0].reason == "no_loaded_vscode_thread"
 
 
+def test_native_writer_survives_discarded_routing_log(tmp_path: Path) -> None:
+    discovery, target_log, _other_log, windows = cross_window_discovery(tmp_path)
+    target_log.write_text("new log content without old routing markers\n", encoding="utf-8")
+    discovery.session_resolver.writer_process_probe = lambda _path: 101
+
+    result = discovery.snapshot()
+
+    target = next(window for window in result.windows if window.workspace_storage_key == "target")
+    assert target.session_id == SESSION_CURRENT
+    assert target.session_source == "codex_state_vscode_native_writer"
+    assert target.reason is None
+    assert windows["target"].codex_app_server_pid == 101
+
+
+def test_all_local_windows_survive_discarded_routing_logs(tmp_path: Path) -> None:
+    discovery, target_log, other_log, _windows = cross_window_discovery(tmp_path)
+    for log in (target_log, other_log):
+        log.write_text("retained log has no routing history\n", encoding="utf-8")
+    discovery.session_resolver.writer_process_probe = lambda path: (
+        101 if path.stem == SESSION_CURRENT else 201
+    )
+
+    snapshot = discovery.snapshot()
+
+    assert {item.repo_root.name: item.session_id for item in snapshot.effective_workspaces} == {
+        "target": SESSION_CURRENT, "other": SESSION_OTHER,
+    }
+    assert all(window.session_source == "codex_state_vscode_native_writer" for window in snapshot.windows)
+    assert snapshot.issues == ()
+
+
+@pytest.mark.parametrize("missing_proof", [
+    "other_writer", "no_writer", "released_during_probe", "missing_cache", "unreadable_log",
+    "multiple_threads", "duplicate_window", "resume_failed", "unsubscribed", "inactive", "unknown_role",
+])
+def test_discarded_log_still_requires_exact_native_owner(tmp_path: Path, missing_proof: str) -> None:
+    discovery, target_log, _other_log, windows = cross_window_discovery(tmp_path)
+    target_log.write_text("new log without routing markers\n", encoding="utf-8")
+    resolver = discovery.session_resolver
+    resolver.writer_process_probe = lambda _path: 101
+    if missing_proof == "other_writer":
+        resolver.writer_process_probe = lambda _path: 201
+    elif missing_proof == "no_writer":
+        resolver.writer_process_probe = lambda _path: None
+    elif missing_proof == "released_during_probe":
+        def release(_path):
+            resolver.lock_probe = lambda _path: False
+            return 101
+        resolver.writer_process_probe = release
+    elif missing_proof == "missing_cache":
+        resolver.window_session_candidates = lambda _path: set()
+    elif missing_proof == "unreadable_log":
+        target_log.unlink()
+    elif missing_proof == "multiple_threads":
+        with sqlite3.connect(str(tmp_path / ".codex/state_5.sqlite")) as db:
+            db.execute("INSERT INTO threads VALUES (?, ?, 'vscode', 'user', 0)",
+                       (SESSION_OLD, str(tmp_path / "target")))
+    elif missing_proof == "duplicate_window":
+        windows["duplicate"] = LiveVSCodeWindow("3", 300, 101, target_log)
+    else:
+        event = {
+            "resume_failed": "maybe_resume_failed",
+            "unsubscribed": "inactive_thread_unsubscribed",
+            "inactive": "thread_stream_view_activity_changed active=false",
+            "unknown_role": "thread_stream_role_changed role=unknown",
+        }[missing_proof]
+        target_log.write_text(f"{event} conversationId={SESSION_CURRENT}\n", encoding="utf-8")
+
+    target = next(window for window in discovery.snapshot().windows if window.workspace_storage_key == "target")
+
+    assert target.session_id is None
+    assert target.tracking_status == "unresolved"
+
+
 def cross_window_discovery(tmp_path: Path):
     """Two different repositories; the second server owns both exact threads."""
     user_data = tmp_path / "Code" / "User"

@@ -169,6 +169,8 @@ equivalent. See [platform support and diagnostics](docs/PLATFORM_SUPPORT.md).
   **Parrot Dog**.
 - Discovers local and VS Code Remote-SSH workspaces and keeps session identities
   distinct.
+- Keeps local VS Code discovery working when older routing logs disappear, by
+  verifying the exact thread's native writer in its current window.
 - Supports persistent Linux detached ownership and safe same-thread handoff after
   Remote-SSH detaches.
 - Coordinates local-vs-detached authority with fencing so stale owners cannot keep
