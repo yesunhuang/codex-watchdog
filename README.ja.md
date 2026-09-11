@@ -215,6 +215,11 @@ v0.2.17 以降、稼働中の Linux WatchDog は登録済みの会話を優先�
 接続中も完了通知を送ります。ホストの WatchDog が利用できない場合は、ノート PC の
 WatchDog が監視を引き継ぎます。
 
+v0.2.18 以降は `linux-auto-run --repo /absolute/repository/path` で、そのワークスペースに
+登録された会話を新しい thread も含めて監視できます。複数のリポジトリには `--repo` を
+繰り返し指定します。`--thread UUID` は指定した会話だけに監視を限定します。バックエンドが
+終了した場合は古い所有権を解放し、同じ thread と稼働中の VS Code writer を維持します。
+
 > [!IMPORTANT]
 > upgrade は compatible な user state をデフォルトで保持する設計です。WatchDog は既存の
 > runtime / profile / provider settings を可能な限り再利用し、再設定を通常の upgrade 手順に

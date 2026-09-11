@@ -232,6 +232,12 @@ From v0.2.17, the running Linux WatchDog monitors its enrolled threads and sends
 their completion notifications even while VS Code is attached. The laptop
 WatchDog provides fallback monitoring when the host WatchDog is unavailable.
 
+From v0.2.18, use `linux-auto-run --repo /absolute/repository/path` to monitor
+registered conversations in a workspace, including newly opened threads. Repeat
+`--repo` for more repositories. `--thread UUID` deliberately limits monitoring to
+that conversation. Exited backends release their stale ownership; recovery keeps
+the same thread and preserves any live VS Code writer.
+
 > [!IMPORTANT]
 > Upgrades preserve compatible user state by default. WatchDog reuses existing
 > runtime/profile/provider settings where compatible and does not treat

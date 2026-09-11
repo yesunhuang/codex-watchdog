@@ -104,13 +104,24 @@ VS Code backend resulted from a window close or an accidental disconnection.
 `linux-run` covers its one bound thread; `linux-auto-run` covers eligible threads
 already identified by the desktop observer, subject to its exclusions.
 Use repeated `--thread UUID` options to limit an automatic service to selected
-existing conversations. Without that filter it retains the existing discovery
-behavior. Automatic mode also accepts `--renew-lease` for persistent services.
+existing conversations. To include newly registered conversations in an approved
+workspace, use repeated `--repo /absolute/repository/path` options instead.
+Repository matching uses the full canonical path, and each thread keeps its own
+ownership, runtime and notification receipts. If both filters are supplied, both
+must match. Neither option creates a conversation or enrolls an unobserved thread.
+Without either filter it retains the existing discovery behavior. Automatic mode
+also accepts `--renew-lease` for persistent services.
 
 From v0.2.8, detached-owner loss is reported immediately when the owner detects an App Server
 exit, a changed writer, unavailable exact-thread metadata, or an observation
-failure. Automatic mode remains blocked without creating a replacement thread;
-the explicit foreground owner reports the failure before exiting. Repeated checks
+failure. From v0.2.18, automatic mode retires a confirmed exited backend and
+releases its stale claim. A previously verified thread can then recover under a
+fresh ownership epoch; an existing VS Code writer is preserved. An initial resume
+without a verified ownership receipt waits for native attachment or explicit
+service restart. Live or uncertain writers and unresolved notification outcomes
+remain protected. Failed observation does not renew its lease indefinitely, and
+`linux-status` records the failure instead of retaining a stale healthy state.
+The explicit foreground owner reports the failure before exiting. Repeated checks
 and restarts reuse the same outage identity. Successful monitoring sends one
 recovery notification. Normal idle handback, planned release and healthy standby
 do not create loss alerts. An expired or replaced owner has no authority to send.

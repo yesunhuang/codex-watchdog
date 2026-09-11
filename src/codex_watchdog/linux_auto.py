@@ -71,7 +71,7 @@ class HostRemoteAdapter:
 
 
 class LinuxAutoWatchdog:
-    def __init__(self, runtime, codex_home, *, executable=None, exclude=(), threads=(), stop_on_release=False,
+    def __init__(self, runtime, codex_home, *, executable=None, exclude=(), threads=(), repos=(), stop_on_release=False,
                  renew_lease=False, continue_interrupted=False,
                  owner_factory=LinuxThreadOwner, store_factory=ControlStore,
                  service_factory=MvpWatchdogService):
@@ -80,6 +80,7 @@ class LinuxAutoWatchdog:
         self.executable = executable
         self.exclude = tuple(str(value).casefold() for value in exclude)
         self.threads = frozenset(threads)
+        self.repos = frozenset(Path(repo).resolve() for repo in repos)
         self.stop_on_release = stop_on_release
         self.renew_lease = renew_lease
         self.continue_interrupted = continue_interrupted
@@ -89,6 +90,7 @@ class LinuxAutoWatchdog:
         self.store_factory = store_factory
         self.service_factory = service_factory
         self.controllers = {}
+        self.failed_resumes = {}
         self.stopping = False
 
     def _excluded(self, repo):
@@ -161,6 +163,31 @@ class LinuxAutoWatchdog:
         finally:
             service._remote_control_scope = None
 
+    def _retire_exited(self, item, reason):
+        """Release a proven-dead child, never terminate an uncertain live writer."""
+        owner, store, token = item["owner"], item["store"], item["token"]
+        client = owner.client
+        if client is None or getattr(client.process, "returncode", None) is None:
+            return
+        if not owner.resumed:
+            # A failed initial resume has no verified ownership receipt. Wait
+            # for native attachment or an explicit service restart, not a retry.
+            self.failed_resumes[store.thread_id] = reason
+        client.close()  # This exact child has already exited; no live PID is killed.
+        owner.client = None
+        try:
+            with store.guard(token) as value:
+                value["writer_pid"] = None
+                control_atomic_json(store.path, value)
+            kind = self._writer_kind(store.thread_id)
+            if kind in ("absent", "vscode"):
+                store.release_remote(token, kind)
+        finally:
+            # Stale epochs and unresolved external effects remain fenced by
+            # ControlStore. They must not keep dead in-process resources alive.
+            item["locks"].close()
+            self.controllers.pop(store.thread_id, None)
+
     def step(self, *, observe=True):
         results = []
         paths = sorted((self.codex_home / "watchdog-control").glob("*/owner.json"))
@@ -174,11 +201,19 @@ class LinuxAutoWatchdog:
                 repo = value.get("repo_path")
                 if not isinstance(repo, str) or self._excluded(repo):
                     continue
+                if self.repos and Path(repo).resolve() not in self.repos:
+                    continue
                 store = item["store"] if item else self.store_factory(self.codex_home, thread, repo)
                 value = store.read()
                 if item is None:
                     if self.stopping:
                         continue
+                    if thread in self.failed_resumes:
+                        if self._writer_kind(thread) != "vscode":
+                            results.append(dict(thread_sha256=sha256_text(thread), state="blocked",
+                                                reason=self.failed_resumes[thread]))
+                            continue
+                        self.failed_resumes.pop(thread)
                     token = store.claim_remote(self.instance, self.locality,
                                                self._writer_kind(thread), ttl=120, host_observer=True)
                     if token is None:
@@ -193,7 +228,8 @@ class LinuxAutoWatchdog:
                             store.release_remote(token, kind)
                         raise
                 token, owner = item["token"], item["owner"]
-                store.renew(token, ttl=120)
+                if not item.get("failed"):
+                    store.renew(token, ttl=120)
                 value = store.read()
                 if self.stopping or value.get("auto_paused") is True:
                     owner.release_requested = True
@@ -212,6 +248,9 @@ class LinuxAutoWatchdog:
                         if cycle.status != "completed":
                             raise ControlError("control_observation_failed")
                         owner.health.report()
+                if item.get("failed"):
+                    store.renew(token, ttl=120)
+                    item.pop("failed", None)
                 if result["owner_state"] == "released":
                     kind = self._writer_kind(thread)
                     if kind not in ("absent", "vscode"):
@@ -239,11 +278,18 @@ class LinuxAutoWatchdog:
                     item = None
                 if (item is not None and not isinstance(exc, (ControlBusy, StoreBusyError))
                         and reason != "control_handback_pending"):
+                    item["failed"] = True
                     try:
                         with acting_as(item["store"], item["token"]):
+                            with item["store"].guard(item["token"]):
+                                item["owner"]._status("blocked", reason)
                             blocked["notification"] = item["owner"].report_failure(reason)
                     except (ControlError, OSError, ValueError) as error:
                         blocked["notification"] = dict(status="blocked", reason=owner_failure_reason(error))
+                    try:
+                        self._retire_exited(item, reason)
+                    except (ControlError, OSError, ValueError) as error:
+                        blocked["recovery"] = dict(status="blocked", reason=owner_failure_reason(error))
                 results.append(blocked)
         return results
 
