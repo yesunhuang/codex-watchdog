@@ -4,6 +4,7 @@ from contextlib import ExitStack
 import json
 from pathlib import Path
 import signal
+import threading
 import time
 import uuid
 
@@ -49,10 +50,18 @@ class HostRemoteAdapter:
 
     def __init__(self, codex_home):
         self.namespace = {}
+        self.probe_lock = threading.Lock()
         exec(compile(_REMOTE_SCRIPT, "<watchdog-host-helper>", "exec"), self.namespace)
         self.namespace["remote_codex_home"] = lambda: Path(codex_home)
 
     def probe(self, target, *, control=None, pending_instruction_id=None, wake=None):
+        # Observation and the reply listener share this embedded helper. Its
+        # emit callback and active-control globals belong to one request at a time.
+        with self.probe_lock:
+            return self._probe(target, control=control,
+                               pending_instruction_id=pending_instruction_id, wake=wake)
+
+    def _probe(self, target, *, control=None, pending_instruction_id=None, wake=None):
         request = dict(repo_path=target.repo_path, storage_key=target.storage_key)
         if target.expected_session_ids:
             request["expected_session_ids"] = list(target.expected_session_ids)

@@ -54,16 +54,19 @@ class SlackReplyRelay:
         runtime: Path,
         *,
         bot_token: str,
-        app_token: str,
+        app_token: Optional[str],
         channel_id: str,
         allowed_user_ids: tuple[str, ...],
         queue_dispatcher: QueueWakeDispatcher,
         remote_ssh_adapter: RemoteSshAdapter,
         thread_store: Optional[SlackThreadStore] = None,
+        reply_mode: str = "socket",
     ) -> None:
         if not isinstance(bot_token, str) or not bot_token.startswith("xoxb-"):
             raise ValueError("Slack bot token is invalid")
-        if not isinstance(app_token, str) or not app_token.startswith("xapp-"):
+        if reply_mode not in ("socket", "poll"):
+            raise ValueError("Slack reply mode is invalid")
+        if reply_mode == "socket" and (not isinstance(app_token, str) or not app_token.startswith("xapp-")):
             raise ValueError("Slack app token is invalid")
         if not valid_slack_channel_id(channel_id):
             raise ValueError("Slack relay channel id is invalid")
@@ -74,6 +77,7 @@ class SlackReplyRelay:
         self.runtime = Path(runtime)
         self.bot_token = bot_token
         self.app_token = app_token
+        self.reply_mode = reply_mode
         self.channel_id = channel_id
         self.allowed_user_ids = frozenset(allowed_user_ids)
         self.queue_dispatcher = queue_dispatcher
@@ -84,6 +88,10 @@ class SlackReplyRelay:
         self._app = None
         self._handler = None
         self._listener_lock: Optional[FileLock] = None
+        self._poller = None
+        if reply_mode == "poll":
+            from .slack_poll import SlackPollingThreadStore
+            self.thread_store = thread_store or SlackPollingThreadStore(runtime)
 
     @classmethod
     def from_notification_config(
@@ -104,9 +112,17 @@ class SlackReplyRelay:
             allowed_user_ids=config.slack_allowed_user_ids,
             queue_dispatcher=queue_dispatcher,
             remote_ssh_adapter=remote_ssh_adapter,
+            reply_mode=getattr(config, "slack_reply_mode", "socket"),
         )
 
     def start(self) -> None:
+        if self.reply_mode == "poll":
+            if self._poller is None:
+                from .slack_poll import SlackReplyPoller
+                poller = SlackReplyPoller(self)
+                poller.start()
+                self._poller = poller
+            return
         if self._handler is not None:
             return
         listener_lock = FileLock(self.runtime / "locks" / "slack-socket-mode.lock")
@@ -130,6 +146,9 @@ class SlackReplyRelay:
         self._listener_lock = listener_lock
 
     def close(self) -> None:
+        if self._poller is not None:
+            self._poller.close()
+            self._poller = None
         handler = self._handler
         listener_lock = self._listener_lock
         self._handler = None
@@ -146,6 +165,9 @@ class SlackReplyRelay:
         self, event: Dict[str, Any], body: Dict[str, Any], client: Any
     ) -> None:
         result = self.handle_message(event, event_id=body.get("event_id"))
+        self.acknowledge(event, result, client)
+
+    def acknowledge(self, event, result, client) -> None:
         response = self._response_text(result)
         channel = event.get("channel")
         thread_ts = event.get("thread_ts")
