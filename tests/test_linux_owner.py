@@ -357,6 +357,93 @@ def test_restart_with_release_request_does_not_resume(owner):
     assert client.requests == [] and cycles == []
 
 
+@pytest.mark.parametrize("attached", [False, True])
+def test_opt_in_renewal_keeps_same_live_binding_without_another_resume(owner, monkeypatch, attached):
+    instance, client, _, pid = owner
+    tick = [10000.0]
+    monkeypatch.setattr(linux_binding.time, "time", lambda: tick[0])
+    change(instance.binding, expires_at=10600.0, future_setting={"keep": True})
+    instance.renew_lease = True
+    if attached:
+        pid[0] = 777
+    expected = "waiting_for_detach" if attached else "owned"
+    assert instance.step(observe=False)["owner_state"] == expected
+    value = instance.binding.load()
+    assert value["expires_at"] == 96400.0 and value["thread_id"] == THREAD
+    assert value["future_setting"] == {"keep": True}
+    # Past the original lease and then near the next expiry: keep the existing writer.
+    requests = list(client.requests)
+    tick[0] = 11000.0
+    assert instance.step(observe=False)["owner_state"] == expected
+    assert instance.binding.load()["expires_at"] == 96400.0
+    tick[0] = 94000.0
+    assert instance.step(observe=False)["owner_state"] == expected
+    assert instance.binding.load()["expires_at"] == 180400.0
+    assert client.requests == requests
+
+
+@pytest.mark.parametrize("stopped_by", ["expired", "release_requested", "released", "signal"])
+def test_renewal_never_revives_expired_or_cancelled_binding(owner, stopped_by):
+    instance, client, cycles, _ = owner
+    instance.renew_lease = True
+    if stopped_by == "expired":
+        change(instance.binding, expires_at=0)
+    elif stopped_by == "signal":
+        instance._signal_release(None, None)
+    else:
+        instance.binding.set_state(stopped_by)
+    before = instance.binding.load()["expires_at"]
+    assert instance.step(observe=True)["owner_state"] == "released"
+    assert instance.binding.load()["expires_at"] == before
+    assert client.requests == [] and cycles == []
+
+
+def test_renewal_preserves_concurrent_operator_release(owner, monkeypatch):
+    instance, client, _, _ = owner
+    instance.renew_lease = True
+    before = instance.binding.load()["expires_at"]
+    renew = instance.binding.renew_lease
+    def release_before_renewal(thread):
+        instance.binding.set_state("release_requested")
+        renew(thread)
+    monkeypatch.setattr(instance.binding, "renew_lease", release_before_renewal)
+    instance.step(observe=False)
+    assert instance.binding.load()["state"] == "release_requested"
+    assert instance.binding.load()["expires_at"] == before
+    assert instance.step(observe=False)["owner_state"] == "released"
+    assert client.closed
+
+
+def test_renewal_admission_contention_retries_without_replacing_writer(owner):
+    instance, client, _, _ = owner
+    instance.renew_lease = True
+    before = instance.binding.load()["expires_at"]
+    with FileLock(reservation_path(instance.binding.codex_home, THREAD).with_suffix(".send.lock")):
+        assert instance.step(observe=False)["owner_state"] == "owned"
+    assert instance.binding.load()["expires_at"] == before
+    assert instance.step(observe=False)["owner_state"] == "owned"
+    assert instance.binding.load()["expires_at"] > before
+    assert [method for method, _ in client.requests].count("thread/resume") == 1
+
+
+def test_renewal_rejects_unverified_writer_and_is_off_by_default(owner):
+    instance, client, _, pid = owner
+    before = instance.binding.load()["expires_at"]
+    instance.step(observe=False)
+    assert instance.binding.load()["expires_at"] == before
+    instance.renew_lease = True
+    pid[0] = 999
+    with pytest.raises(LinuxBindingError, match="writer_changed"):
+        instance.step(observe=False)
+    assert instance.binding.load()["expires_at"] == before
+
+
+def test_linux_run_exposes_explicit_lease_renewal_only():
+    from codex_watchdog.cli import build_parser
+    assert build_parser().parse_args(["linux-run"]).renew_lease is False
+    assert build_parser().parse_args(["linux-run", "--renew-lease"]).renew_lease is True
+
+
 def test_mismatched_server_thread_cannot_start_service(owner):
     instance, client, cycles, _ = owner
     client.mismatch = True

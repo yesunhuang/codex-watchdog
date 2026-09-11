@@ -78,6 +78,8 @@ def build_parser() -> argparse.ArgumentParser:
         "linux-run", help="wait for detach, then serve the bound thread through first-party stdio"
     )
     linux_run.add_argument("--interval", type=float, default=5)
+    linux_run.add_argument("--renew-lease", action="store_true",
+                           help="keep the live binding renewed until this service is stopped or released")
     linux_run.add_argument("--codex-executable", type=_path)
     linux_auto = commands.add_parser(
         "linux-auto-run", help="remain standby while attached and automatically own exact detached remote threads"
@@ -300,10 +302,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     from .linux_auto import LinuxAutoWatchdog
                     return LinuxAutoWatchdog(
                         args.runtime, binding.codex_home, threads=(value["thread_id"],), stop_on_release=True,
+                        renew_lease=args.renew_lease,
                         executable=str(args.codex_executable) if args.codex_executable else None,
                     ).run(args.interval, emit=lambda value: print(json.dumps(value, sort_keys=True), flush=True))
                 return LinuxThreadOwner(
-                    binding, executable=str(args.codex_executable) if args.codex_executable else None
+                    binding, executable=str(args.codex_executable) if args.codex_executable else None,
+                    renew_lease=args.renew_lease,
                 ).run(args.interval, emit=lambda value: print(json.dumps(value, sort_keys=True), flush=True))
             result = binding.status()
             status_path = args.runtime / "linux" / "status.json"

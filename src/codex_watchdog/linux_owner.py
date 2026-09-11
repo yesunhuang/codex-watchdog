@@ -13,7 +13,7 @@ from .app_server import AppServerError, StdioAppServer
 from .linux_binding import LinuxBinding, LinuxBindingError, exact_thread, reservation_path
 from .mvp_service import MvpWatchdogService
 from .queue_wake import QueueWakeDispatcher, _resolve_codex_executable
-from .storage import FileLock, InstructionStore
+from .storage import FileLock, InstructionStore, StoreBusyError
 from .control_context import effect_guard, record_writer_pid
 from .control_state import ControlBusy, ControlError
 from .linux_health import LinuxOwnerHealth, owner_failure_reason
@@ -65,8 +65,10 @@ class _BoundCatalog:
 class LinuxThreadOwner:
     def __init__(self, binding: LinuxBinding, *, executable: Optional[str] = None,
                  service: Optional[MvpWatchdogService] = None,
+                 renew_lease: bool = False,
                  client_factory: Callable[..., StdioAppServer] = StdioAppServer) -> None:
         self.binding = binding
+        self.renew_lease = renew_lease
         self.executable = executable or _resolve_codex_executable()
         self.service = service or MvpWatchdogService(
             binding.runtime, registry=_BoundCatalog(binding), codex_home=binding.codex_home,
@@ -146,6 +148,12 @@ class LinuxThreadOwner:
                 # operation has begun; retain the client and recheck next cycle.
                 return self._status("standby", "control_operation_in_progress")
             result = self._owned_step(observe=False)
+            if (self.renew_lease and not self.release_requested
+                    and result["owner_state"] in ("owned", "waiting_for_detach")):
+                try:
+                    self.binding.renew_lease(self.thread)
+                except StoreBusyError:
+                    pass  # Retry next owner check; a released/expired lease stays fenced.
         if observe and result["owner_state"] == "owned":
             cycle = self.service.run_once()
             if cycle.reason != "service_cycle_lock_held":
