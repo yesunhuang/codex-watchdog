@@ -72,7 +72,7 @@ class HostRemoteAdapter:
 
 class LinuxAutoWatchdog:
     def __init__(self, runtime, codex_home, *, executable=None, exclude=(), threads=(), stop_on_release=False,
-                 renew_lease=False,
+                 renew_lease=False, continue_interrupted=False,
                  owner_factory=LinuxThreadOwner, store_factory=ControlStore,
                  service_factory=MvpWatchdogService):
         self.runtime = Path(runtime).resolve()
@@ -82,6 +82,7 @@ class LinuxAutoWatchdog:
         self.threads = frozenset(threads)
         self.stop_on_release = stop_on_release
         self.renew_lease = renew_lease
+        self.continue_interrupted = continue_interrupted
         self.instance = str(uuid.uuid4())
         self.locality = locality_identity()
         self.owner_factory = owner_factory
@@ -125,6 +126,8 @@ class LinuxAutoWatchdog:
                 relay.start()
                 locks.callback(relay.close)
             owner_options = {"renew_lease": True} if self.renew_lease else {}
+            if self.continue_interrupted:
+                owner_options["continue_interrupted"] = True
             owner = self.owner_factory(binding, executable=self.executable, service=service, **owner_options)
             item = dict(store=store, token=token, owner=owner, service=service, target=target, locks=locks)
             self.controllers[store.thread_id] = item
@@ -204,8 +207,11 @@ class LinuxAutoWatchdog:
                     self.controllers.pop(thread)
                     if self.stop_on_release:
                         self.stopping = True
-                results.append(dict(thread_sha256=sha256_text(thread), epoch=token["epoch"],
-                                    state=result["owner_state"], thread_status=result["thread_status"]))
+                summary = dict(thread_sha256=sha256_text(thread), epoch=token["epoch"],
+                               state=result["owner_state"], thread_status=result["thread_status"])
+                if "continuation" in result:
+                    summary["continuation"] = result["continuation"]
+                results.append(summary)
             except (ControlError, AppServerError, StoreBusyError, ValueError, OSError) as exc:
                 reason = owner_failure_reason(exc)
                 blocked = dict(thread_sha256=sha256_text(thread), state="blocked", reason=reason)

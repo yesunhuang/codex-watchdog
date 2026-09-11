@@ -66,6 +66,38 @@ Stopping the user service requests idle release. Disable it as well to cancel
 automatic startup. Hosts with shared home directories should pin the unit to the
 verified execution host, since shared files do not imply shared process ownership.
 
+From v0.2.16, add **`--continue-interrupted`** to `linux-run` or `linux-auto-run`
+to continue interrupted work automatically after Linux acquires the same thread.
+This is opt-in; upgrades preserve the previous behavior unless the option is
+enabled. A manual VS Code window close can terminate its extension-owned Codex
+backend. WatchDog resumes the stored conversation and starts a continuation turn;
+it cannot keep the terminated process or its in-flight command alive.
+
+The controller reads only the latest native turn summary. It sends a fixed
+continuation instruction once for an interrupted turn after verifying its exact
+writer, live idle status, active lease and empty queue. It waits while VS Code
+owns the writer and skips active turns, pending approvals and release requests.
+The instruction tells Codex to inspect uncertain outcomes, preserve the existing
+scope and approvals, and stop if the task is complete or needs user input.
+
+The existing queue journal deduplicates the continuation across restarts. A
+notification through the configured Slack/email transport says **automatic
+continuation started** only after native rollout evidence confirms that exact
+queued instruction started. Enqueue acknowledgement alone is not success.
+Uncertain delivery is reported without replaying it. If that automatic
+continuation itself is interrupted, WatchDog reports that it needs attention
+instead of generating a retry loop. A later distinct user turn can be continued.
+
+Use `linux-release` for an explicit binding, or stop the persistent service, to
+disable takeover. With this option enabled, a recorded interruption followed by
+detach authorizes continuation; the controller cannot infer whether a vanished
+VS Code backend resulted from a window close or an accidental disconnection.
+`linux-run` covers its one bound thread; `linux-auto-run` covers eligible threads
+already identified by the desktop observer, subject to its exclusions.
+Use repeated `--thread UUID` options to limit an automatic service to selected
+existing conversations. Without that filter it retains the existing discovery
+behavior. Automatic mode also accepts `--renew-lease` for persistent services.
+
 From v0.2.8, detached-owner loss is reported immediately when the owner detects an App Server
 exit, a changed writer, unavailable exact-thread metadata, or an observation
 failure. Automatic mode remains blocked without creating a replacement thread;
@@ -74,28 +106,14 @@ and restarts reuse the same outage identity. Successful monitoring sends one
 recovery notification. Normal idle handback, planned release and healthy standby
 do not create loss alerts. An expired or replaced owner has no authority to send.
 
-From v0.2.11, a brief queue/release control-lock conflict at the workspace
-observation guard also skips that observation without ending the explicit owner
-or reporting loss/recovery. The next cycle rechecks the writer and authority.
-Stale epochs, expired leases and changed activation still fail closed; a skipped
-observation cannot establish recovery.
-
 The Linux **service process** must have its own existing notification environment:
-`CODEX_WATCHDOG_SLACK_WEBHOOK_URL`, or (from v0.2.10) just
-`CODEX_WATCHDOG_SLACK_BOT_TOKEN` and `CODEX_WATCHDOG_SLACK_CHANNEL_ID` for
-notification-only delivery to a selected channel, or the complete Slack relay
-variables from the [setup guide](SETUP.md#slack-notifications-without-a-reply-listener),
-and/or `CODEX_WATCHDOG_SMTP_HOST`, `CODEX_WATCHDOG_SMTP_FROM` and
+`CODEX_WATCHDOG_SLACK_WEBHOOK_URL`, or the Slack relay variables from the setup
+guide, and/or `CODEX_WATCHDOG_SMTP_HOST`, `CODEX_WATCHDOG_SMTP_FROM` and
 `CODEX_WATCHDOG_SMTP_TO` with the provider's existing TLS/authentication settings.
 Slack is preferred; configured SMTP is the fallback. An interactive shell's
 variables are not automatically inherited by a systemd user service. Keep these
 settings in the host's existing private service configuration; do not paste
 credentials into command lines or copy another host's secure store.
-
-Notification-only bot delivery does not start another Socket Mode listener or
-create reply mappings. Keep app-token and reply-allowlist variables unset in that
-service. A webhook has its own fixed destination; omit it if fallback to that
-destination would be incorrect. The selected channel ID does not retarget a webhook.
 
 Automatic status output includes the notification result for a blocked owner.
 The runtime also retains schema-1 `linux/health/*.json` records. `sent` or
@@ -104,6 +122,7 @@ configured. Failed/uncertain delivery is not reported as successful suppression
 and is not blindly retried. A running owner can report lost thread monitoring;
 a terminated process or an unreachable host cannot send its own alert. Use the
 host's existing service supervision/host monitoring for those outages.
+
 
 An external notification has a durable in-progress record until its result is
 recorded. A timeout or disconnected desktop cannot revoke a possibly sent request.
