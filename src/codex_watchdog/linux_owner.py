@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import closing, ExitStack
+import json
 from pathlib import Path
 import signal
 import sqlite3
@@ -14,8 +15,8 @@ from .linux_binding import LinuxBinding, LinuxBindingError, exact_thread, reserv
 from .mvp_service import MvpWatchdogService
 from .queue_wake import QueueWakeDispatcher, _resolve_codex_executable
 from .storage import FileLock, InstructionStore, StoreBusyError
-from .control_context import effect_guard, record_writer_pid
-from .control_state import ControlBusy, ControlError
+from .control_context import effect_guard, record_writer_pid, current_control
+from .control_state import ControlBusy, ControlError, control_state_home, control_atomic_json
 from .linux_health import LinuxOwnerHealth, owner_failure_reason
 
 
@@ -49,6 +50,34 @@ def pending_count(codex_home: Path, thread: str) -> int:
     if len(counts) != 1:
         raise LinuxBindingError("linux_queue_unavailable_or_ambiguous")
     return counts[0]
+
+
+def node_has_queued_wake(codex_home: Path, thread: str) -> bool:
+    """Require this node's durable courier receipt for an actual queued item."""
+    queues = []
+    for path in codex_home.glob("queue_*.sqlite"):
+        try:
+            with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+                queues.append({row[0] for row in db.execute(
+                    "SELECT id FROM queued_items WHERE thread_id=?", (thread,))})
+        except sqlite3.Error:
+            continue
+    if len(queues) != 1:
+        raise LinuxBindingError("linux_queue_unavailable_or_ambiguous")
+    if not queues[0]:
+        return False
+    for path in (control_state_home(codex_home) / "remote-wake").glob("*.json"):
+        try:
+            with path.open("rb") as handle:
+                raw = handle.read(65537)
+            value = json.loads(raw) if len(raw) <= 65536 else None
+        except (OSError, ValueError):
+            continue  # Missing/ambiguous evidence never authorizes a resume.
+        if (isinstance(value, dict) and value.get("thread_id") == thread
+                and value.get("state") in ("enqueued", "consumed_or_started", "started")
+                and value.get("queue_message_id") in queues[0]):
+            return True
+    return False
 
 
 class _BoundCatalog:
@@ -93,6 +122,8 @@ class LinuxThreadOwner:
         self._next_continuation_check = 0.0
         self._idle_since = None
         self._parked_rollout = None
+        self.just_parked = False
+        self.node_local = control_state_home(binding.codex_home) != binding.codex_home
         if continue_interrupted:
             from .linux_continuation import LinuxContinuation
             self.continuation = LinuxContinuation(binding, self.service.queue_dispatcher, self.service.notifier)
@@ -171,6 +202,7 @@ class LinuxThreadOwner:
             raise LinuxBindingError("linux_app_server_thread_mismatch")
 
     def step(self, *, observe: bool) -> Dict[str, Any]:
+        self.just_parked = False
         workspace = self.binding.workspace(self.binding.load())
         continuation_checked = False
         with ExitStack() as admitted:
@@ -203,7 +235,8 @@ class LinuxThreadOwner:
             except (ControlBusy, StoreBusyError):
                 return self._status("standby", "control_operation_in_progress")
             result = self._status("owned")
-        if observe and result["owner_state"] in ("owned", "observing", "waiting_for_attach", "parked"):
+        if (observe and result["owner_state"] in ("owned", "observing", "waiting_for_attach", "parked")
+                and (not self.node_local or result["owner_state"] in ("owned", "observing") or self.just_parked)):
             cycle = self.service.run_once()
             if cycle.reason != "service_cycle_lock_held":
                 if (cycle.status == "completed" and len(cycle.workspaces) == 1
@@ -239,11 +272,21 @@ class LinuxThreadOwner:
         if writer_pid(self.binding.codex_home, self.thread) != self.client.process.pid:
             raise LinuxBindingError("linux_writer_changed")
         stamp = self._rollout_stamp(exact_thread(self.binding.codex_home, workspace))
+        store = self._node_store()
+        if store is not None:
+            value = store.read()
+            value["node_parked"] = True
+            control_atomic_json(store.path, value)
         self.client.close()
         self.client = None
         record_writer_pid(None)
         self._parked_rollout = stamp
+        self.just_parked = True
         return True
+
+    def _node_store(self):
+        selected = current_control()
+        return selected[0] if self.node_local and selected is not None else None
 
     def _park_idle(self, workspace, result):
         # Monitoring/Slack ownership does not require an idle native writer.
@@ -279,6 +322,12 @@ class LinuxThreadOwner:
             if pid is not None:
                 if not vscode_writer(pid):
                     raise LinuxBindingError("linux_conflicting_writer")
+                store = self._node_store()
+                if store is not None:
+                    current = store.read()
+                    if current.get("node_parked") is True:
+                        current["node_parked"] = False
+                        control_atomic_json(store.path, current)
                 # The exact native writer remains untouched. Observation and
                 # completion delivery do not require owning its process.
                 self._parked_rollout = None
@@ -287,10 +336,20 @@ class LinuxThreadOwner:
             if self.yield_requested:
                 self._thread_status("unknown")
                 return self._status("waiting_for_attach")
+            store = self._node_store()
+            if store is not None and store.read().get("node_parked") is True:
+                # A shared transcript or another node's queue entry is not
+                # evidence that this node should reopen its idle conversation.
+                if not node_has_queued_wake(self.binding.codex_home, self.thread):
+                    return self._status("parked")
             if (self._parked_rollout == self._rollout_stamp(rollout)
                     and pending_count(self.binding.codex_home, self.thread) == 0):
                 return self._status("parked")
             self._resume(workspace)
+            if store is not None:
+                current = store.read()
+                current["node_parked"] = False
+                control_atomic_json(store.path, current)
         else:
             self.client.pump(timeout=0.01)
             if pid != self.client.process.pid:

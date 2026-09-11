@@ -10,7 +10,7 @@ import uuid
 
 from .control_context import acting_as
 from .app_server import AppServerError
-from .control_state import ControlBusy, ControlError, ControlStore, control_atomic_json, control_read_json
+from .control_state import ControlBusy, ControlError, ControlStore, control_atomic_json, control_read_json, control_root, control_state_home, control_native_repo
 from .linux_binding import LinuxBinding, exact_thread, locality_identity, reservation_path
 from .linux_owner import LinuxThreadOwner, writer_pid, vscode_writer
 from .linux_health import owner_failure_reason
@@ -24,7 +24,7 @@ from .slack_mapping import SlackRelayTarget
 
 def bind_for_operator(binding, workspace, lease_seconds):
     """Keep manual recovery on the same fence once automatic mode was activated."""
-    path = binding.codex_home / "watchdog-control" / workspace.session_id / "owner.json"
+    path = control_root(binding.codex_home) / workspace.session_id / "owner.json"
     if not path.exists():
         return binding.bind(workspace, lease_seconds)
     store = ControlStore(binding.codex_home, workspace.session_id, workspace.repo_root)
@@ -86,6 +86,10 @@ class LinuxAutoWatchdog:
                  service_factory=MvpWatchdogService):
         self.runtime = Path(runtime).resolve()
         self.codex_home = Path(codex_home).resolve()
+        node = control_state_home(self.codex_home)
+        self.node_local = node != self.codex_home
+        if self.node_local and node not in self.runtime.parents:
+            raise ControlError("control_node_runtime_mismatch")
         self.executable = executable
         self.exclude = tuple(str(value).casefold() for value in exclude)
         self.threads = frozenset(threads)
@@ -199,7 +203,9 @@ class LinuxAutoWatchdog:
 
     def step(self, *, observe=True):
         results = []
-        paths = sorted((self.codex_home / "watchdog-control").glob("*/owner.json"))
+        if self.node_local and not self.stopping:
+            results.extend(self._discover_native())
+        paths = sorted((control_root(self.codex_home)).glob("*/owner.json"))
         for path in paths:
             thread = path.parent.name
             if self.threads and thread not in self.threads:
@@ -252,7 +258,9 @@ class LinuxAutoWatchdog:
                     with store.guard(token) as current:
                         current["writer_pid"] = owner.client.process.pid if owner.client else None
                         control_atomic_json(store.path, current)
-                    if result["owner_state"] in ("owned", "observing", "waiting_for_attach", "parked") and observe:
+                    if (result["owner_state"] in ("owned", "observing", "waiting_for_attach", "parked") and observe
+                            and (not self.node_local or result["owner_state"] in ("owned", "observing")
+                                 or owner.just_parked)):
                         cycle = self._cycle(item)
                         if cycle.status != "completed":
                             raise ControlError("control_observation_failed")
@@ -302,10 +310,35 @@ class LinuxAutoWatchdog:
                 results.append(blocked)
         return results
 
+    def _discover_native(self):
+        results = []
+        for lock in sorted((self.codex_home / "thread-writer-locks").glob("*.lock")):
+            try:
+                thread = str(uuid.UUID(lock.stem))
+            except ValueError:
+                continue
+            if self.threads and thread not in self.threads:
+                continue
+            if (control_root(self.codex_home) / thread / "owner.json").exists():
+                continue
+            try:
+                if self._writer_kind(thread) != "vscode":
+                    continue
+                repo = control_native_repo(self.codex_home, thread)
+                if self._excluded(repo) or self.repos and Path(repo) not in self.repos:
+                    continue
+                workspace = TrackedWorkspace.create("node-" + thread, Path(repo), thread)
+                exact_thread(self.codex_home, workspace)
+                self.store_factory(self.codex_home, thread, repo).enroll_node()
+            except (ControlError, ValueError, OSError) as exc:
+                results.append(dict(thread_sha256=sha256_text(thread), state="blocked",
+                                    reason=owner_failure_reason(exc)))
+        return results
+
     def run(self, interval_seconds=5, emit=None):
         if not 1 <= interval_seconds <= 60:
             raise ControlError("control_interval_must_be_1_to_60_seconds")
-        root = self.codex_home / "watchdog-control"
+        root = control_root(self.codex_home)
         handlers = {}
         try:
             with FileLock(root / "agent.lock"):

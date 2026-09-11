@@ -17,6 +17,7 @@ import uuid
 from .storage import FileLock, InstructionStore, StoreBusyError
 from .workspace_registry import TrackedWorkspace
 from .control_context import effect_guard
+from .control_state import control_binding_root, control_root, control_state_home
 
 
 class LinuxBindingError(ValueError):
@@ -36,7 +37,7 @@ def read_json(path: Path) -> Dict[str, Any]:
 
 
 def reservation_path(codex_home: Path, thread: str) -> Path:
-    return codex_home / "watchdog-linux" / (str(uuid.UUID(thread)) + ".json")
+    return control_binding_root(codex_home) / (str(uuid.UUID(thread)) + ".json")
 
 
 def runtime_identity(runtime: Path) -> str:
@@ -107,6 +108,9 @@ class LinuxBinding:
     def __init__(self, runtime: Path, codex_home: Path) -> None:
         self.runtime = runtime.resolve()
         self.codex_home = codex_home.resolve()
+        root = control_state_home(self.codex_home)
+        if root != self.codex_home and root not in self.runtime.parents:
+            raise LinuxBindingError("linux_node_runtime_outside_namespace")
         self.pointer = self.runtime / "linux" / "binding.json"
 
     def load(self) -> Dict[str, Any]:
@@ -228,7 +232,7 @@ class LinuxBinding:
         value = self.load()
         thread = value["thread_id"]
         workspace = self.workspace(value)
-        path = self.codex_home / "watchdog-control" / thread / "owner.json"
+        path = control_root(self.codex_home) / thread / "owner.json"
         coordinated = path.exists()
         reservation = reservation_path(self.codex_home, thread)
         deadline = monotonic() + 1.0

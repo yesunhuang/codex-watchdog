@@ -13,6 +13,8 @@ import json
 import math
 import os
 import re
+import socket
+import sys
 from pathlib import Path
 import tempfile
 import time
@@ -86,6 +88,55 @@ def control_read_json(path):
         raise ControlError("control_record_unreadable")
 
 
+def control_node_name():
+    name = socket.gethostname()
+    if re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}", name) is None:
+        raise ControlError("control_node_name_invalid")
+    return name
+
+
+def control_node_directory(codex_home):
+    return Path(codex_home).resolve() / "watchdog-nodes" / control_node_name()
+
+
+def control_state_home(codex_home):
+    """Opt-in host-local state; native Codex databases/locks never move."""
+    home = Path(codex_home).resolve()
+    if sys.platform != "linux":
+        return home
+    node = control_node_directory(home)
+    marker = node / "node.json"
+    if not marker.exists() and not marker.is_symlink():
+        return home
+    value = control_read_json(marker)
+    if (value.get("node") != control_node_name() or value.get("codex_home") != str(home)
+            or node.is_symlink() or marker.is_symlink() or node.resolve() != node):
+        raise ControlError("control_node_configuration_mismatch")
+    return node
+
+
+def control_root(codex_home):
+    return control_state_home(codex_home) / "watchdog-control"
+
+
+def control_binding_root(codex_home):
+    return control_state_home(codex_home) / "watchdog-linux"
+
+
+def control_native_repo(codex_home, thread):
+    import sqlite3
+    try:
+        path = Path(codex_home).resolve() / "state_5.sqlite"
+        with contextlib.closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+            rows = db.execute("SELECT cwd FROM threads WHERE id=? AND archived=0 "
+                              "AND source='vscode' AND thread_source='user'", (thread,)).fetchall()
+        if len(rows) == 1 and isinstance(rows[0][0], str) and Path(rows[0][0]).is_absolute():
+            return str(Path(rows[0][0]).resolve())
+    except (OSError, sqlite3.Error):
+        pass
+    raise ControlError("control_exact_thread_unavailable")
+
+
 def control_kernel_owner(lock):
     import fcntl
     try:
@@ -145,7 +196,8 @@ class ControlStore:
             raise ControlError("control_thread_invalid")
         self.thread_id = thread_id
         self.repo_path = str(Path(repo_path).resolve())
-        self.directory = Path(codex_home) / "watchdog-control" / thread_id
+        self.codex_home = Path(codex_home).resolve()
+        self.directory = control_root(self.codex_home) / thread_id
         self.path = self.directory / "owner.json"
         self.lock_path = self.directory / "owner.lock"
         self.clock = clock
@@ -156,6 +208,28 @@ class ControlStore:
             except (OSError, ValueError):
                 raise ControlError("control_boot_identity_unavailable")
 
+    def enroll_node(self):
+        """Enroll only a proven local native writer, never shared-home history."""
+        if control_state_home(self.codex_home) == self.codex_home:
+            raise ControlError("control_node_not_configured")
+        with control_file_lock(self.lock_path):
+            if self.path.exists():
+                return False
+            pid = control_kernel_owner(self.codex_home / "thread-writer-locks" / (self.thread_id + ".lock"))
+            if (pid is None or not control_vscode_writer(pid)
+                    or control_native_repo(self.codex_home, self.thread_id) != self.repo_path):
+                raise ControlError("control_initial_attachment_unverified")
+            control_atomic_json(self.path, dict(
+                schema_version=1, thread_id=self.thread_id, repo_path=self.repo_path,
+                epoch=0, owner=None, state="HANDOFF", attached_request=None, external_effect=None,
+                runtime_path=str(self.directory / "runtime"), remote_state=None,
+                native_boot_id=self.boot_id,
+                remote_target=dict(authority="ssh-remote+" + control_node_name(),
+                                   repo_path=self.repo_path,
+                                   storage_key=hashlib.sha256(self.repo_path.encode("utf-8")).hexdigest()[:32]),
+            ))
+            return True
+
     def read(self):
         value = control_read_json(self.path)
         if (value.get("thread_id") != self.thread_id or value.get("repo_path") != self.repo_path
@@ -163,6 +237,9 @@ class ControlStore:
                 or value.get("state") not in ("ATTACHED_LOCAL", "HANDOFF", "DETACHED_REMOTE")
                 or "owner" not in value or "external_effect" not in value):
             raise ControlError("control_record_mismatch")
+        if (control_state_home(self.codex_home) != self.codex_home
+                and value.get("runtime_path") not in (None, str(self.directory / "runtime"))):
+            raise ControlError("control_node_runtime_mismatch")
         owner = value["owner"]
         if owner is not None:
             if (not isinstance(owner, dict) or owner.get("role") not in ("local", "remote")
@@ -254,7 +331,7 @@ class ControlStore:
                     raise ControlError("control_initial_attachment_unverified")
                 value = dict(schema_version=1, thread_id=self.thread_id, repo_path=self.repo_path,
                              epoch=0, owner=None, state="HANDOFF", attached_request=None,
-                             external_effect=None)
+                             external_effect=None, native_boot_id=self.boot_id)
             else:
                 value = self.read()
             self._recover_completed_external(value)
@@ -287,6 +364,16 @@ class ControlStore:
         identity = self._identity(instance, locality, ttl)
         with control_file_lock(self.lock_path):
             value = self.read()  # Remote never invents an unobserved target.
+            if control_state_home(self.codex_home) != self.codex_home:
+                if writer == "vscode":
+                    pid = control_kernel_owner(self.codex_home / "thread-writer-locks" / (self.thread_id + ".lock"))
+                    if pid is None or not control_vscode_writer(pid):
+                        return None
+                    value["native_boot_id"] = self.boot_id
+                elif value.get("native_boot_id") != self.boot_id:
+                    # A reboot is not proof that this shared-home thread still
+                    # belongs to this node. Re-enroll through its native writer.
+                    return None
             if value.get("auto_paused") is True and not manual:
                 return None
             self._recover_completed_external(value)
@@ -329,7 +416,7 @@ class ControlStore:
         if value["state"] != "HANDOFF":
             return False
         if value["owner"].get("host_observer") is True:
-            lock = self.directory.parent.parent / "thread-writer-locks" / (self.thread_id + ".lock")
+            lock = self.codex_home / "thread-writer-locks" / (self.thread_id + ".lock")
             pid = control_kernel_owner(lock)
             if pid is not None and control_vscode_writer(pid):
                 return False
@@ -346,7 +433,7 @@ class ControlStore:
                 # still-held writer on this boot. A surviving writer already
                 # prevents any replacement from claiming detached execution.
                 pid = value.get("writer_pid")
-                lock = self.directory.parent.parent / "thread-writer-locks" / (self.thread_id + ".lock")
+                lock = self.codex_home / "thread-writer-locks" / (self.thread_id + ".lock")
                 if (str(exc) != "control_lease_expired" or token["role"] != "remote"
                         or value["owner"]["boot_id"] != self.boot_id
                         or type(pid) is not int or pid <= 0 or control_kernel_owner(lock) != pid):

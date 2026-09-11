@@ -292,6 +292,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command.startswith("linux-"):
         from .linux_binding import LinuxBinding, LinuxBindingError, locality_identity, read_json
+        from .control_state import control_root
         from .linux_owner import LinuxThreadOwner
         from .platform_adapters import detect_platform_adapter
         from .workspace_registry import TrackedWorkspace
@@ -318,7 +319,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 binding.request_release()
             elif args.command == "linux-run":
                 value = binding.load()
-                if (binding.codex_home / "watchdog-control" / value["thread_id"] / "owner.json").exists():
+                if (control_root(binding.codex_home) / value["thread_id"] / "owner.json").exists():
                     from .linux_auto import LinuxAutoWatchdog
                     return LinuxAutoWatchdog(
                         args.runtime, binding.codex_home, threads=(value["thread_id"],), stop_on_release=True,

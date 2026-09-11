@@ -8,7 +8,7 @@ import sys
 import time
 import uuid
 
-from .control_state import ControlBusy, ControlError, ControlStore, control_file_lock, control_atomic_json
+from .control_state import ControlBusy, ControlError, ControlStore, control_file_lock, control_atomic_json, control_root, control_state_home
 
 
 _capability = ContextVar("watchdog_control_capability", default=None)
@@ -44,7 +44,7 @@ def record_writer_pid(pid):
 def effect_guard(codex_home, thread_id, purpose="state"):
     """No epoch is inferred from a saved runtime or a revived process's PID."""
     thread_id = str(uuid.UUID(thread_id))
-    directory = Path(codex_home).resolve() / "watchdog-control" / thread_id
+    directory = control_root(codex_home) / thread_id
     selected = _capability.get()
     # A caller already inside this exact capability's kernel lock may compose
     # existing queue/notifier code without reacquiring the same advisory lock.
@@ -83,7 +83,7 @@ def current_effect(purpose="state"):
         yield
     else:
         store, token = selected
-        with effect_guard(store.directory.parent.parent, store.thread_id, purpose):
+        with effect_guard(store.codex_home, store.thread_id, purpose):
             yield
 
 
@@ -107,13 +107,18 @@ def _hook_descends_from(pid):
 @contextmanager
 def hook_owner(runtime, codex_home, payload, *, monotonic=time.monotonic, sleep=time.sleep):
     """A hook is delegated by its live first-party writer, never by a saved PID."""
+    root = control_state_home(codex_home)
+    if root != Path(codex_home).resolve():
+        # Existing trusted hook commands may name a legacy shared runtime.
+        # Unbound hook audit state must stay on this node as well.
+        runtime = root / "runtime"
     thread = payload.get("session_id")
     try:
         thread = str(uuid.UUID(thread))
     except (ValueError, TypeError, AttributeError):
         yield runtime
         return
-    path = Path(codex_home) / "watchdog-control" / thread / "owner.json"
+    path = control_root(codex_home) / thread / "owner.json"
     if not path.exists():
         yield runtime
         return

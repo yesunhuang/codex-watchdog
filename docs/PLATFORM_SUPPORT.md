@@ -21,6 +21,19 @@ and launcher capability.
 | macOS Apple Silicon source workflow | **Native E2E verified preview** | Exact live ownership where topology is resolvable, trusted Stop/continuation, queue/restart, and Keychain-backed Slack-only notification/reply/dedup | Shared or unnumbered VS Code window topology still fails closed; Outlook acceptance is separate |
 | macOS 15 ARM64 package | **Developer preview; bounded v0.2.3 real-user E2E verified with a CA override** | Hosted source-free package checks; real-user stable install, Keychain reuse, trusted hooks, exact Slack reply, repeated Stop notification and Git wake in one manual workspace | v0.2.3 needed a CA override and manual rebind recovery; new-version device acceptance is separate; no Developer ID signature or notarization |
 
+On 2026-09-11, the user reported successful manual detached dogfood on Spark
+with no observed issue. This strengthens the Linux remote/server detached path
+beyond generic preview and complements native lifecycle and package checks.
+It is not evidence for Linux local desktop or for every cluster topology.
+
+The local VS Code discovery defect addressed in v0.2.21 was reproduced and
+natively accepted first on Windows. The resolver is shared: Windows can prove
+writer PIDs through Restart Manager and Linux through local kernel lock/process
+evidence. `writer_process_probe` currently supplies **no macOS writer PID**.
+Consequently, macOS cannot use the missing-log fallback when routing evidence is
+also unavailable. Such cases still fail closed; rebuilding the shared source
+does not mean that this macOS limitation has been fixed.
+
 Hosted CI is not full E2E validation. A platform advances from **CI verified** to
 **native-probe verified** only after the diagnostic and relevant native probes
 run on that operating system. It advances to **full E2E verified** only after a
@@ -115,10 +128,10 @@ codex-watchdog --runtime "$HOME/.local/state/codex-watchdog/runtime" run --inter
 codex-watchdog --runtime "$HOME/Library/Application Support/CodexWatchdog/runtime" run --interval 120
 ```
 
-These are foreground commands. Use Ctrl-C to stop them. A systemd user unit,
-launchd agent, login item, or other background-service installer is not yet
-provided; do not claim one exists and do not run the preview unattended before
-native validation.
+These are foreground commands. Use Ctrl-C to stop them. The Linux package also
+offers opt-in [node-local systemd setup](LINUX_NODE_SETUP.md), separately from
+desktop acceptance. A launchd agent or login-item installer is not provided;
+do not run a desktop preview unattended before native validation.
 
 ## Platform notes
 
