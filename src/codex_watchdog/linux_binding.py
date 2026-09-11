@@ -193,6 +193,23 @@ class LinuxBinding:
         with effect_guard(self.codex_home, value["thread_id"], "writer"):
             return self._set_state(state)
 
+    def renew_lease(self, thread: str) -> None:
+        """Extend only a live armed reservation; never rearm an expired/released one.
+
+        The running owner calls this under its writer effect guard and lifetime
+        locks. Serialize with sends and operator release, preserving all fields.
+        """
+        path = reservation_path(self.codex_home, thread)
+        with FileLock(path.with_suffix(".send.lock")):
+            value = self.load()
+            if value["thread_id"] != thread:
+                raise LinuxBindingError("linux_binding_mismatch")
+            now = time.time()
+            remaining = value["expires_at"] - now
+            if value["state"] == "armed" and 0 < remaining <= 3600:
+                value["expires_at"] = now + 86400
+                InstructionStore._atomic_json(path, value)
+
     def _set_state(self, state: str) -> Dict[str, Any]:
         if state not in ("release_requested", "released"):
             raise LinuxBindingError("linux_invalid_state")

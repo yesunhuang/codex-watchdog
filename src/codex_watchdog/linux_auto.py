@@ -72,6 +72,7 @@ class HostRemoteAdapter:
 
 class LinuxAutoWatchdog:
     def __init__(self, runtime, codex_home, *, executable=None, exclude=(), threads=(), stop_on_release=False,
+                 renew_lease=False,
                  owner_factory=LinuxThreadOwner, store_factory=ControlStore,
                  service_factory=MvpWatchdogService):
         self.runtime = Path(runtime).resolve()
@@ -80,6 +81,7 @@ class LinuxAutoWatchdog:
         self.exclude = tuple(str(value).casefold() for value in exclude)
         self.threads = frozenset(threads)
         self.stop_on_release = stop_on_release
+        self.renew_lease = renew_lease
         self.instance = str(uuid.uuid4())
         self.locality = locality_identity()
         self.owner_factory = owner_factory
@@ -122,7 +124,8 @@ class LinuxAutoWatchdog:
                 )
                 relay.start()
                 locks.callback(relay.close)
-            owner = self.owner_factory(binding, executable=self.executable, service=service)
+            owner_options = {"renew_lease": True} if self.renew_lease else {}
+            owner = self.owner_factory(binding, executable=self.executable, service=service, **owner_options)
             item = dict(store=store, token=token, owner=owner, service=service, target=target, locks=locks)
             self.controllers[store.thread_id] = item
             return item

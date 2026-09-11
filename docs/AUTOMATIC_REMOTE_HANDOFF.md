@@ -54,6 +54,18 @@ as immutable metadata; incoming replies still pass allowlist and ownership check
 Tokens, OAuth credentials and provider configuration are not copied between hosts.
 A detached Linux process uses its existing local notification settings.
 
+For a persistent service bound with `linux-bind`, use
+`linux-run --interval 30 --renew-lease`. Without this opt-in, the explicit binding
+still expires after its configured lease (at most 24 hours). Renewal extends only
+an armed, unexpired binding while its controller verifies the existing writer or
+waits behind VS Code. It preserves the same thread and all saved settings.
+`linux-release`, SIGTERM and expired reservations are never rearmed by renewal.
+Use a persistent user service with `Restart=no`, graceful shutdown and logout
+survival enabled; a failure must remain visible instead of forcing another resume.
+Stopping the user service requests idle release. Disable it as well to cancel
+automatic startup. Hosts with shared home directories should pin the unit to the
+verified execution host, since shared files do not imply shared process ownership.
+
 From v0.2.8, detached-owner loss is reported immediately when the owner detects an App Server
 exit, a changed writer, unavailable exact-thread metadata, or an observation
 failure. Automatic mode remains blocked without creating a replacement thread;
