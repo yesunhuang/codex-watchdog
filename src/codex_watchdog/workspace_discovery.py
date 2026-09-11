@@ -206,10 +206,15 @@ def codex_log_session_states(
     path: Path, session_ids: Iterable[str],
 ) -> Dict[str, Tuple[Optional[str], Optional[bool]]]:
     """Read exact routing markers from one window and App Server generation."""
+    return _codex_log_session_evidence(path, session_ids)[0]
+
+
+def _codex_log_session_evidence(path: Path, session_ids: Iterable[str]):
     states = {session: (None, None) for session in session_ids
               if _canonical_session_id(session) == session}
     if not states or not path.is_file():
-        return states
+        return states, None
+    markers = set()
     conversation = re.compile(
         rb"(?:^|\s)conversationId=(" + b"|".join(
             re.escape(session.encode("ascii")) for session in states
@@ -220,6 +225,7 @@ def codex_log_session_states(
             for line in handle:
                 if b"[CodexMcpConnection] Spawning codex app-server" in line:
                     states = dict.fromkeys(states, (None, None))
+                    markers.clear()
                     continue
                 matched = conversation.search(line)
                 if matched is None:
@@ -227,11 +233,13 @@ def codex_log_session_states(
                 session = matched.group(1).decode("ascii")
                 role, active = states[session]
                 if b"thread_stream_role_changed" in line:
+                    markers.add(session)
                     role = None
                     match = re.search(rb"(?:^|\s)role=([^\s]+)(?=\s|$)", line)
                     if match is not None:
                         role = match.group(1).decode("ascii", errors="ignore")
                 elif b"maybe_resume_success" in line:
+                    markers.add(session)
                     role = None
                     match = re.search(
                         rb"(?:^|\s)assignedStreamRole=([^\s]+)(?=\s|$)", line
@@ -242,15 +250,17 @@ def codex_log_session_states(
                     b"maybe_resume_failed" in line
                     or b"inactive_thread_unsubscribed" in line
                 ):
+                    markers.add(session)
                     role = None
                     active = None
                 elif b"thread_stream_view_activity_changed" in line:
+                    markers.add(session)
                     match = re.search(rb"(?:^|\s)active=(true|false)(?=\s|$)", line)
                     active = match.group(1) == b"true" if match is not None else None
                 states[session] = (role, active)
     except OSError:
-        return dict.fromkeys(states, (None, None))
-    return states
+        return dict.fromkeys(states, (None, None)), None
+    return states, markers
 
 
 @dataclass(frozen=True)
@@ -457,7 +467,7 @@ class CodexSessionResolver:
         )
         identities = {_path_identity(path) for path in paths}
         loaded, database_status = self._database_candidates(identities)
-        states = codex_log_session_states(codex_log, loaded)
+        states, markers = _codex_log_session_evidence(codex_log, loaded)
         database_candidates = {
             session for session in loaded if self.owner_probe(codex_log, session)
         }
@@ -488,6 +498,24 @@ class CodexSessionResolver:
             if not self.lock_probe(lock):
                 return SessionResolution("unresolved", None, None, "vscode_thread_owner_unverified")
         database_candidates.update(followers)
+
+        # Native logs can discard their earlier routing markers while the same
+        # App Server still owns a thread. A unique loaded/cached exact thread
+        # can instead be proved by this window's actual OS writer PID. Never
+        # use this for a peer owner, ambiguous chat selection, unreadable log,
+        # or explicit routing failure/inactivity in the current generation.
+        if not database_candidates and len(loaded) == 1 and markers is not None:
+            session = next(iter(loaded))
+            current = [window for window in live_windows if window.codex_log == codex_log]
+            if (session not in markers and window_sessions is not None
+                    and session in window_sessions and len(current) == 1
+                    and current[0].codex_app_server_pid is not None):
+                lock = self.codex_home / "thread-writer-locks" / f"{session}.lock"
+                if (self.writer_process_probe(lock) == current[0].codex_app_server_pid
+                        and self.lock_probe(lock)):
+                    return SessionResolution(
+                        "resolved", session, "codex_state_vscode_native_writer", None,
+                    )
 
         def resolved(session: str, source: str) -> SessionResolution:
             if session in followers:

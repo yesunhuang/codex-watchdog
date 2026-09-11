@@ -156,6 +156,7 @@ WatchDog はその policy を理解したり enforcement したりする必要�
 - Slack notification、Outlook/SMTP fallback、local audit trail。
 - **Parrot Dog** による allowlisted Slack reply の exact-thread relay。
 - local と VS Code Remote-SSH workspace を発見し、session identity を混同しない。
+- 古いルーティングログが失われても、現在のウィンドウの native writer を確認して正確な既存 thread を検出。
 - Remote-SSH detach 後の Linux persistent detached owner による same-thread takeover。
 - ownership / fencing により local と detached authority を調整し、stale owner を拒否。
 - すべての WatchDog locality で zero-Git-mutation boundary を維持。

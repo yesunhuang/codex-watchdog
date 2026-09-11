@@ -147,6 +147,7 @@ Codex 自己执行工作并拥有 Git，然后把状态压缩进 checkpoint prog
 - 发送 Slack 通知，支持 Outlook/SMTP fallback 与本地 audit trail。
 - 通过 **Parrot Dog** 把白名单 Slack 回复转回对应的 exact thread。
 - 自动发现本地与 VS Code Remote-SSH workspace，并保持不同 session identity 不串线。
+- 本地 VS Code 的旧路由日志消失后，仍可通过当前窗口的原生写入进程验证准确的现有线程。
 - 在 Remote-SSH 关闭后支持 Linux persistent detached owner 接管同一 thread。
 - 用 ownership/fencing 协调本地与 detached authority，阻止 stale owner 在交接后继续操作。
 - 在所有 WatchDog locality 上坚持 zero-Git-mutation 边界。
