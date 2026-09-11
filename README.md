@@ -228,6 +228,10 @@ For persistent same-thread takeover after Remote-SSH closes, see
 owner is currently Linux-specific; macOS/Windows remote-owner parity is not yet
 claimed.
 
+From v0.2.17, the running Linux WatchDog monitors its enrolled threads and sends
+their completion notifications even while VS Code is attached. The laptop
+WatchDog provides fallback monitoring when the host WatchDog is unavailable.
+
 > [!IMPORTANT]
 > Upgrades preserve compatible user state by default. WatchDog reuses existing
 > runtime/profile/provider settings where compatible and does not treat

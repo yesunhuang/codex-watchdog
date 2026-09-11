@@ -211,6 +211,10 @@ Remote-SSH を閉じた後も remote host が same thread を引き継ぐ構成�
 persistent remote owner は現在 **Linux-specific** であり、macOS / Windows remote owner
 との feature parity はまだ claim していません。
 
+v0.2.17 以降、稼働中の Linux WatchDog は登録済みの会話を優先して監視し、VS Code の
+接続中も完了通知を送ります。ホストの WatchDog が利用できない場合は、ノート PC の
+WatchDog が監視を引き継ぎます。
+
 > [!IMPORTANT]
 > upgrade は compatible な user state をデフォルトで保持する設計です。WatchDog は既存の
 > runtime / profile / provider settings を可能な限り再利用し、再設定を通常の upgrade 手順に

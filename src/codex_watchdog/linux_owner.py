@@ -84,6 +84,7 @@ class LinuxThreadOwner:
         self.thread_status = "unknown"
         self.approval_required = False
         self.release_requested = False
+        self.yield_requested = False
         self.status_path = binding.runtime / "linux" / "status.json"
         self._last_status: Optional[dict] = None
         self.continuation = None
@@ -159,13 +160,14 @@ class LinuxThreadOwner:
                 return self._status("standby", "control_operation_in_progress")
             result = self._owned_step(observe=False)
             if (self.renew_lease and not self.release_requested
-                    and result["owner_state"] in ("owned", "waiting_for_detach")):
+                    and result["owner_state"] in ("owned", "observing", "waiting_for_attach")):
                 try:
                     self.binding.renew_lease(self.thread)
                 except StoreBusyError:
                     pass  # Retry next owner check; a released/expired lease stays fenced.
             if (self.continuation is not None and result["owner_state"] == "owned"
-                    and not self.release_requested and time.monotonic() >= self._next_continuation_check):
+                    and not self.release_requested and not self.yield_requested
+                    and time.monotonic() >= self._next_continuation_check):
                 try:
                     self.continuation_status = self.continuation.step(self, workspace)
                 except StoreBusyError:
@@ -179,7 +181,7 @@ class LinuxThreadOwner:
             except (ControlBusy, StoreBusyError):
                 return self._status("standby", "control_operation_in_progress")
             result = self._status("owned")
-        if observe and result["owner_state"] == "owned":
+        if observe and result["owner_state"] in ("owned", "observing", "waiting_for_attach"):
             cycle = self.service.run_once()
             if cycle.reason != "service_cycle_lock_held":
                 if (cycle.status == "completed" and len(cycle.workspaces) == 1
@@ -215,15 +217,19 @@ class LinuxThreadOwner:
             if pid is not None:
                 if not vscode_writer(pid):
                     raise LinuxBindingError("linux_conflicting_writer")
-                # The explicit binding authorizes this target, but the VS Code
-                # process still owns execution. Never resume or send from here.
-                return self._status("waiting_for_detach")
+                # The exact native writer remains untouched. Observation and
+                # completion delivery do not require owning its process.
+                self.thread_status = "unknown"
+                return self._status("observing")
+            if self.yield_requested:
+                self.thread_status = "unknown"
+                return self._status("waiting_for_attach")
             self._resume(workspace)
         else:
             self.client.pump(timeout=0.01)
             if pid != self.client.process.pid:
                 raise LinuxBindingError("linux_writer_changed")
-        if releasing:
+        if releasing or self.yield_requested:
             if self.thread_status == "idle" and pending_count(self.binding.codex_home, self.thread) == 0:
                 # A cached idle event alone can precede a consumed queued turn.
                 # Re-read the live first-party status while the client handles
@@ -239,8 +245,11 @@ class LinuxThreadOwner:
                     self.client.close()
                     self.client = None
                     record_writer_pid(None)
-                    self.binding.set_state("released")
-                    return self._status("released")
+                    if releasing:
+                        self.binding.set_state("released")
+                        return self._status("released")
+                    self.thread_status = "unknown"
+                    return self._status("waiting_for_attach")
             return self._status("releasing")
         if observe:
             self.service.run_once()

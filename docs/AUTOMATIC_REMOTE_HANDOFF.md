@@ -31,15 +31,24 @@ python -m codex_watchdog --runtime /absolute/existing/runtime linux-auto-run --i
 
 The desktop's existing Remote-SSH observer automatically identifies eligible
 threads. No bind command is needed for this path. The Linux process only considers
-threads previously identified by an attached desktop and waits while VS Code
-holds their writer. Use `--exclude workspace-name` to exclude a workspace.
+threads previously identified by an attached desktop. From v0.2.17, a running
+Linux WatchDog monitors those threads and sends their completion notifications
+using its local settings even while VS Code holds the native writer. The desktop
+WatchDog is the fallback when the host observer's lease expires or it releases
+ownership. Use `--exclude workspace-name` to exclude a workspace, or repeat
+`--thread UUID` to restrict automatic mode to specific existing threads.
 
 The remote Codex home contains one `watchdog-control/<thread>/owner.json` record,
-protected by a kernel file lock. `ATTACHED_LOCAL` gives an attached desktop control
-priority. `HANDOFF` requests an idle boundary. `DETACHED_REMOTE` permits the Linux
-process to resume the same exact existing thread. Every grant advances the epoch.
-An expired lease cannot displace a still-held remote writer. Reattachment requests
-release; it does not interrupt an active turn or replay an interrupted command.
+protected by a kernel file lock. `ATTACHED_LOCAL` records desktop fallback;
+`DETACHED_REMOTE` records the host observer. These legacy names describe WatchDog
+authority, not which process currently owns Codex execution. A host observer
+reports `observing` when VS Code owns execution and `owned` when it owns the
+detached writer. `HANDOFF` requests an idle boundary to return only that writer
+to VS Code; the host continues checking completions while waiting for attachment.
+Every ownership grant advances the epoch. An unresolved external send blocks
+ownership changes, and an expired lease cannot displace a still-held remote
+writer. Older desktop helpers remain compatible with host observation priority.
+No active turn is interrupted or command replayed merely to transfer ownership.
 
 If VS Code starts resuming while Linux is still releasing, its first resume
 request can remain pending after control returns. In that workspace, run

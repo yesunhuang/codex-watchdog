@@ -49,7 +49,7 @@ def effect_guard(codex_home, thread_id, purpose="state"):
     # A caller already inside this exact capability's kernel lock may compose
     # existing queue/notifier code without reacquiring the same advisory lock.
     if _held.get() == (str(directory), selected[1] if selected is not None else None):
-        if selected is not None and purpose == "queue" and selected[0].read()["state"] == "HANDOFF":
+        if selected is not None and purpose == "queue" and selected[0].handback_pending(selected[0].read()):
             raise ControlError("control_handback_pending")
         yield
         return
@@ -126,7 +126,8 @@ def hook_owner(runtime, codex_home, payload, *, monotonic=time.monotonic, sleep=
     pid = writer_pid(Path(codex_home), thread)
     if (owner is None or pid is None or not _hook_descends_from(pid)
             or owner["role"] == "local" and not vscode_writer(pid)
-            or owner["role"] == "remote" and value.get("writer_pid") != pid):
+            or owner["role"] == "remote" and value.get("writer_pid") != pid
+            and not (owner.get("host_observer") is True and vscode_writer(pid))):
         raise ControlError("control_hook_writer_unverified")
     selected_runtime = value.get("runtime_path")
     if not isinstance(selected_runtime, str) or not Path(selected_runtime).is_absolute():

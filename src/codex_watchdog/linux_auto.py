@@ -11,7 +11,7 @@ from .control_context import acting_as
 from .app_server import AppServerError
 from .control_state import ControlBusy, ControlError, ControlStore, control_atomic_json, control_read_json
 from .linux_binding import LinuxBinding, exact_thread, locality_identity, reservation_path
-from .linux_owner import LinuxThreadOwner, writer_pid
+from .linux_owner import LinuxThreadOwner, writer_pid, vscode_writer
 from .linux_health import owner_failure_reason
 from .models import sha256_text
 from .mvp_service import MvpWatchdogService
@@ -44,7 +44,7 @@ def bind_for_operator(binding, workspace, lease_seconds):
 
 
 class HostRemoteAdapter:
-    """The same helper and journals, called locally after detached ownership."""
+    """The same helper and journals, called by the observer on the thread's host."""
     supports_control = True
 
     def __init__(self, codex_home):
@@ -93,6 +93,16 @@ class LinuxAutoWatchdog:
 
     def _excluded(self, repo):
         return str(repo).casefold() in self.exclude or Path(repo).name.casefold() in self.exclude
+
+    def _writer_kind(self, thread, owner=None):
+        pid = writer_pid(self.codex_home, thread)
+        if pid is None:
+            return "absent"
+        if vscode_writer(pid):
+            return "vscode"
+        if owner is not None and owner.client is not None and pid == owner.client.process.pid:
+            return "remote"
+        return "unknown"
 
     def _start(self, store, token, value):
         runtime = Path(value["runtime_path"])
@@ -169,9 +179,8 @@ class LinuxAutoWatchdog:
                 if item is None:
                     if self.stopping:
                         continue
-                    pid = writer_pid(self.codex_home, thread)
                     token = store.claim_remote(self.instance, self.locality,
-                                               "absent" if pid is None else "present", ttl=120)
+                                               self._writer_kind(thread), ttl=120, host_observer=True)
                     if token is None:
                         results.append(dict(thread_sha256=sha256_text(thread), epoch=value["epoch"], state="standby"))
                         continue
@@ -179,14 +188,18 @@ class LinuxAutoWatchdog:
                         with acting_as(store, token):
                             item = self._start(store, token, store.read())
                     except Exception:
-                        if writer_pid(self.codex_home, thread) is None:
-                            store.release_remote(token, "absent")
+                        kind = self._writer_kind(thread)
+                        if kind in ("absent", "vscode"):
+                            store.release_remote(token, kind)
                         raise
                 token, owner = item["token"], item["owner"]
                 store.renew(token, ttl=120)
                 value = store.read()
-                if self.stopping or value["state"] == "HANDOFF" or value.get("auto_paused") is True:
+                if self.stopping or value.get("auto_paused") is True:
                     owner.release_requested = True
+                kind = self._writer_kind(thread, owner)
+                if kind != "unknown":
+                    owner.yield_requested = store.observe_writer(token, kind)
                 with acting_as(store, token):
                     result = owner.step(observe=False)
                     # Publish the exact current writer PID under the same epoch;
@@ -194,15 +207,16 @@ class LinuxAutoWatchdog:
                     with store.guard(token) as current:
                         current["writer_pid"] = owner.client.process.pid if owner.client else None
                         control_atomic_json(store.path, current)
-                    if result["owner_state"] == "owned" and observe:
+                    if result["owner_state"] in ("owned", "observing", "waiting_for_attach") and observe:
                         cycle = self._cycle(item)
                         if cycle.status != "completed":
                             raise ControlError("control_observation_failed")
                         owner.health.report()
                 if result["owner_state"] == "released":
-                    if writer_pid(self.codex_home, thread) is not None:
+                    kind = self._writer_kind(thread)
+                    if kind not in ("absent", "vscode"):
                         raise ControlError("control_writer_not_released")
-                    store.release_remote(token, "absent")
+                    store.release_remote(token, kind)
                     item["locks"].close()
                     self.controllers.pop(thread)
                     if self.stop_on_release:
@@ -215,6 +229,14 @@ class LinuxAutoWatchdog:
             except (ControlError, AppServerError, StoreBusyError, ValueError, OSError) as exc:
                 reason = owner_failure_reason(exc)
                 blocked = dict(thread_sha256=sha256_text(thread), state="blocked", reason=reason)
+                if (item is not None and item["owner"].client is None
+                        and reason in ("control_stale_epoch", "control_lease_expired")):
+                    # A delayed observer may lose its lease to desktop fallback.
+                    # Drop only our observer resources and acquire a fresh epoch
+                    # next cycle; never revive the stale capability or a writer.
+                    item["locks"].close()
+                    self.controllers.pop(thread)
+                    item = None
                 if (item is not None and not isinstance(exc, (ControlBusy, StoreBusyError))
                         and reason != "control_handback_pending"):
                     try:

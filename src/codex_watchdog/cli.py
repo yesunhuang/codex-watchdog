@@ -92,7 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
                            help="continue an interrupted turn once after acquiring its writer, then notify")
     linux_run.add_argument("--codex-executable", type=_path)
     linux_auto = commands.add_parser(
-        "linux-auto-run", help="remain standby while attached and automatically own exact detached remote threads"
+        "linux-auto-run", help="monitor exact threads on their host and resume them only when detached"
     )
     linux_auto.add_argument("--interval", type=float, default=5)
     linux_auto.add_argument("--thread", action="append", type=_thread_id, default=[],

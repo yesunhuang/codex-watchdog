@@ -41,6 +41,65 @@ def test_initial_attachment_requires_exact_writer_and_remote_never_invents_targe
     assert attached(store)["epoch"] == 1
 
 
+def test_host_priority_fences_live_desktop_and_falls_back_after_host_expiry(control):
+    store, now = control
+    local = attached(store)
+    remote = store.claim_remote("host", "remote-host", "vscode", ttl=30, host_observer=True)
+    assert remote["epoch"] == 2
+    assert store.read()["owner"]["host_observer"] is True
+    with pytest.raises(ControlError, match="stale_epoch"):
+        store.prepare_notification(local, "old", "old")
+    assert store.attach("desktop-one", "desktop-host", "vscode") is None
+    assert store.read()["state"] == "DETACHED_REMOTE"
+    assert store.claim_remote("second-host", "remote-host", "vscode", host_observer=True) is None
+    now[0] += 31
+    fallback = store.attach("desktop-one", "desktop-host", "vscode")
+    assert fallback["epoch"] == 3
+    with pytest.raises(ControlError, match="stale_epoch"):
+        store.renew(remote)
+    assert store.claim_remote("host-returned", "remote-host", "vscode", host_observer=True)["epoch"] == 4
+
+
+def test_host_priority_preserves_uncertain_send_and_completed_receipts(control):
+    store, _ = control
+    local = attached(store)
+    prepared = store.prepare_notification(local, "completion", "fingerprint")
+    before = store.path.read_bytes()
+    with pytest.raises(ControlError, match="external_effect_unresolved"):
+        store.claim_remote("host", "remote-host", "vscode", host_observer=True)
+    assert store.path.read_bytes() == before
+    store.finish_notification(local, "completion", prepared["operation_id"], {"status": "sent"}, ())
+    remote = store.claim_remote("host", "remote-host", "vscode", host_observer=True)
+    assert store.prepare_notification(remote, "completion", "fingerprint")["duplicate"]
+
+
+@pytest.mark.parametrize("writer", ["remote", "unknown", "present"])
+def test_host_priority_never_displaces_unverified_or_other_native_writer(control, writer):
+    store, _ = control
+    attached(store)
+    before = store.path.read_bytes()
+    assert store.claim_remote("host", "remote-host", writer, host_observer=True) is None
+    assert store.path.read_bytes() == before
+
+
+def test_old_desktop_handoff_does_not_block_host_with_verified_vscode_writer(control, monkeypatch):
+    from codex_watchdog import control_state
+    store, _ = control
+    attached(store)
+    token = store.claim_remote("host", "remote-host", "vscode", host_observer=True)
+    # v0.2.14-v0.2.16 helpers request HANDOFF even when VS Code already owns it.
+    with store.guard(token) as value:
+        value.update(state="HANDOFF", attached_request=store._identity("old-desktop", "desktop-host", 900))
+        control_atomic_json(store.path, value)
+    monkeypatch.setattr(control_state, "control_kernel_owner", lambda lock: 777)
+    monkeypatch.setattr(control_state, "control_vscode_writer", lambda pid: pid == 777)
+    with store.guard(token, purpose="queue"):
+        pass
+    assert store.observe_writer(token, "vscode") is False
+    assert store.read()["state"] == "DETACHED_REMOTE" and store.read()["epoch"] == 2
+    assert store.read()["attached_request"] is None
+
+
 def test_attach_standby_detach_remote_restart_reattach_handback(control):
     store, now = control
     local = attached(store)
