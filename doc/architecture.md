@@ -398,9 +398,14 @@ hosting are tracked separately.
   instruction must name its exact session.
 - Automatic workspace records are ephemeral and are refreshed each cycle;
   manual overrides alone are durable registry entries.
-- A live extension host, window-scoped resource, held writer lock, and current
-  same-window owner role are all necessary for automatic targeting; none is
-  sufficient alone.
+- Automatic targeting requires a live extension host, exact local thread/workspace
+  metadata, a held writer lock and current ownership evidence. An explicitly active
+  follower view is accepted only when the OS lock holder matches another live
+  VS Code App Server whose current-generation log owns that exact thread. Windows
+  uses a resource-user query; Linux uses kernel FLOCK evidence. Other hosts keep
+  failing closed for this case. Cache entries and timestamps are never authority.
+  The mismatch remains visible and generates a deduplicated attention notification;
+  discovery does not transfer Codex's writer or change the thread's repository.
 - Prompts are stored in plaintext in the local runtime and briefly appear in
   the queue process command line.
 - Assistant output is represented in durable audits only by SHA-256 and

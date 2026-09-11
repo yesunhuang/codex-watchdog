@@ -23,6 +23,7 @@ from .platform_adapters import (
 )
 from .storage import InstructionStore
 from .workspace_registry import TrackedWorkspace, WorkspaceRegistry
+from .writer_process import writer_lock_process
 
 
 DISCOVERY_SCHEMA_VERSION = 1
@@ -237,7 +238,10 @@ def codex_log_session_states(
                     )
                     if match is not None:
                         role = match.group(1).decode("ascii", errors="ignore")
-                elif b"maybe_resume_failed" in line:
+                elif (
+                    b"maybe_resume_failed" in line
+                    or b"inactive_thread_unsubscribed" in line
+                ):
                     role = None
                     active = None
                 elif b"thread_stream_view_activity_changed" in line:
@@ -426,11 +430,13 @@ class CodexSessionResolver:
         *,
         lock_probe: WriterLockProbe = writer_lock_is_held,
         owner_probe: SessionOwnerProbe = codex_log_owns_session,
+        writer_process_probe: Callable[[Path], Optional[int]] = writer_lock_process,
     ) -> None:
         self.runtime = Path(runtime)
         self.codex_home = _canonical_local_path(Path(codex_home))
         self.lock_probe = lock_probe
         self.owner_probe = owner_probe
+        self.writer_process_probe = writer_process_probe
 
     def resolve(
         self,
@@ -438,6 +444,7 @@ class CodexSessionResolver:
         *,
         codex_log: Optional[Path],
         window_state_database: Optional[Path],
+        live_windows: Sequence[LiveVSCodeWindow] = (),
     ) -> SessionResolution:
         if codex_log is None:
             return SessionResolution(
@@ -449,9 +456,48 @@ class CodexSessionResolver:
             else None
         )
         identities = {_path_identity(path) for path in paths}
-        database_candidates, database_status = self._database_candidates(
-            identities, codex_log
-        )
+        loaded, database_status = self._database_candidates(identities)
+        states = codex_log_session_states(codex_log, loaded)
+        database_candidates = {
+            session for session in loaded if self.owner_probe(codex_log, session)
+        }
+        # Codex can retain an existing thread's writer in another window. A
+        # follower is a view of that exact thread, not a different conversation.
+        # Only an explicitly active view plus one independently live owner can
+        # establish this association. Global caches and timestamps cannot.
+        followers = {
+            session for session, state in states.items()
+            if state == ("follower", True)
+        }
+        for session in followers:
+            lock = self.codex_home / "thread-writer-locks" / f"{session}.lock"
+            writer_pid = self.writer_process_probe(lock)
+            owners = {
+                window.codex_log for window in live_windows
+                if writer_pid is not None
+                and window.codex_app_server_pid == writer_pid
+                and window.codex_log is not None and window.codex_log != codex_log
+                and self.owner_probe(window.codex_log, session)
+            }
+            if len(owners) != 1:
+                return SessionResolution(
+                    "unresolved", None, None,
+                    "ambiguous_vscode_thread_owner" if owners
+                    else "vscode_thread_owner_unverified",
+                )
+            if not self.lock_probe(lock):
+                return SessionResolution("unresolved", None, None, "vscode_thread_owner_unverified")
+        database_candidates.update(followers)
+
+        def resolved(session: str, source: str) -> SessionResolution:
+            if session in followers:
+                return SessionResolution(
+                    "resolved", session,
+                    "codex_state_vscode_active_follower_verified_owner",
+                    "vscode_thread_owned_by_another_window",
+                )
+            return SessionResolution("resolved", session, source, None)
+
         if len(database_candidates) == 1:
             session_id = next(iter(database_candidates))
             source = (
@@ -459,26 +505,19 @@ class CodexSessionResolver:
                 if window_sessions is not None and session_id in window_sessions
                 else "codex_state_vscode_live_owner"
             )
-            return SessionResolution(
-                "resolved",
-                session_id,
-                source,
-                None,
-            )
+            return resolved(session_id, source)
         if len(database_candidates) > 1:
             # Switching chats can leave both writer locks and owner roles live.
             # Only explicit current-window activity can disambiguate them; the
             # cache and last-used timestamps alone are not ownership evidence.
-            states = codex_log_session_states(codex_log, database_candidates)
             active = [session for session, (role, view_active) in states.items()
-                      if role == "owner" and view_active is True]
+                      if session in database_candidates and view_active is True]
             if len(active) == 1 and all(
                 role == "owner" and view_active is False
-                for session, (role, view_active) in states.items() if session != active[0]
+                for session, (role, view_active) in states.items()
+                if session in database_candidates and session != active[0]
             ):
-                return SessionResolution(
-                    "resolved", active[0], "codex_state_vscode_active_owner", None,
-                )
+                return resolved(active[0], "codex_state_vscode_active_owner")
             return SessionResolution(
                 "unresolved", None, None, "ambiguous_loaded_threads"
             )
@@ -553,7 +592,7 @@ class CodexSessionResolver:
         return candidates
 
     def _database_candidates(
-        self, identities: set[str], codex_log: Path,
+        self, identities: set[str],
     ) -> Tuple[set[str], str]:
         database = self.codex_home / "state_5.sqlite"
         if not database.is_file():
@@ -593,9 +632,7 @@ class CodexSessionResolver:
                     lock = (
                         self.codex_home / "thread-writer-locks" / f"{session_id}.lock"
                     )
-                    if self.lock_probe(lock) and self.owner_probe(
-                        codex_log, session_id
-                    ):
+                    if self.lock_probe(lock):
                         candidates.add(session_id)
                 return candidates, "available"
         except (OSError, RuntimeError, sqlite3.Error):
@@ -955,6 +992,7 @@ class VSCodeWorkspaceDiscovery:
                     storage_key,
                     local_path,
                     live_window.codex_log,
+                    tuple(live_windows.values()),
                     explicit_by_repo,
                     windows,
                     candidates,
@@ -1017,6 +1055,7 @@ class VSCodeWorkspaceDiscovery:
         storage_key: str,
         local_path: Path,
         codex_log: Optional[Path],
+        live_windows: Sequence[LiveVSCodeWindow],
         explicit_by_repo: Dict[str, TrackedWorkspace],
         windows: List[DiscoveredWindow],
         candidates: List[Tuple[int, TrackedWorkspace]],
@@ -1109,6 +1148,7 @@ class VSCodeWorkspaceDiscovery:
             window_state_database=(
                 self.user_data_root / "workspaceStorage" / storage_key / "state.vscdb"
             ),
+            live_windows=live_windows,
         )
         if resolution.session_id is None:
             windows.append(
@@ -1164,6 +1204,9 @@ class VSCodeWorkspaceDiscovery:
             )
         )
         candidates.append((index, tracked))
+        if resolution.reason is not None:
+            windows[index] = replace(windows[index], reason=resolution.reason)
+            issues.append(resolution.reason)
 
     def _read_json_retry(self, path: Path) -> Optional[Any]:
         for attempt in range(3):

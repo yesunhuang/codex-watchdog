@@ -1,3 +1,17 @@
+Version 0.2.14 restores automatic tracking of an existing conversation when Codex
+shows it as an active follower in its workspace window but retains the writer in
+another live VS Code window. WatchDog now verifies the exact thread, repository,
+held lock, operating-system writer PID and current owner log together. Unrelated
+threads remain separate; stale owner logs cannot authorize a different writer.
+
+This recovery is available on Windows and Linux. Hosts without writer-process
+evidence keep failing closed. Normal same-window ownership is unchanged. The
+ownership mismatch stays visible and produces a deduplicated notification through
+the configured transport. An unverified or ambiguous owner pauses automatic
+targeting and produces an attention notification instead of silently disappearing.
+No ownership transfer, second conversation, App Server restart or configuration
+reset is performed. Codex's native window role may still require manual recovery.
+
 Version 0.2.13 restores tracking when VS Code reuses a window for a different
 workspace. Extension-host logs can contain both the previous workspace's storage
 ID and the current workspace's ID. Discovery previously combined these IDs across

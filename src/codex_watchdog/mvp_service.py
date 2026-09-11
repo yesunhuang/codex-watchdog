@@ -280,6 +280,9 @@ class MvpWatchdogService:
                         "issues": list(snapshot.issues),
                         "path": str(getattr(self.registry, "path", "")) or None,
                     }
+                    attention = self._discovery_attention_notifications(snapshot)
+                    if attention:
+                        discovery_summary["notifications"] = attention
                 local_results = tuple(
                     self._run_workspace(
                         workspace,
@@ -345,6 +348,47 @@ class MvpWatchdogService:
             discovery=discovery_summary,
             reason=reason,
         )
+
+    def _discovery_attention_notifications(self, snapshot: Any) -> List[Dict[str, Any]]:
+        notifications = []
+        reasons = {
+            "vscode_thread_owned_by_another_window",
+            "vscode_thread_owner_unverified",
+            "ambiguous_vscode_thread_owner",
+        }
+        for window in getattr(snapshot, "windows", ()):
+            reason = getattr(window, "reason", None)
+            if getattr(window, "locality", None) != "process_local" or reason not in reasons:
+                continue
+            workspace_id = getattr(window, "workspace_id", None) or (
+                "vscode-discovery-" + sha256_text(window.workspace_uri)[:32]
+            )
+            repo = getattr(window, "repo_root", None)
+            label = notification_workspace_label(
+                workspace_id, Path(repo) if repo is not None else None,
+            )
+            verified = reason == "vscode_thread_owned_by_another_window"
+            notifications.append(self._safe_notify(NotificationEvent(
+                workspace_id=workspace_id,
+                event_type="workspace_discovery_attention",
+                transition_fingerprint=self._fingerprint({
+                    "reason": reason,
+                    "session_id": getattr(window, "session_id", None),
+                    "workspace_uri": window.workspace_uri,
+                }),
+                subject=f"[Codex Watchdog] {label} thread ownership needs attention",
+                message=(
+                    f"Codex shows a follower view in the {label} VS Code window. "
+                    + ("WatchDog verified the same thread's owner in another live "
+                       "VS Code window and continues monitoring that exact thread. "
+                       "Codex window ownership has not been transferred."
+                       if verified else
+                       "WatchDog cannot verify one live owner for that view, so "
+                       "monitoring and automatic wakes for it are paused. "
+                       "Reopen the existing conversation in its intended workspace.")
+                ),
+            )))
+        return notifications
 
     @staticmethod
     def _remote_targets(snapshot: Any) -> Tuple[RemoteSshTarget, ...]:

@@ -1387,6 +1387,50 @@ def test_cycle_reports_the_fresh_discovery_snapshot_summary(tmp_path: Path) -> N
     assert result.to_dict()["discovery"] == result.discovery
 
 
+@pytest.mark.parametrize("verified", [True, False])
+def test_discovery_owner_mismatch_notifies_and_never_substitutes_a_thread(tmp_path: Path, verified: bool) -> None:
+    runtime, repo = tmp_path / "runtime", tmp_path / "repo"
+    repo.mkdir()
+    tracked = workspace(repo)
+    reason = "vscode_thread_owned_by_another_window" if verified else "vscode_thread_owner_unverified"
+
+    class DiscoveryRegistry(FakeRegistry):
+        path = runtime / "service" / "workspace-discovery.json"
+
+        def list_workspaces(self):
+            self.last_snapshot = SimpleNamespace(
+                status="partial", issues=(reason,),
+                effective_workspaces=self.workspaces,
+                windows=(SimpleNamespace(
+                    locality="process_local", reason=reason,
+                    workspace_uri=repo.as_uri(), repo_root=str(repo),
+                    workspace_id=tracked.workspace_id if verified else None,
+                    session_id=THREAD_A if verified else None,
+                ),),
+            )
+            return super().list_workspaces()
+
+    notifier, queue = FakeNotifier(runtime), FakeQueue()
+    service = MvpWatchdogService(
+        runtime, registry=DiscoveryRegistry([tracked] if verified else []),
+        git_adapter=FakeAdapter({str(repo.resolve()): [observation(repo)]}),
+        notifier=notifier, queue_dispatcher=queue, codex_home=runtime / "codex-home",
+    )
+
+    first, second = service.run_once(), service.run_once()
+
+    assert first.status == "partial"
+    assert first.discovery["notifications"][0]["status"] == "sent"
+    assert len(first.workspaces) == (1 if verified else 0)
+    assert queue.remote_calls == queue.resume_calls == []
+    assert notifier.events[0].event_type == "workspace_discovery_attention"
+    assert "ownership has not been transferred" in notifier.events[0].message if verified else "paused" in notifier.events[0].message
+    assert notifier.events[0].relay_target is None
+    # The existing notifier's durable duplicate suppression uses this fingerprint.
+    assert notifier.events[0].event_fingerprint() == notifier.events[1].event_fingerprint()
+    assert second.discovery["notifications"][0]["event_fingerprint"] == first.discovery["notifications"][0]["event_fingerprint"]
+
+
 def test_remote_ssh_completion_sends_exact_output_once_with_locality_label(
     tmp_path: Path,
 ) -> None:
