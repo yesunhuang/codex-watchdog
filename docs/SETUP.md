@@ -147,14 +147,15 @@ Important limitations:
   never hands a remote path to Windows Git. Automated behavior is covered by
   focused tests; live HPC provider acceptance still requires the Windows watchdog's SSH
   public key to be authorized on the remote account.
-- Automatic session resolution requires one live VS Code extension host and
-  Codex App Server, the exact window-scoped Codex session resource, one
-  unarchived VS Code user-thread row whose canonical working directory matches
-  the workspace or repository, a held writer lock, and that same window's
-  latest exact-thread stream role of `owner`. A held lock proves that the
-  session is loaded, not that a model turn is active. No match, multiple
-  matches, malformed private state, or ambiguous repository ownership remains
-  unresolved and is never guessed from recency.
+- Automatic session resolution requires a live VS Code extension host and Codex
+  App Server, exact unarchived user-thread metadata matching the workspace or
+  repository, a held writer lock and current ownership evidence. An explicitly
+  active follower view on Windows or Linux can also be tracked when the OS lock
+  holder matches another live VS Code App Server whose current-generation log
+  owns that exact thread. The mismatch generates an attention notification;
+  WatchDog does not transfer Codex's native window ownership. Missing or
+  ambiguous evidence remains unresolved. Cache entries and recency are never
+  sufficient, and a held lock does not establish that a model turn is active.
 - `enqueued` means an exact native queue acknowledgement was parsed. Passive
   queue-revision evidence can promote that to `consumed_or_started`, and an
   exact new rollout `UserMessage` marker can promote it to `started`; none of

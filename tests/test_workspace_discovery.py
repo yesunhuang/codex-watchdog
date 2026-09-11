@@ -739,7 +739,7 @@ def test_same_repo_with_distinct_window_sessions_fails_closed(tmp_path: Path) ->
 
     class WindowSessionResolver:
         @staticmethod
-        def resolve(paths, *, codex_log, window_state_database):
+        def resolve(paths, *, codex_log, window_state_database, live_windows=()):
             assert codex_log is not None
             assert window_state_database is not None
             local_path = tuple(paths)[0]
@@ -1225,6 +1225,163 @@ def test_held_cached_thread_without_exact_window_owner_fails_closed(
     assert snapshot.effective_workspaces == ()
     assert snapshot.windows[0].tracking_status == "unresolved"
     assert snapshot.windows[0].reason == "no_loaded_vscode_thread"
+
+
+def cross_window_discovery(tmp_path: Path):
+    """Two different repositories; the second server owns both exact threads."""
+    user_data = tmp_path / "Code" / "User"
+    target_repo, other_repo = tmp_path / "target", tmp_path / "other"
+    target_repo.mkdir()
+    other_repo.mkdir()
+    write_windows_state(user_data / "globalStorage" / "storage.json", [
+        {"folder": target_repo.as_uri()}, {"folder": other_repo.as_uri()},
+    ])
+    write_workspace(user_data / "workspaceStorage", "target", target_repo.as_uri())
+    write_workspace(user_data / "workspaceStorage", "other", other_repo.as_uri())
+    write_threads(tmp_path / ".codex", [
+        (SESSION_CURRENT, str(target_repo), "vscode", "user", 0),
+        (SESSION_OTHER, str(other_repo), "vscode", "user", 0),
+    ])
+    target_log, other_log = tmp_path / "target.log", tmp_path / "other.log"
+    target_log.write_text(
+        f"thread_stream_role_changed conversationId={SESSION_CURRENT} role=follower\n"
+        f"thread_stream_view_activity_changed conversationId={SESSION_CURRENT} active=true\n",
+        encoding="utf-8",
+    )
+    other_log.write_text(
+        f"thread_stream_role_changed conversationId={SESSION_CURRENT} role=owner\n"
+        f"thread_stream_role_changed conversationId={SESSION_OTHER} role=owner\n",
+        encoding="utf-8",
+    )
+    windows = {
+        "target": LiveVSCodeWindow("1", 100, 101, target_log),
+        "other": LiveVSCodeWindow("2", 200, 201, other_log),
+    }
+
+    class LiveIndex:
+        def snapshot(self):
+            return windows
+
+    resolver = CodexSessionResolver(
+        tmp_path / "runtime", tmp_path / ".codex", lock_probe=lambda _path: True,
+        writer_process_probe=lambda _path: 201,
+    )
+    discovery = VSCodeWorkspaceDiscovery(
+        tmp_path / "runtime", codex_home=tmp_path / ".codex",
+        user_data_root=user_data, session_resolver=resolver,
+        live_window_index=LiveIndex(), git_root_resolver=lambda path: path,
+    )
+    return discovery, target_log, other_log, windows
+
+
+def test_active_follower_keeps_exact_thread_separate_from_owners_workspace(tmp_path: Path) -> None:
+    discovery, _target_log, _other_log, _windows = cross_window_discovery(tmp_path)
+
+    snapshot = discovery.snapshot()
+
+    assert {item.repo_root.name: item.session_id for item in snapshot.effective_workspaces} == {
+        "target": SESSION_CURRENT, "other": SESSION_OTHER,
+    }
+    target = next(window for window in snapshot.windows if window.workspace_storage_key == "target")
+    assert target.tracking_status == "tracked"
+    assert target.session_source == "codex_state_vscode_active_follower_verified_owner"
+    assert target.reason == "vscode_thread_owned_by_another_window"
+    assert snapshot.issues == ("vscode_thread_owned_by_another_window",)
+    # Discovery observes the roles; it must not rewrite them to fake a transfer.
+    assert codex_log_owns_session(_target_log, SESSION_CURRENT) is False
+
+
+@pytest.mark.parametrize("missing_proof", [
+    "inactive", "unknown_activity", "unlocked", "owner_exited", "different_thread",
+    "owner_restarted", "owner_unsubscribed", "wrong_cwd", "multiple_owners",
+    "unknown_writer", "different_writer", "lock_released_during_probe",
+])
+def test_cross_window_follower_requires_all_live_exact_proofs(tmp_path: Path, missing_proof: str) -> None:
+    discovery, target_log, other_log, windows = cross_window_discovery(tmp_path)
+    if missing_proof == "inactive":
+        with target_log.open("a") as handle:
+            handle.write(f"thread_stream_view_activity_changed conversationId={SESSION_CURRENT} active=false\n")
+    elif missing_proof == "unknown_activity":
+        target_log.write_text(f"thread_stream_role_changed conversationId={SESSION_CURRENT} role=follower\n")
+    elif missing_proof == "unlocked":
+        discovery.session_resolver.lock_probe = lambda path: path.stem != SESSION_CURRENT
+    elif missing_proof == "owner_exited":
+        windows["other"] = LiveVSCodeWindow("2", 200, None, other_log)
+    elif missing_proof == "different_thread":
+        other_log.write_text(f"thread_stream_role_changed conversationId={SESSION_OTHER} role=owner\n")
+    elif missing_proof == "owner_restarted":
+        with other_log.open("a") as handle:
+            handle.write("[CodexMcpConnection] Spawning codex app-server\n")
+    elif missing_proof == "owner_unsubscribed":
+        with other_log.open("a") as handle:
+            handle.write(f"inactive_thread_unsubscribed conversationId={SESSION_CURRENT} status=unsubscribed\n")
+    elif missing_proof == "wrong_cwd":
+        with sqlite3.connect(str(tmp_path / ".codex" / "state_5.sqlite")) as connection:
+            connection.execute("UPDATE threads SET cwd = ? WHERE id = ?", (str(tmp_path / "unrelated"), SESSION_CURRENT))
+    elif missing_proof == "multiple_owners":
+        duplicate = tmp_path / "duplicate.log"
+        duplicate.write_text(f"thread_stream_role_changed conversationId={SESSION_CURRENT} role=owner\n")
+        windows["duplicate"] = LiveVSCodeWindow("3", 300, 201, duplicate)
+    elif missing_proof == "unknown_writer":
+        discovery.session_resolver.writer_process_probe = lambda _path: None
+    elif missing_proof == "different_writer":
+        discovery.session_resolver.writer_process_probe = lambda _path: 999
+    elif missing_proof == "lock_released_during_probe":
+        def release(_path):
+            discovery.session_resolver.lock_probe = lambda _lock: False
+            return 201
+        discovery.session_resolver.writer_process_probe = release
+
+    snapshot = discovery.snapshot()
+
+    assert SESSION_CURRENT not in [item.session_id for item in snapshot.effective_workspaces]
+    if missing_proof in {"owner_exited", "different_thread", "owner_restarted", "owner_unsubscribed"}:
+        assert "vscode_thread_owner_unverified" in snapshot.issues
+    elif missing_proof == "multiple_owners":
+        assert "ambiguous_vscode_thread_owner" in snapshot.issues
+
+
+def test_actual_writer_disambiguates_stale_owner_logs_in_other_live_windows(tmp_path: Path) -> None:
+    discovery, _target_log, _other_log, windows = cross_window_discovery(tmp_path)
+    stale = tmp_path / "stale.log"
+    stale.write_text(f"thread_stream_role_changed conversationId={SESSION_CURRENT} role=owner\n")
+    windows["stale"] = LiveVSCodeWindow("3", 300, 301, stale)
+
+    snapshot = discovery.snapshot()
+
+    target = next(item for item in snapshot.effective_workspaces if item.repo_root.name == "target")
+    assert target.session_id == SESSION_CURRENT
+
+
+def test_native_ownership_return_keeps_discovery_identity(tmp_path: Path) -> None:
+    discovery, target_log, other_log, _windows = cross_window_discovery(tmp_path)
+    before = next(item for item in discovery.snapshot().effective_workspaces if item.session_id == SESSION_CURRENT)
+    with other_log.open("a") as handle:
+        handle.write(f"inactive_thread_unsubscribed conversationId={SESSION_CURRENT} status=unsubscribed\n")
+    with target_log.open("a") as handle:
+        handle.write(f"thread_stream_role_changed conversationId={SESSION_CURRENT} role=owner\n")
+
+    snapshot = discovery.snapshot()
+
+    after = next(item for item in snapshot.effective_workspaces if item.session_id == SESSION_CURRENT)
+    assert after.has_same_registration(before)
+    assert snapshot.issues == ()
+
+
+def test_unverified_active_follower_does_not_fall_back_to_old_same_repo_owner(tmp_path: Path) -> None:
+    discovery, target_log, other_log, _windows = cross_window_discovery(tmp_path)
+    with sqlite3.connect(str(tmp_path / ".codex" / "state_5.sqlite")) as connection:
+        connection.execute("INSERT INTO threads VALUES (?, ?, 'vscode', 'user', 0)",
+                           (SESSION_OLD, str(tmp_path / "target")))
+    with target_log.open("a") as handle:
+        handle.write(f"thread_stream_role_changed conversationId={SESSION_OLD} role=owner\n")
+        handle.write(f"thread_stream_view_activity_changed conversationId={SESSION_OLD} active=false\n")
+    other_log.write_text(f"thread_stream_role_changed conversationId={SESSION_OTHER} role=owner\n")
+
+    snapshot = discovery.snapshot()
+
+    assert all(item.repo_root.name != "target" for item in snapshot.effective_workspaces)
+    assert "vscode_thread_owner_unverified" in snapshot.issues
 
 
 def test_malformed_window_session_cache_fails_closed(tmp_path: Path) -> None:
