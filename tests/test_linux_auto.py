@@ -18,7 +18,7 @@ THREAD = "11111111-2222-4333-8444-555555555555"
 
 
 @pytest.fixture
-def scenario(tmp_path, monkeypatch):
+def scenario(tmp_path, monkeypatch, request):
     home = tmp_path / "codex"
     repo = tmp_path / "disposable"
     repo.mkdir()
@@ -38,6 +38,15 @@ def scenario(tmp_path, monkeypatch):
     monkeypatch.setattr(linux_auto, "writer_pid", lambda *args: writer[0])
     monkeypatch.setattr(linux_owner, "vscode_writer", lambda pid: pid == 777)
     monkeypatch.setattr(linux_auto, "vscode_writer", lambda pid: pid == 777)
+    node_local = getattr(request, "param", False)
+    if node_local:
+        from codex_watchdog import control_state as cs
+        monkeypatch.setattr(cs.sys, "platform", "linux")
+        monkeypatch.setattr(cs.socket, "gethostname", lambda: "node-a.example")
+        cs.control_atomic_json(cs.control_node_directory(home) / "node.json",
+                               dict(schema_version=1, node="node-a.example", codex_home=str(home)))
+        monkeypatch.setattr(cs, "control_kernel_owner", lambda path: writer[0])
+        monkeypatch.setattr(cs, "control_vscode_writer", lambda pid: pid == 777)
     clock = [100.0]
     factory = lambda h, t, r: ControlStore(h, t, r, clock=lambda: clock[0], boot_id="boot")
     store = factory(home, THREAD, repo)
@@ -79,7 +88,8 @@ def scenario(tmp_path, monkeypatch):
 
     def make_agent(exclude=(), **options):
         return LinuxAutoWatchdog(
-            tmp_path / "agent-runtime", home, executable="fixture-codex", exclude=exclude, **options,
+            (store.directory.parent.parent / "runtime" if node_local else tmp_path / "agent-runtime"),
+            home, executable="fixture-codex", exclude=exclude, **options,
             store_factory=factory,
             owner_factory=lambda binding, **kwargs: LinuxThreadOwner(binding, client_factory=Client, **kwargs),
             service_factory=lambda runtime, **kwargs: SimpleNamespace(
@@ -101,6 +111,41 @@ def scenario(tmp_path, monkeypatch):
             if item["owner"].client is not None:
                 item["owner"].client.close()
             item["locks"].close()
+
+
+@pytest.mark.parametrize("scenario", [True], indirect=True)
+def test_node_idle_release_ignores_foreign_changes_but_accepts_its_own_queued_reply(scenario):
+    from codex_watchdog.control_state import control_state_home
+    store, local, writer, clock, clients, make_agent = scenario
+    dog = make_agent()
+    cycles = []
+    dog._cycle = lambda item: (cycles.append(True) or SimpleNamespace(status="completed"))
+    assert dog.step()[0]["state"] == "observing"
+    writer[0] = None
+    assert dog.step()[0]["state"] == "owned"
+    dog.controllers[THREAD]["owner"]._idle_since = -1000000
+    assert dog.step()[0]["state"] == "parked"
+    assert clients[0].closed and store.read()["node_parked"] is True
+    count = len(cycles)
+    # The home/transcript and Codex queue are shared with a different node.
+    (store.codex_home / "sessions/thread.jsonl").write_text('{"foreign":true}\n')
+    queue_id = "99999999-aaaa-4bbb-8ccc-dddddddddddd"
+    with sqlite3.connect(store.codex_home / "queue_1.sqlite") as db:
+        db.execute("INSERT INTO queued_items VALUES (?,?,'{}')", (queue_id, THREAD))
+    assert dog.step()[0]["state"] == "parked"
+    assert len(clients) == 1 and len(cycles) == count
+    # Simulate a clean controller restart on the same boot; do not lose the gate.
+    item = dog.controllers.pop(THREAD)
+    item["store"].release_remote(item["token"], "absent")
+    item["locks"].close()
+    assert dog.step()[0]["state"] == "parked"
+    assert len(clients) == 1 and len(cycles) == count
+    # Only an exact accepted courier receipt in this node's directory admits it.
+    receipt = control_state_home(store.codex_home) / "remote-wake/reply.json"
+    control_atomic_json(receipt, dict(schema_version=1, thread_id=THREAD,
+                                     state="enqueued", queue_message_id=queue_id))
+    assert dog.step()[0]["state"] == "owned"
+    assert len(clients) == 2 and store.read()["node_parked"] is False
 
 
 def test_host_observes_attached_thread_and_keeps_observation_after_idle_handback(scenario):

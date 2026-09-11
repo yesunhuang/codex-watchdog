@@ -17,7 +17,7 @@ from .slack_mapping import (
     valid_slack_user_id,
 )
 from .storage import FileLock
-from .control_state import ControlError, control_read_json
+from .control_state import ControlError, control_read_json, control_root
 from .remote_control import RemoteControlClient
 from .notifications import NotificationEvent
 
@@ -291,7 +291,7 @@ class SlackReplyRelay:
             codex_home = getattr(self.queue_dispatcher, "codex_home", None)
             if codex_home is None:
                 return None
-            path = Path(codex_home) / "watchdog-control" / target.thread_id / "owner.json"
+            path = control_root(codex_home) / target.thread_id / "owner.json"
             if not path.exists():
                 return None
             value = control_read_json(path)

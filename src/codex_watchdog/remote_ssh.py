@@ -392,6 +392,9 @@ def queue_snapshot(database, thread, message=None):
 
 def wake_record_path(instruction_id):
     root = Path.home() / ".codex-watchdog" / "remote-wake"
+    node = control_state_home(remote_codex_home())
+    if node != remote_codex_home().resolve():
+        root = node / "remote-wake"
     root.mkdir(parents=True, exist_ok=True)
     return root / (sha(instruction_id) + ".json")
 
@@ -456,7 +459,7 @@ def rollout_started(record):
 
 def observe_wake(record):
     thread = canonical_uuid(record.get("thread_id"))
-    if thread is not None and (remote_codex_home() / "watchdog-control" / thread / "owner.json").exists():
+    if thread is not None and (control_root(remote_codex_home()) / thread / "owner.json").exists():
         if _CONTROL_ACTIVE is None or _CONTROL_ACTIVE[0].thread_id != thread:
             return dict(record, reason="control_owner_capability_required")
     state = record.get("state", "uncertain")
@@ -489,7 +492,7 @@ def observe_wake(record):
 
 
 def dispatch_wake(request, session):
-    if (remote_codex_home() / "watchdog-control" / session / "owner.json").exists():
+    if (control_root(remote_codex_home()) / session / "owner.json").exists():
         if _CONTROL_ACTIVE is None or _CONTROL_ACTIVE[0].thread_id != session:
             return {"status": "rejected", "state": "rejected", "reason": "control_owner_capability_required"}
     instruction_id = request["instruction_id"]
@@ -506,7 +509,7 @@ def dispatch_wake(request, session):
         return observe_wake(record)
     # A Linux-local binding owns new delivery. Remote observers may reconcile
     # their previous receipts but must not become a second sender after handoff.
-    binding_path = remote_codex_home() / "watchdog-linux" / (session + ".json")
+    binding_path = control_binding_root(remote_codex_home()) / (session + ".json")
     if binding_path.exists():
         try:
             with binding_path.open("rb") as handle:

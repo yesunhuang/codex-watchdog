@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import platform
 import shlex
+import selectors
 import shutil
 import signal
 import subprocess
@@ -500,6 +501,49 @@ def main() -> None:
         assert all(digest(path) == sha for path, sha in hashes.items())
         assert (codex / "hooks.json").read_bytes() == stable_hooks
         assert not any("opaque-test-credential-bytes" in value for value in output_log)
+        # The packaged opt-in command must work without Python on PATH and
+        # without enrolling any real user thread or installing a live service.
+        node_home = home / "isolated node codex"
+        node_environment = {**environment, "CODEX_HOME": str(node_home),
+                            "XDG_CONFIG_HOME": str(home / "isolated node config")}
+        node_session = home / "isolated user manager runtime"
+        node_session.mkdir(mode=0o700)
+        node_environment["XDG_RUNTIME_DIR"] = str(node_session)
+        node_secrets = home / "node environment.env"
+        node_secrets.write_text("# No provider credentials in this fixture\n")
+        node_secrets.chmod(0o600)
+        node_command = [executable, "linux-node-install", "--environment-file", node_secrets]
+        preview = json.loads(run(node_command, env=node_environment).stdout)
+        assert preview["status"] == "preview" and not node_home.exists()
+        configured = json.loads(run([*node_command, "--install"], env=node_environment).stdout)
+        assert configured == json.loads(run([*node_command, "--install"], env=node_environment).stdout)
+        node_runtime = Path(configured["runtime"])
+        assert node_runtime.parent.parent == node_home / "watchdog-nodes"
+        assert "ConditionHost=" + configured["node"] in configured["unit"]
+        assert "CODEX_WATCHDOG_SLACK_REPLY_MODE=poll" in configured["unit"]
+        analyzer = shutil.which("systemd-analyze")
+        if analyzer:
+            checked = run([analyzer, "--user", "verify", configured["unit_path"]], env=node_environment)
+            assert not checked.stderr.strip(), checked.stderr
+        process = subprocess.Popen([str(executable), "linux-auto-run", "--interval", "1"],
+                                   cwd=work, env=node_environment, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                   start_new_session=True)
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                assert selector.select(timeout=20), "node controller did not emit an observation"
+                assert json.loads(process.stdout.readline())["owners"] == []
+            agent = json.loads((node_runtime.parent / "watchdog-control/agent.json").read_text())
+            assert agent["runtime_path"] == str(node_runtime)
+            assert not (node_home / "watchdog-control").exists()
+            process.send_signal(signal.SIGTERM)
+            stdout, stderr = process.communicate(timeout=15)
+            assert process.returncode == 0, (stdout, stderr)
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.communicate(timeout=15)
     result = {"schema_version": 1, "status": "passed", "version": manifest["version"],
               "architecture": manifest["architecture"], "source_commit": manifest["source_commit"],
               "minimum_glibc": manifest["minimum_glibc"], "host_glibc": platform.libc_ver()[1],
@@ -512,6 +556,8 @@ def main() -> None:
               "replacement_and_stable_hooks": True, "foreground_and_writer_locks": True,
               "fixture_exact_thread_resume_restart_release": True, "fixture_queue_deduplication": True,
               "bounded_release_lock_admission": True,
+              "node_unit_idempotent_and_host_conditioned": True,
+              "node_controller_runtime_isolated": True,
               "queue_courier_invocations": len(courier_calls),
               "queue_admission_rejections_without_side_effects": queue_admission_rejections,
               "detached_owner_loss_and_recovery_notifications": True,

@@ -10,6 +10,24 @@ appropriate pinned release dependencies and run `python -m pytest` and
 need native OS permissions; record any platform skips and verify them on their
 own platform.
 
+## Release dependency scope
+
+If source or dependencies bundled into multiple supported executables change,
+**rebuild, test and release every affected platform from one canonical source
+revision**. A platform-only release is allowed only when the changed dependency
+closure is demonstrably platform-exclusive. Record that analysis in the release
+receipt. Different native acceptance depths must be disclosed; they do not
+justify shipping another platform's stale binary.
+
+For shared runtime changes, the current artifact set is Windows x64, Linux ARM64,
+Linux x64 and macOS ARM64. Keep a release draft until all required packages and
+their acceptance receipts are present. A missing native build host is a release
+blocker, not permission to relabel an older package. In particular, the v0.2.21
+local-discovery change was reproduced first on Windows but changed shared source.
+The next release must rebuild all four targets without replacing v0.2.21.
+
+## Native build and acceptance
+
 When a Linux build host is newer than the supported glibc baseline, the build
 can reuse system libraries from a checksum-verified previous package of the same
 architecture: add `--native-runtime-package /path/to/previous-package` to the

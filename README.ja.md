@@ -133,20 +133,26 @@ WatchDog はその policy を理解したり enforcement したりする必要�
 
 ## プラットフォーム状況
 
-| Platform / path | Support level |
+| プラットフォーム | 全体の成熟度 |
 | --- | --- |
-| Windows x64 local desktop | **Stable、full E2E verified、packaged reference** |
-| Linux Remote-SSH target | **実 remote path verified** |
-| Linux explicit same-thread owner | **Ubuntu ARM64 native E2E verified** |
-| Linux automatic remote handoff | **Native E2E verified。reattach 時に VS Code reload が必要な場合あり** |
-| Linux ARM64 package | **Ubuntu ARM64 native package acceptance 済み** |
-| Linux x64 package | **Ubuntu と RHEL 8.10 / glibc 2.28 で acceptance 済み** |
-| Linux local desktop | **CI-verified preview。native desktop E2E は未完了** |
-| macOS Apple Silicon source workflow | **Native E2E verified、topology 制限あり** |
-| macOS 15 ARM64 package | **Developer preview。package acceptance はあり、新版 device E2E は遅れる場合あり** |
+| Windows x64 | **安定したデスクトップ参照実装**。ネイティブ E2E とパッケージ更新を検証済み |
+| Linux ARM64 / x64 | **サーバー／切断後の運用はネイティブ検証とユーザー実運用で確認済み**。ローカルデスクトップはプレビュー |
+| macOS Apple Silicon | **一部のネイティブ E2E を検証したプレビュー**。ウィンドウ検出とパッケージに制限あり |
 
-すべての topology が同じ成熟度だとは主張しません。詳細は
-[platform support and diagnostics](docs/PLATFORM_SUPPORT.md) を参照してください。
+### ワークフロー対応表
+
+| ワークフロー | Windows x64 | Linux ARM64 / x64 | macOS Apple Silicon |
+| --- | --- | --- | --- |
+| ローカルデスクトップ | ネイティブ E2E 検証済み | プレビュー。ネイティブデスクトップ E2E は未完了 | 所属を特定できるウィンドウ構成で検証済み |
+| Remote-SSH | Linux 向け制御側を検証済み | ネイティブ実行側を検証済み | 制御側の検証範囲は限定的 |
+| 切断後の同一スレッド引き継ぎ | Linux 実行側を制御 | ネイティブ E2E と Spark の手動実運用が成功 | ネイティブ macOS 向けの引き継ぎ機能なし |
+| 自動リモート引き継ぎ | デスクトップ側を検証済み | ネイティブ動作を検証済み。VS Code の再読み込みが必要な場合あり | 完全な引き継ぎ E2E は未検証 |
+| 実行可能パッケージ | 起動、アイコン、更新を検証済み | ARM64 Ubuntu、x64 Ubuntu と RHEL 8/glibc 2.28 で検証済み | 開発者プレビュー。実機検証はバージョンごとに必要 |
+
+ユーザーによる Spark の手動切断テストは、問題が観測されずに完了しました。これは
+サーバーワークフローのネイティブな証拠であり、Linux デスクトップの検証とは別です。
+過去のログがない場合、Windows/Linux はネイティブ writer の PID を確認できますが、
+macOS には引き続き解決可能なルーティング情報が必要です。[詳細と制限](docs/PLATFORM_SUPPORT.md)。
 
 ## WatchDog が現在できること
 
@@ -231,9 +237,9 @@ v0.2.20 以降、Linux の会話が短い猶予期間を経てアイドル状態
 から同じ会話を再び開けます。`--repo` は登録済みの全 thread を対象にするため、一つの Git 更新が
 複数の独立した会話を再開する場合があります。一つだけを監視するには `--thread UUID` を使います。
 
-ホームディレクトリを共有するクラスタでは、WatchDog サービスと VS Code ワークスペースを
-同じ選択済みノードで実行してください。インストールファイルの共有だけでは、同じ会話を
-ノード間で安全に自動移行できません。[共有ホームの制限](docs/AUTOMATIC_REMOTE_HANDOFF.md)
+ホームを共有するクラスタでは、作業に使う各ログインノードでローカル WatchDog を実行し、
+実行時の状態をホスト名ごとに分離します。各 WatchDog は自分のノードのネイティブな作業を
+検出し、会話を自動移行しません。[ノード設定と既存環境の制限](docs/LINUX_NODE_SETUP.md)
 を参照してください。
 
 > [!IMPORTANT]

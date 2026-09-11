@@ -124,20 +124,25 @@ Codex 自己执行工作并拥有 Git，然后把状态压缩进 checkpoint prog
 
 ## 平台状态
 
-| 平台/路径 | 支持级别 |
+| 平台 | 总体成熟度 |
 | --- | --- |
-| Windows x64 本地桌面 | **稳定、完整 E2E 已验证、打包参考实现** |
-| Linux Remote-SSH 目标 | **真实远程路径已验证** |
-| Linux 显式同线程 owner | **Ubuntu ARM64 原生 E2E 已验证** |
-| Linux 自动远程交接 | **原生 E2E 已验证；reattach 时可能需要重载 VS Code 窗口** |
-| Linux ARM64 安装包 | **Ubuntu ARM64 原生安装包验收通过** |
-| Linux x64 安装包 | **Ubuntu 与 RHEL 8.10 / glibc 2.28 验收通过** |
-| Linux 本地桌面 | **CI 已验证预览；真实桌面 E2E 待完成** |
-| macOS Apple Silicon 源码路径 | **原生 E2E 已验证，但仍有 topology 限制** |
-| macOS 15 ARM64 安装包 | **开发者预览；安装包验收已存在，新版本设备级 E2E 可能滞后** |
+| Windows x64 | **稳定的桌面参考实现**，已验证原生端到端流程和安装包升级 |
+| Linux ARM64 / x64 | **服务器／脱离连接流程已有原生验证及成功的用户实测**；本地桌面仍为预览 |
+| macOS Apple Silicon | **已有部分原生端到端验证的预览版**；仍有窗口发现及安装包限制 |
 
-我们会明确区分支持成熟度，而不是假装所有 topology 都一样。详细定义见
-[平台支持与诊断](docs/PLATFORM_SUPPORT.md)。
+### 工作流支持矩阵
+
+| 工作流 | Windows x64 | Linux ARM64 / x64 | macOS Apple Silicon |
+| --- | --- | --- | --- |
+| 本地桌面 | 已验证原生端到端流程 | 预览；原生桌面端到端验证待完成 | 可明确识别窗口归属的场景已验证 |
+| Remote-SSH | 连接 Linux 的控制端已验证 | 原生执行端已验证 | 控制端验证范围仍有限 |
+| 脱离连接后接管同一线程 | 可控制 Linux 执行端 | 原生端到端验证及 Spark 手动实测成功 | 无原生 macOS 脱离连接接管器 |
+| 自动远程交接 | 桌面端已验证 | 原生生命周期已验证；有时需重载 VS Code | 完整交接端到端验证尚未建立 |
+| 可执行安装包 | 启动、图标、升级已验收 | ARM64 Ubuntu；x64 Ubuntu 与 RHEL 8/glibc 2.28 已验收 | 开发者预览；设备验收需对应具体版本 |
+
+用户已在 Spark 完成手动脱离连接实测，未观察到问题。这是服务器工作流的原生证据，
+不等同于 Linux 本地桌面验收。旧日志缺失时，Windows/Linux 可使用原生写入进程 PID
+验证；macOS 仍需要可解析的路由证据。详见[平台支持与限制](docs/PLATFORM_SUPPORT.md)。
 
 ## WatchDog 当前能做什么
 
@@ -216,9 +221,9 @@ watchdog="${XDG_DATA_HOME:-$HOME/.local/share}/codex-watchdog/bin/codex-watchdog
 监控和 Slack 回复仍然启用，VS Code 可以重新打开同一会话。`--repo` 会包含仓库内所有已纳管的
 thread，因此一次 Git 更新可能唤醒多个独立会话。如只需监控一个会话，请使用 `--thread UUID`。
 
-在使用共享 home 目录的集群上，请让 WatchDog 服务与 VS Code 工作区运行在同一个选定节点。
-安装文件可以共享，但这不代表同一会话可以安全地自动跨节点切换；详情见
-[共享目录限制](docs/AUTOMATIC_REMOTE_HANDOFF.md)。
+在使用共享 home 目录的集群上，每个可运行工作区的登录节点各自运行一个本地 WatchDog，
+运行时状态按主机名隔离。每只狗只发现本节点的原生工作，不会自动迁移会话。详见
+[节点安装与旧版部署限制](docs/LINUX_NODE_SETUP.md)。
 
 > [!IMPORTANT]
 > 升级默认应保留兼容的用户状态。WatchDog 会尽量复用已有 runtime/profile/provider

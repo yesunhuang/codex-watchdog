@@ -21,6 +21,7 @@ from .posix_package import (
     PackageError, file_hash, own_hooks, read_json, replace_file, snapshot,
 )
 from .storage import FileLock, InstructionStore, StoreBusyError
+from .control_state import ControlError, control_state_home
 
 
 PROFILE_NAME = "linux-launcher.json"
@@ -246,13 +247,14 @@ def main(argv: Sequence[str], executable: Path) -> int:
             print(build_parser().format_help())
             print("Linux package commands:\n  linux-install [--runtime PATH] [--install-dir PATH] [--codex-home PATH]\n"
                   "  linux-hooks [--install] [--codex-home PATH]\n\n"
+                  "  linux-node-install --environment-file PATH [--interval 30] [--install]\n\n"
                   "Install, review/trust hooks, bind the exact existing conversation, then use linux-run.\n"
                   "Use linux-release and wait for release before reopening that conversation in VS Code.")
             return 0
         if arguments == ["--version"]:
             return core_main(arguments)
         directory = config_directory()
-        if arguments[0] in ("linux-install", "linux-hooks"):
+        if arguments[0] in ("linux-install", "linux-hooks", "linux-node-install"):
             if sys.platform != "linux":
                 raise PackageError("linux_required")
             parser = argparse.ArgumentParser(prog="codex-watchdog " + arguments[0])
@@ -260,6 +262,10 @@ def main(argv: Sequence[str], executable: Path) -> int:
             if arguments[0] == "linux-install":
                 parser.add_argument("--runtime", type=Path)
                 parser.add_argument("--install-dir", type=Path)
+            elif arguments[0] == "linux-node-install":
+                parser.add_argument("--environment-file", type=Path, required=True)
+                parser.add_argument("--interval", type=int, default=30)
+                parser.add_argument("--install", action="store_true")
             else:
                 parser.add_argument("--install", action="store_true")
             args = parser.parse_args(arguments[1:])
@@ -267,6 +273,10 @@ def main(argv: Sequence[str], executable: Path) -> int:
             if arguments[0] == "linux-install":
                 result = install_package(executable.parent, directory, codex_home,
                                          runtime=args.runtime, install_dir=args.install_dir)
+            elif arguments[0] == "linux-node-install":
+                from .linux_node import prepare_node
+                result = prepare_node(executable, codex_home, args.environment_file,
+                                      interval=args.interval, install=args.install)
             else:
                 result = install_packaged_hooks(directory, codex_home) if args.install else packaged_hooks(directory, codex_home)
             print(json.dumps(result, indent=2, sort_keys=True))
@@ -274,12 +284,15 @@ def main(argv: Sequence[str], executable: Path) -> int:
         parsed = build_parser().parse_args(arguments)
         codex_home = codex_directory(directory, parsed.codex_home)
         if not any(v == "--runtime" or v.startswith("--runtime=") for v in arguments):
-            arguments = ["--runtime", str(select_runtime(directory, codex_home)), *arguments]
+            node = control_state_home(codex_home)
+            runtime = node / "runtime" if node != codex_home.resolve() else select_runtime(directory, codex_home)
+            arguments = ["--runtime", str(runtime), *arguments]
         if not any(v == "--codex-home" or v.startswith("--codex-home=") for v in arguments):
             arguments = ["--codex-home", str(codex_home), *arguments]
         return core_main(arguments)
     except (PackageError, StoreBusyError, OSError, ValueError, subprocess.SubprocessError) as exc:
         reason = (str(exc).replace("posix_", "linux_", 1) if isinstance(exc, PackageError) else
+                  str(exc) if isinstance(exc, ControlError) else
                   "linux_install_busy" if isinstance(exc, StoreBusyError) else "linux_package_operation_failed")
         print(json.dumps({"status": "blocked", "reason": reason}), file=sys.stderr)
         return 1

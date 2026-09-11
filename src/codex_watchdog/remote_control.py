@@ -45,6 +45,13 @@ def control_resolve(repo, storage_key, expected):
             continue
         owner, view_active = log_session_state(thread)
         store = ControlStore(remote_codex_home(), thread, repo)
+        if control_state_home(remote_codex_home()) != remote_codex_home().resolve():
+            # Shared-home VS Code logs can describe a different login node.
+            # They are never enough to select a target here.
+            if control_writer_kind(store) not in ("vscode", "remote"):
+                continue
+            candidates[thread] = view_active
+            continue
         if owner or (store.path.exists() and control_writer_kind(store) == "remote"):
             candidates[thread] = view_active
     active = [thread for thread, view in candidates.items() if view is True]
@@ -52,6 +59,10 @@ def control_resolve(repo, storage_key, expected):
         return active[0]
     if len(active) > 1:
         raise ControlError("remote_thread_ambiguous")
+    if control_state_home(remote_codex_home()) != remote_codex_home().resolve():
+        if len(candidates) == 1:
+            return next(iter(candidates))
+        raise ControlError("remote_thread_unresolved" if not candidates else "remote_thread_ambiguous")
     thread, issue = resolve_session(repo, storage_key, expected)
     if thread is None:
         raise ControlError(issue or "remote_thread_unresolved")
@@ -59,14 +70,14 @@ def control_resolve(repo, storage_key, expected):
 
 
 def control_runtime(store):
-    binding = remote_codex_home() / "watchdog-linux" / (store.thread_id + ".json")
+    binding = control_binding_root(remote_codex_home()) / (store.thread_id + ".json")
     if not binding.exists():
         return str(store.directory / "runtime")
     previous = control_read_json(binding)
     if previous.get("thread_id") != store.thread_id:
         raise ControlError("control_binding_mismatch")
     candidates = [previous.get("runtime_path")]
-    agent = remote_codex_home() / "watchdog-control" / "agent.json"
+    agent = control_root(remote_codex_home()) / "agent.json"
     if agent.exists():
         candidates.append(control_read_json(agent).get("runtime_path"))
     data = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))).expanduser()
@@ -99,6 +110,8 @@ def run_control(request):
     store = ControlStore(remote_codex_home(), thread, repo)
     if action == "relay":
         if not store.path.exists():
+            if control_state_home(remote_codex_home()) != remote_codex_home().resolve():
+                raise ControlError("control_node_thread_unregistered")
             return {"status": "ok", "legacy": True}
         value = store.read()
         if value["owner"] is None:

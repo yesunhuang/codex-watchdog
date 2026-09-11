@@ -83,13 +83,15 @@ locks did coordinate between those nodes. The installed Codex thread writer used
 `flock`, so changing only WatchDog's service placement or lock type would not
 protect against a second native writer on another node.
 
-Keep the WatchDog service and the VS Code execution workspace on the same chosen
-node. A shared package, profile and Slack configuration are reusable across nodes;
-a running process is still local to its node. Do not remove a service host pin or
-run competing copies for the same shared Codex home to simulate roaming. This
-requires verified cross-node coordination for both WatchDog and native Codex
-writers, with active work completed before handback. A desktop reconnect to the
-same execution node remains supported.
+For multiple login nodes, use [one local WatchDog per node](LINUX_NODE_SETUP.md),
+with hostname-specific ownership and runtime state. Shared installation and
+provider configuration may be reused. Native process evidence selects each
+node's work; shared logs or transcript changes do not move a conversation.
+After an idle writer release, node mode waits for a native local attachment or
+its own queued reply receipt before resuming. Finish or pause the old node's
+work before switching nodes, and do not intentionally work in the same repository
+on multiple nodes at once. This is an operational boundary, not a new distributed
+Codex lock. Existing host-pinned services remain in place until explicitly migrated.
 
 From v0.2.16, add **`--continue-interrupted`** to `linux-run` or `linux-auto-run`
 to continue interrupted work automatically after Linux acquires the same thread.

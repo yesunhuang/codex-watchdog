@@ -181,7 +181,7 @@ def test_remote_helper_cannot_send_into_a_local_binding(setup):
     namespace = {"__name__": "test_remote_binding"}
     exec(_REMOTE_SCRIPT, namespace)
     # The compact helper uses the current-user .codex directory.
-    namespace["Path"] = type("HomePath", (), {"home": staticmethod(lambda: binding.codex_home.parent)})
+    namespace["remote_codex_home"] = lambda: binding.codex_home.parent / ".codex"
     fence = binding.codex_home.parent / ".codex" / "watchdog-linux" / (THREAD + ".json")
     InstructionStore._atomic_json(fence, binding.load())
     namespace["wake_record_path"] = lambda _id: binding.runtime / "not_sent.json"

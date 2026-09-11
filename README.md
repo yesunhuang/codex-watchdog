@@ -142,20 +142,26 @@ WatchDog does not need to understand or enforce that contract.
 
 ## Platform status
 
-| Platform/path | Support level |
+| Platform | Overall maturity |
 | --- | --- |
-| Windows x64 local desktop | **Stable, full E2E verified, packaged reference** |
-| Linux Remote-SSH target | **Real remote path verified** |
-| Linux explicit same-thread owner | **Native E2E verified on Ubuntu ARM64** |
-| Linux automatic remote handoff | **Native E2E verified; reattachment may need a VS Code reload** |
-| Linux ARM64 package | **Native package acceptance on Ubuntu ARM64** |
-| Linux x64 package | **Accepted on Ubuntu and RHEL 8.10 / glibc 2.28** |
-| Linux local desktop | **CI-verified preview; native desktop E2E pending** |
-| macOS Apple Silicon source workflow | **Native E2E verified with topology limits** |
-| macOS 15 ARM64 package | **Developer preview; packaged acceptance exists, new-version device E2E may lag** |
+| Windows x64 | **Stable desktop reference**, native E2E and package upgrades verified |
+| Linux ARM64 / x64 | **Native server/detached support with successful user dogfood**; local desktop remains preview |
+| macOS Apple Silicon | **Preview with bounded native E2E evidence**; discovery topology and package caveats remain |
 
-Support levels are intentionally explicit instead of pretending every topology is
-equivalent. See [platform support and diagnostics](docs/PLATFORM_SUPPORT.md).
+### Workflow support matrix
+
+| Workflow | Windows x64 | Linux ARM64 / x64 | macOS Apple Silicon |
+| --- | --- | --- | --- |
+| Local desktop | Native E2E verified | Preview; native desktop E2E pending | Native E2E on resolvable window topologies |
+| Remote-SSH | Linux-target controller verified | Native execution target verified | Controller acceptance remains bounded |
+| Detached same-thread owner | Controls Linux targets | Native E2E; successful manual Spark dogfood | No native macOS detached owner |
+| Automatic remote handoff | Desktop side verified | Native lifecycle verified; VS Code reload sometimes needed | Full handoff E2E not established |
+| Packaged executable | Startup, icon and upgrade acceptance | ARM64 Ubuntu; x64 Ubuntu and RHEL 8/glibc 2.28 acceptance | Developer preview; version-specific device acceptance |
+
+The user completed manual detached dogfood on Spark with no observed issue. This
+is native server-workflow evidence, separate from Linux desktop acceptance.
+Missing-log discovery uses native writer-PID evidence on Windows/Linux; macOS
+still needs resolvable routing evidence. See [details and limitations](docs/PLATFORM_SUPPORT.md).
 
 ## What WatchDog currently does
 
@@ -252,10 +258,10 @@ stay enabled; VS Code can reopen the same conversation. `--repo` includes every
 enrolled thread in that repository, so one Git update can wake several distinct
 conversations. Use `--thread UUID` when only one conversation should be monitored.
 
-On clusters with shared home directories, keep the WatchDog service and the VS
-Code execution workspace on the same chosen node. Shared installation files do
-not provide safe automatic roaming of one conversation between nodes; see the
-[shared-home limitations](docs/AUTOMATIC_REMOTE_HANDOFF.md).
+On clusters with shared home directories, run one local WatchDog on each eligible
+login node, with hostname-specific runtime state. Each dog discovers native work
+on its own node; conversations do not roam automatically. See the
+[node setup and existing-installation limits](docs/LINUX_NODE_SETUP.md).
 
 > [!IMPORTANT]
 > Upgrades preserve compatible user state by default. WatchDog reuses existing
