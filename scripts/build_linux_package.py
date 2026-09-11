@@ -42,6 +42,8 @@ def main() -> None:
         raise SystemExit("This recipe requires Python 3.12.14 and PyInstaller 6.22.2.")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=ROOT / "dist")
+    parser.add_argument("--native-runtime-package", type=Path,
+                        help="verified previous Linux package supplying baseline system libraries")
     args = parser.parse_args()
     if subprocess.check_output(["git", "status", "--porcelain", "--untracked-files=normal"], cwd=ROOT, text=True).strip():
         raise SystemExit("Package builds require a clean committed checkout.")
@@ -56,6 +58,14 @@ def main() -> None:
     build_parent = ROOT / "build"
     build_parent.mkdir(exist_ok=True)
     build = Path(tempfile.mkdtemp(prefix="linux-package-", dir=build_parent))
+    native_runtime = None
+    build_env = dict(os.environ)
+    if args.native_runtime_package:
+        from linux_runtime_reuse import NativeRuntime
+        native_runtime = NativeRuntime(args.native_runtime_package, architecture)
+        libraries = build / "native-runtime"
+        native_runtime.extract(libraries)
+        build_env["LD_LIBRARY_PATH"] = str(libraries) + os.pathsep + build_env.get("LD_LIBRARY_PATH", "")
     metadata_name = "codex_watchdog-" + version + ".dist-info"
     metadata = build / metadata_name
     metadata.mkdir()
@@ -71,7 +81,7 @@ def main() -> None:
         "--collect-submodules", "slack_bolt", "--collect-submodules", "slack_sdk",
         "--collect-data", "certifi", "--exclude-module", "tkinter",
         str(ROOT / "packaging/linux_entry.py"),
-    ], cwd=ROOT, check=True)
+    ], cwd=ROOT, env=build_env, check=True)
     executable = build / "binary/codex-watchdog"
     header = executable.read_bytes()[:20]
     if header[:6] != b"\x7fELF\x02\x01" or int.from_bytes(header[18:20], "little") != machine:
@@ -98,7 +108,7 @@ def main() -> None:
         raise SystemExit("Build dependency graph contains no native libraries.")
     minimum_glibc = verify_glibc_requirements(
         [executable, *(Path(original) for _, original, _ in binaries)], architecture)
-    add_native_inventory(package / "THIRD_PARTY_LICENSES", binaries)
+    add_native_inventory(package / "THIRD_PARTY_LICENSES", binaries, native_runtime=native_runtime)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     files = {path.relative_to(package).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
              for path in package.rglob("*") if path.is_file()}
@@ -106,6 +116,8 @@ def main() -> None:
                 "source_commit": commit, "build_glibc": platform.libc_ver()[1],
                 "minimum_glibc": minimum_glibc,
                 "build_python": platform.python_version(), "pyinstaller": PyInstaller.__version__, "files": files}
+    if native_runtime:
+        manifest["native_runtime_source"] = native_runtime.provenance()
     (package / "package-manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     with zipfile.ZipFile(archive, "x", compression=zipfile.ZIP_DEFLATED) as target:
         for path in sorted(path for path in package.rglob("*") if path.is_file()):

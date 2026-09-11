@@ -47,7 +47,7 @@ def rpm_license_record(destination: Path, source: Path) -> dict:
             "license_files": files}
 
 
-def add_native_inventory(destination: Path, binaries: list[tuple[str, str, str]]) -> None:
+def add_native_inventory(destination: Path, binaries: list[tuple[str, str, str]], *, native_runtime=None) -> None:
     inventory_path = destination / "inventory.json"
     inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
     records = {item["name"].lower().replace("_", "-"): item for item in inventory["packages"]}
@@ -63,7 +63,13 @@ def add_native_inventory(destination: Path, binaries: list[tuple[str, str, str]]
     for target, original, kind in sorted(set(binaries)):
         source = Path(original).resolve(strict=True)
         owner = distribution_files.get(source)
-        if owner is not None:
+        reused = native_runtime.license_record(destination, source) if native_runtime else None
+        if reused is not None:
+            owner = reused["name"].lower().replace("_", "-")
+            if owner in records and records[owner] != reused:
+                raise RuntimeError("Conflicting native library license versions")
+            records[owner] = reused
+        elif owner is not None:
             if owner not in records:
                 raise RuntimeError("Bundled native distribution missing from license inventory: " + owner)
         elif source.name.startswith("libpython") or (stdlib / "lib-dynload") in source.parents:
