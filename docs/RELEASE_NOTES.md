@@ -1,5 +1,13 @@
 # Release notes
 
+## Unreleased
+
+- Windows and Linux Slack notifications and reply acknowledgements now begin
+  with `WatchDog host: <hostname>`, identifying the native machine that sent
+  the message. The repository's remote alias remains separate. Routing,
+  duplicate suppression and saved configuration are unchanged. macOS message
+  formatting is unchanged.
+
 ## v0.2.19
 
 - Linux can receive allowlisted Slack replies independently of the desktop with

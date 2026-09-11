@@ -23,6 +23,7 @@ from .slack_mapping import (
 )
 from .storage import FileLock, InstructionStore
 from .control_context import current_effect
+from .slack_presentation import slack_message_with_host
 
 
 NOTIFICATION_STATE_SCHEMA_VERSION = 1
@@ -696,7 +697,7 @@ class EnvironmentNotifier:
         )
 
     def _send_slack(self, event: NotificationEvent) -> None:
-        text = f"{event.subject.strip()}\n{event.message}"
+        text = slack_message_with_host(f"{event.subject.strip()}\n{event.message}")
         if self.config.slack_post_configured:
             assert self.config.slack_bot_token is not None
             assert self.config.slack_channel_id is not None
