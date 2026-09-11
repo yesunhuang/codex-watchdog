@@ -73,6 +73,14 @@ installation leaves the file unchanged.
 
 ## Foreground operation
 
+For an existing installation at the default path, copy the repository helper
+[`Start Codex WatchDog.command`](../packaging/Start%20Codex%20WatchDog.command)
+to your Desktop and double-click it. Terminal opens automatically and runs the
+installed WatchDog with saved Keychain settings, Slack only, automatic workspace
+discovery and a 30-second interval. No command entry is needed. Keep that window
+open; press **Control-C** there to stop. This small helper needs no graphical
+frontend or additional runtime, and reuses the installed executable after upgrades.
+
 For the accepted Keychain Slack workflow with only your explicit registrations:
 
 ```sh
