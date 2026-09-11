@@ -220,6 +220,16 @@ v0.2.18 以降は `linux-auto-run --repo /absolute/repository/path` で、その
 繰り返し指定します。`--thread UUID` は指定した会話だけに監視を限定します。バックエンドが
 終了した場合は古い所有権を解放し、同じ thread と稼働中の VS Code writer を維持します。
 
+v0.2.19 以降、Linux は `CODEX_WATCHDOG_SLACK_REPLY_MODE=poll`、既存の bot token /
+channel、許可ユーザー一覧で Slack の返信を受信できます。ノート PC の Slack 接続には
+依存しません。bot token と channel だけでは通知の送信のみが有効です。
+[返信設定と制限](docs/AUTOMATIC_REMOTE_HANDOFF.md)を参照してください。
+
+ホームディレクトリを共有するクラスタでは、WatchDog サービスと VS Code ワークスペースを
+同じ選択済みノードで実行してください。インストールファイルの共有だけでは、同じ会話を
+ノード間で安全に自動移行できません。[共有ホームの制限](docs/AUTOMATIC_REMOTE_HANDOFF.md)
+を参照してください。
+
 > [!IMPORTANT]
 > upgrade は compatible な user state をデフォルトで保持する設計です。WatchDog は既存の
 > runtime / profile / provider settings を可能な限り再利用し、再設定を通常の upgrade 手順に

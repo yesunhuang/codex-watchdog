@@ -238,6 +238,17 @@ registered conversations in a workspace, including newly opened threads. Repeat
 that conversation. Exited backends release their stale ownership; recovery keeps
 the same thread and preserves any live VS Code writer.
 
+From v0.2.19, Linux can receive Slack replies with
+`CODEX_WATCHDOG_SLACK_REPLY_MODE=poll`, the existing bot token/channel, and an
+approved-user list. This works independently of the laptop's Slack connection.
+Bot token/channel alone enable outgoing notifications only. See the
+[reply configuration and limits](docs/AUTOMATIC_REMOTE_HANDOFF.md).
+
+On clusters with shared home directories, keep the WatchDog service and the VS
+Code execution workspace on the same chosen node. Shared installation files do
+not provide safe automatic roaming of one conversation between nodes; see the
+[shared-home limitations](docs/AUTOMATIC_REMOTE_HANDOFF.md).
+
 > [!IMPORTANT]
 > Upgrades preserve compatible user state by default. WatchDog reuses existing
 > runtime/profile/provider settings where compatible and does not treat

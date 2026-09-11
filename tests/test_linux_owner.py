@@ -63,6 +63,18 @@ def test_binding_idempotent_preserves_unknown_state_and_does_not_renew(setup):
     assert binding.load()["future_setting"] == {"keep": True}
 
 
+def test_bound_run_starts_and_closes_reply_listener(setup, monkeypatch):
+    binding, _ = setup
+    events = []
+    service = SimpleNamespace(slack_reply_relay=SimpleNamespace(
+        start=lambda: events.append("start"), close=lambda: events.append("close")),
+        notifier=SimpleNamespace())
+    instance = LinuxThreadOwner(binding, service=service)
+    monkeypatch.setattr(instance, "step", lambda **kw: dict(owner_state="released"))
+    assert instance.run() == 0
+    assert events == ["start", "close"]
+
+
 def test_binding_excludes_other_runtime_and_cannot_retarget(setup):
     binding, workspace = setup
     other = LinuxBinding(binding.runtime.parent / "other", binding.codex_home)

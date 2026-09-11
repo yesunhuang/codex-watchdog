@@ -32,6 +32,7 @@ SLACK_BOT_TOKEN_ENV = "CODEX_WATCHDOG_SLACK_BOT_TOKEN"
 SLACK_APP_TOKEN_ENV = "CODEX_WATCHDOG_SLACK_APP_TOKEN"
 SLACK_CHANNEL_ID_ENV = "CODEX_WATCHDOG_SLACK_CHANNEL_ID"
 SLACK_ALLOWED_USER_IDS_ENV = "CODEX_WATCHDOG_SLACK_ALLOWED_USER_IDS"
+SLACK_REPLY_MODE_ENV = "CODEX_WATCHDOG_SLACK_REPLY_MODE"
 SMTP_HOST_ENV = "CODEX_WATCHDOG_SMTP_HOST"
 SMTP_PORT_ENV = "CODEX_WATCHDOG_SMTP_PORT"
 SMTP_USERNAME_ENV = "CODEX_WATCHDOG_SMTP_USERNAME"
@@ -171,6 +172,7 @@ class NotificationConfig:
     slack_app_token: Optional[str] = field(default=None, repr=False)
     slack_channel_id: Optional[str] = field(default=None, repr=False)
     slack_allowed_user_ids: Tuple[str, ...] = field(default=(), repr=False)
+    slack_reply_mode: str = field(default="socket", repr=False)
     smtp_host: Optional[str] = field(default=None, repr=False)
     smtp_port: int = field(default=587, repr=False)
     smtp_username: Optional[str] = field(default=None, repr=False)
@@ -185,6 +187,8 @@ class NotificationConfig:
     timeout_seconds: float = field(default=10.0, repr=False)
 
     def __post_init__(self) -> None:
+        if self.slack_reply_mode not in ("socket", "poll"):
+            raise ValueError("Slack reply mode must be socket or poll")
         if not 1 <= self.smtp_port <= 65535:
             raise ValueError("SMTP port must be from 1 to 65535")
         if self.smtp_security not in _SMTP_SECURITY_VALUES:
@@ -224,6 +228,7 @@ class NotificationConfig:
             slack_allowed_user_ids=_split_slack_user_ids(
                 _optional_environment_value(source, SLACK_ALLOWED_USER_IDS_ENV)
             ),
+            slack_reply_mode=_optional_environment_value(source, SLACK_REPLY_MODE_ENV) or "socket",
             smtp_host=_optional_environment_value(source, SMTP_HOST_ENV),
             smtp_port=_parse_port(
                 _optional_environment_value(source, SMTP_PORT_ENV),
@@ -257,7 +262,7 @@ class NotificationConfig:
     def slack_post_configured(self) -> bool:
         # Bot + channel alone deliberately opts into notifications only. A
         # partially configured reply listener must still fail closed.
-        if self.slack_app_token or self.slack_allowed_user_ids:
+        if self.slack_app_token or self.slack_allowed_user_ids or self.slack_reply_mode == "poll":
             return self.slack_relay_configured
         return (
             isinstance(self.slack_bot_token, str)
@@ -270,8 +275,8 @@ class NotificationConfig:
         return (
             isinstance(self.slack_bot_token, str)
             and self.slack_bot_token.startswith("xoxb-")
-            and isinstance(self.slack_app_token, str)
-            and self.slack_app_token.startswith("xapp-")
+            and (self.slack_reply_mode == "poll" or (
+                isinstance(self.slack_app_token, str) and self.slack_app_token.startswith("xapp-")))
             and valid_slack_channel_id(self.slack_channel_id)
             and bool(self.slack_allowed_user_ids)
             and all(valid_slack_user_id(value) for value in self.slack_allowed_user_ids)
@@ -315,6 +320,7 @@ class NotificationConfig:
                 self.slack_app_token,
                 self.slack_channel_id,
                 self.slack_allowed_user_ids,
+                self.slack_reply_mode == "poll",
             )
         )
         if relay_values_present and not self.slack_post_configured:
@@ -546,6 +552,9 @@ class EnvironmentNotifier:
             if slack_thread_store is not None
             else SlackThreadStore(runtime)
         )
+        if slack_thread_store is None and self.config.slack_reply_mode == "poll":
+            from .slack_poll import SlackPollingThreadStore
+            self.slack_thread_store = SlackPollingThreadStore(runtime)
 
     def notify(self, event: NotificationEvent) -> NotificationResult:
         with current_effect("notification"):

@@ -207,6 +207,14 @@ watchdog="${XDG_DATA_HOME:-$HOME/.local/share}/codex-watchdog/bin/codex-watchdog
 则明确只监控指定会话。后端退出后会释放失效的所有权；恢复时保留原 thread，且不会
 干扰仍在运行的 VS Code writer。
 
+从 v0.2.19 起，Linux 可通过 `CODEX_WATCHDOG_SLACK_REPLY_MODE=poll`、已有的 bot token/
+频道和用户白名单接收 Slack 回复，不依赖笔记本的 Slack 连接。只有 bot token 和频道时，
+仍然只能发送通知。详见[回复配置与限制](docs/AUTOMATIC_REMOTE_HANDOFF.md)。
+
+在使用共享 home 目录的集群上，请让 WatchDog 服务与 VS Code 工作区运行在同一个选定节点。
+安装文件可以共享，但这不代表同一会话可以安全地自动跨节点切换；详情见
+[共享目录限制](docs/AUTOMATIC_REMOTE_HANDOFF.md)。
+
 > [!IMPORTANT]
 > 升级默认应保留兼容的用户状态。WatchDog 会尽量复用已有 runtime/profile/provider
 > 设置，不把“重新配置一遍”当成正常升级步骤。任何 hook executable 改变后，在完成检查

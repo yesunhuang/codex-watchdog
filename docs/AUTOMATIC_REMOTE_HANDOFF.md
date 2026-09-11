@@ -75,6 +75,22 @@ Stopping the user service requests idle release. Disable it as well to cancel
 automatic startup. Hosts with shared home directories should pin the unit to the
 verified execution host, since shared files do not imply shared process ownership.
 
+Shared-home cluster installations do **not** currently support transparent
+switching of the same Codex conversation between execution nodes. Native tests
+on a GPFS home directory found that `flock` excluded another process on the same
+node but did not exclude another node opening the identical file. POSIX record
+locks did coordinate between those nodes. The installed Codex thread writer used
+`flock`, so changing only WatchDog's service placement or lock type would not
+protect against a second native writer on another node.
+
+Keep the WatchDog service and the VS Code execution workspace on the same chosen
+node. A shared package, profile and Slack configuration are reusable across nodes;
+a running process is still local to its node. Do not remove a service host pin or
+run competing copies for the same shared Codex home to simulate roaming. This
+requires verified cross-node coordination for both WatchDog and native Codex
+writers, with active work completed before handback. A desktop reconnect to the
+same execution node remains supported.
+
 From v0.2.16, add **`--continue-interrupted`** to `linux-run` or `linux-auto-run`
 to continue interrupted work automatically after Linux acquires the same thread.
 This is opt-in; upgrades preserve the previous behavior unless the option is
@@ -136,6 +152,31 @@ settings in the host's existing private service configuration; do not paste
 credentials into command lines or copy another host's secure store.
 
 Automatic status output includes the notification result for a blocked owner.
+From v0.2.19, Linux can receive Slack replies without sharing the desktop's
+Socket Mode connection. In the existing private service environment, set
+`CODEX_WATCHDOG_SLACK_REPLY_MODE=poll`, retain the bot token and channel, and set
+`CODEX_WATCHDOG_SLACK_ALLOWED_USER_IDS` to the approved Slack user IDs. The bot
+needs history access for that conversation (`channels:history` or
+`groups:history`) as well as permission to post. No app token is needed in poll
+mode. Both `linux-run` and `linux-auto-run` start this listener.
+
+Only replies to this host's mapped notifications are read. Each listener checks
+one mapped Slack thread every ten seconds, rotating through its saved threads;
+latency grows with that count. Slack rate limits delay the next request. Cursors
+and exact-thread delivery receipts survive restarts. The runtime's
+`slack/poll-health.json` reports polling or retry status without credentials or
+reply text. Replies from other users, bot messages, and unknown parents cannot
+start a Codex turn. A deferred admission is retried; an uncertain delivery is not
+blindly repeated.
+
+Existing Socket Mode configuration and receipts are preserved. Poll-mode parents
+stay with their originating host, so a desktop listener cannot consume the same
+reply through an older, incompatible event ID. If that host is unavailable,
+those replies wait for its service to return. Historical notification-only
+messages have no saved reply mapping and are not automatically replayed. A bot
+token and channel alone still provide outgoing notifications only; they do not
+enable replies.
+
 The runtime also retains schema-1 `linux/health/*.json` records. `sent` or
 `sent_fallback` records delivery; `audit_only` means no external transport was
 configured. Failed/uncertain delivery is not reported as successful suppression

@@ -274,6 +274,10 @@ class LinuxThreadOwner:
         try:
             locks.enter_context(FileLock(self.binding.runtime / "locks" / "foreground-run.lock"))
             locks.enter_context(FileLock(lock))
+            relay = getattr(self.service, "slack_reply_relay", None)
+            if relay is not None:
+                relay.start()
+                locks.callback(relay.close)
             for signum in (signal.SIGTERM, signal.SIGINT):
                 previous_handlers[signum] = signal.signal(signum, self._signal_release)
             while True:
