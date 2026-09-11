@@ -8,6 +8,7 @@ from codex_watchdog.slack_mapping import SlackRelayTarget, SlackThreadStore
 from codex_watchdog.slack_poll import SlackPollingThreadStore, SlackReplyPoller
 from codex_watchdog.slack_relay import SlackReplyRelay
 from codex_watchdog.storage import FileLock, StoreBusyError
+from codex_watchdog import slack_presentation
 
 
 THREAD = "11111111-2222-4333-8444-555555555555"
@@ -77,7 +78,9 @@ def test_old_socket_mappings_and_receipts_are_preserved_and_never_imported(tmp_p
     assert relay.thread_store.lookup_thread(CHANNEL, "1789111600.000001") is None
 
 
-def test_reply_arriving_while_listener_offline_is_delivered_once_across_restart(tmp_path):
+def test_reply_arriving_while_listener_offline_is_delivered_once_across_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr(slack_presentation, "host_platform", "linux")
+    monkeypatch.setattr(slack_presentation, "gethostname", lambda: "poller-a.example")
     relay, deliveries, _ = fixture(tmp_path)
     calls = []
     def api(method, params):
@@ -90,6 +93,10 @@ def test_reply_arriving_while_listener_offline_is_delivered_once_across_restart(
     assert SlackReplyPoller(relay, api=api).poll_once() == []
     assert len(deliveries) == 1
     assert calls[-1][1]["oldest"] == REPLY
+    acknowledgements = [params for method, params in calls if method == "chat.postMessage"]
+    assert len(acknowledgements) == 1
+    assert acknowledgements[0]["text"] == "WatchDog host: poller-a.example\nQueued for the exact existing Codex thread."
+    assert acknowledgements[0]["channel"] == CHANNEL and acknowledgements[0]["thread_ts"] == PARENT
     assert "run five minutes" not in poller.path.read_text()
 
 

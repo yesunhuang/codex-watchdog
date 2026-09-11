@@ -20,6 +20,7 @@ from .storage import FileLock
 from .control_state import ControlError, control_read_json, control_root
 from .remote_control import RemoteControlClient
 from .notifications import NotificationEvent
+from .slack_presentation import slack_message_with_host
 
 
 _DELIVERED_STATES = frozenset({"enqueued", "consumed_or_started", "started"})
@@ -176,6 +177,8 @@ class SlackReplyRelay:
             and valid_slack_channel_id(channel)
             and valid_slack_timestamp(thread_ts)
         ):
+            response = slack_message_with_host(response)
+
             def send_ack(_event):
                 client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=response,
                                         unfurl_links=False, unfurl_media=False)
