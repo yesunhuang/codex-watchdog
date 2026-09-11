@@ -531,7 +531,11 @@ def main() -> None:
         assert "CODEX_WATCHDOG_SLACK_REPLY_MODE=poll" in configured["unit"]
         analyzer = shutil.which("systemd-analyze")
         if analyzer:
-            checked = run([analyzer, "--user", "verify", configured["unit_path"]], env=node_environment)
+            # Older systemd versions ignore generator-path overrides. Give
+            # their installed generators the normal OS path for this offline
+            # unit parse only; all packaged executable checks keep Python hidden.
+            checked = run([analyzer, "--user", "verify", configured["unit_path"]],
+                          env={**node_environment, "PATH": os.defpath})
             assert not checked.stderr.strip(), checked.stderr
         process = subprocess.Popen([str(executable), "linux-auto-run", "--interval", "1"],
                                    cwd=work, env=node_environment, stdin=subprocess.DEVNULL,
