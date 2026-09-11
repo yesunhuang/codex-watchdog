@@ -506,9 +506,17 @@ def main() -> None:
         node_home = home / "isolated node codex"
         node_environment = {**environment, "CODEX_HOME": str(node_home),
                             "XDG_CONFIG_HOME": str(home / "isolated node config")}
-        node_session = home / "isolated user manager runtime"
+        # Keep AF_UNIX paths below the kernel limit even when systemd loads
+        # distribution-provided user sockets during its offline unit check.
+        node_session = root / "systemd"
         node_session.mkdir(mode=0o700)
         node_environment["XDG_RUNTIME_DIR"] = str(node_session)
+        generators = root / "empty-generators"
+        generators.mkdir()
+        # Host environment generators are unrelated to this unit and can
+        # require desktop programs deliberately absent from the fixture PATH.
+        node_environment["SYSTEMD_ENVIRONMENT_GENERATOR_PATH"] = str(generators)
+        node_environment["SYSTEMD_GENERATOR_PATH"] = str(generators)
         node_secrets = home / "node environment.env"
         node_secrets.write_text("# No provider credentials in this fixture\n")
         node_secrets.chmod(0o600)
