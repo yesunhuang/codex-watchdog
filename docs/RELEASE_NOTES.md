@@ -1,3 +1,16 @@
+Version 0.2.17 fixes missing or delayed Linux completion notifications while
+VS Code is attached. The running host WatchDog now keeps observation and
+notification authority for its enrolled threads. VS Code retains its native
+Codex writer; returning that writer from detached execution no longer abandons
+monitoring. Desktop WatchDog remains the fallback when the host releases its
+lease or becomes unavailable. Older desktop helpers remain compatible.
+
+Ownership changes preserve completion cursors, notification receipts, existing
+thread IDs, hooks, profiles and credentials. An unresolved external send blocks
+takeover, and already delivered completions are not replayed. Manual release and
+thread exclusions still apply. v0.2.16's opt-in interrupted-turn continuation
+and confirmed-start notification remain available.
+
 Version 0.2.14 restores automatic tracking of an existing conversation when Codex
 shows it as an active follower in its workspace window but retains the writer in
 another live VS Code window. WatchDog now verifies the exact thread, repository,

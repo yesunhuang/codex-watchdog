@@ -143,6 +143,31 @@ def test_hook_with_no_current_writer_cannot_consume(controlled, monkeypatch):
     assert len(list((runtime / "inbox").glob("*.json"))) == 1
 
 
+@pytest.mark.parametrize("verified", [True, False])
+def test_attached_hook_uses_host_observer_epoch_only_with_native_ancestry(controlled, monkeypatch, verified):
+    from codex_watchdog import control_context, linux_owner
+    store, token, codex, repo, runtime = controlled
+    host = store.claim_remote("host", "remote-host", "vscode", host_observer=True)
+    with store.guard(host) as value:
+        value["runtime_path"] = str(runtime)
+        value["writer_pid"] = None  # The host does not own the VS Code writer.
+        control_atomic_json(store.path, value)
+    monkeypatch.setattr(control_context.sys, "platform", "linux")
+    monkeypatch.setattr(control_context, "ControlStore", lambda *args: store)
+    monkeypatch.setattr(control_context, "_hook_descends_from", lambda pid: verified and pid == 777)
+    monkeypatch.setattr(linux_owner, "writer_pid", lambda *args: 777)
+    monkeypatch.setattr(linux_owner, "vscode_writer", lambda pid: pid == 777)
+    payload = dict(session_id=THREAD, cwd=str(repo))
+    if verified:
+        with control_context.hook_owner(runtime, codex, payload) as selected:
+            assert selected == runtime
+            assert control_context.current_control()[1] == host
+    else:
+        with pytest.raises(ControlError, match="writer_unverified"):
+            with control_context.hook_owner(runtime, codex, payload):
+                pytest.fail("an unrelated hook must not adopt the host capability")
+
+
 def test_transient_control_contention_does_not_shorten_stop_grace(tmp_path, monkeypatch):
     from contextlib import contextmanager
     import io

@@ -163,7 +163,7 @@ def test_empty_history_and_default_off_do_not_continue(scenario):
 def test_attached_writer_never_resumes_or_queues(scenario):
     s = scenario
     s.writer = 777
-    assert s.step()["owner_state"] == "waiting_for_detach"
+    assert s.step()["owner_state"] == "observing"
     assert not s.calls and not s.sent
 
 

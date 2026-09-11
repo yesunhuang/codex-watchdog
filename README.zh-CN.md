@@ -199,6 +199,9 @@ watchdog="${XDG_DATA_HOME:-$HOME/.local/share}/codex-watchdog/bin/codex-watchdog
 [自动远程交接](docs/AUTOMATIC_REMOTE_HANDOFF.md)。persistent remote owner 目前仍是
 **Linux-specific**；尚未宣称 macOS/Windows remote owner 已具备同等能力。
 
+从 v0.2.17 起，运行中的 Linux WatchDog 优先监控本机已纳管的 thread，并在 VS Code
+仍连接时发送完成通知。只有主机 WatchDog 不可用时，笔记本 WatchDog 才接管监控。
+
 > [!IMPORTANT]
 > 升级默认应保留兼容的用户状态。WatchDog 会尽量复用已有 runtime/profile/provider
 > 设置，不把“重新配置一遍”当成正常升级步骤。任何 hook executable 改变后，在完成检查

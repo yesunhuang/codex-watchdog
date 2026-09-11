@@ -227,6 +227,8 @@ class ControlStore:
                      state="ATTACHED_LOCAL" if role == "local" else "DETACHED_REMOTE")
         if role == "local":
             value["attached_request"] = None
+        elif identity.get("host_observer") is True and self._live(value.get("attached_request")):
+            value["state"] = "HANDOFF"
         control_atomic_json(self.path, value)
         return self._token(value)
 
@@ -267,6 +269,10 @@ class ControlStore:
                 raise ControlError("control_external_effect_unresolved")
             if owner is not None and (self._live(owner) or writer == "remote"):
                 if owner["role"] == "remote":
+                    # A host observer keeps notification authority while VS Code
+                    # owns execution. Only its detached writer needs handback.
+                    if owner.get("host_observer") is True and writer != "remote":
+                        return None
                     request = value.get("attached_request")
                     if self._live(request) and request["instance"] != instance:
                         raise ControlError("control_competing_attached_client")
@@ -277,7 +283,7 @@ class ControlStore:
                 raise ControlError("control_writer_not_released")
             return self._grant(value, identity, "local")
 
-    def claim_remote(self, instance, locality, writer, ttl=30, manual=False):
+    def claim_remote(self, instance, locality, writer, ttl=30, manual=False, host_observer=False):
         identity = self._identity(instance, locality, ttl)
         with control_file_lock(self.lock_path):
             value = self.read()  # Remote never invents an unobserved target.
@@ -286,11 +292,48 @@ class ControlStore:
             self._recover_completed_external(value)
             if value["external_effect"] is not None:
                 raise ControlError("control_external_effect_unresolved")
-            if self._live(value.get("attached_request")) or self._live(value["owner"]):
-                return None
-            if writer != "absent":
-                return None
+            if host_observer:
+                # The running host controller may replace a desktop observer,
+                # never a live host controller or an unverified native writer.
+                # The lock and external-effect barrier fence in-flight sends.
+                if writer not in ("absent", "vscode"):
+                    return None
+                owner = value["owner"]
+                if self._live(owner) and owner["role"] != "local":
+                    return None
+                identity["host_observer"] = True
+                if writer == "vscode":
+                    value["attached_request"] = None
+            else:
+                if self._live(value.get("attached_request")) or self._live(value["owner"]):
+                    return None
+                if writer != "absent":
+                    return None
             return self._grant(value, identity, "remote")
+
+    def observe_writer(self, token, writer):
+        """Separate native writer handback from host observation ownership."""
+        if writer not in ("absent", "vscode", "remote"):
+            raise ControlError("control_writer_unverified")
+        with self.guard(token) as value:
+            if value["owner"].get("host_observer") is not True:
+                raise ControlError("control_host_observer_required")
+            # Older desktop helpers still write HANDOFF for a VS Code writer.
+            # Retain our epoch, receipts and cursor; that writer needs no release.
+            if writer == "vscode" or not self._live(value.get("attached_request")):
+                value.update(state="DETACHED_REMOTE", attached_request=None)
+                control_atomic_json(self.path, value)
+            return value["state"] == "HANDOFF"
+
+    def handback_pending(self, value):
+        if value["state"] != "HANDOFF":
+            return False
+        if value["owner"].get("host_observer") is True:
+            lock = self.directory.parent.parent / "thread-writer-locks" / (self.thread_id + ".lock")
+            pid = control_kernel_owner(lock)
+            if pid is not None and control_vscode_writer(pid):
+                return False
+        return True
 
     def renew(self, token, ttl=30):
         identity = self._identity(token["instance"], token["locality"], ttl)
@@ -324,7 +367,10 @@ class ControlStore:
         with control_file_lock(self.lock_path):
             value = self.read()
             self._check(value, token)
-            if token["role"] != "remote" or writer != "absent" or value["external_effect"] is not None:
+            attached_observer = (writer == "vscode" and value["owner"].get("host_observer") is True
+                                 and value.get("writer_pid") is None)
+            if (token["role"] != "remote" or writer != "absent" and not attached_observer
+                    or value["external_effect"] is not None):
                 raise ControlError("control_release_not_safe")
             value.update(owner=None, state="HANDOFF")
             control_atomic_json(self.path, value)
@@ -338,7 +384,7 @@ class ControlStore:
             if external_id is not None and (not isinstance(barrier, dict)
                     or barrier.get("id") != external_id):
                 raise ControlError("control_external_effect_mismatch")
-            if purpose == "queue" and value["state"] == "HANDOFF":
+            if purpose == "queue" and self.handback_pending(value):
                 raise ControlError("control_handback_pending")
             yield value
 

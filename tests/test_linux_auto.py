@@ -1,6 +1,7 @@
 from pathlib import Path
 import json
 import sqlite3
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -35,6 +36,7 @@ def scenario(tmp_path, monkeypatch):
     monkeypatch.setattr(linux_owner, "writer_pid", lambda *args: writer[0])
     monkeypatch.setattr(linux_auto, "writer_pid", lambda *args: writer[0])
     monkeypatch.setattr(linux_owner, "vscode_writer", lambda pid: pid == 777)
+    monkeypatch.setattr(linux_auto, "vscode_writer", lambda pid: pid == 777)
     clock = [100.0]
     factory = lambda h, t, r: ControlStore(h, t, r, clock=lambda: clock[0], boot_id="boot")
     store = factory(home, THREAD, repo)
@@ -99,14 +101,16 @@ def scenario(tmp_path, monkeypatch):
             item["locks"].close()
 
 
-def test_automatic_exact_thread_lifecycle_and_idle_handback(scenario):
+def test_host_observes_attached_thread_and_keeps_observation_after_idle_handback(scenario):
     store, local, writer, clock, clients, make_agent = scenario
     agent = make_agent()
-    assert agent.step(observe=False)[0]["state"] == "standby"
+    assert agent.step(observe=False)[0]["state"] == "observing"
     assert clients == []
-    assert not (store.directory / "runtime" / "linux" / "binding.json").exists()
-    store.detach(local)
-    assert agent.step(observe=False)[0]["state"] == "standby"
+    assert store.read()["owner"]["host_observer"] is True
+    assert store.read()["epoch"] == 2
+    from codex_watchdog.control_state import ControlError
+    with pytest.raises(ControlError, match="stale_epoch"):
+        store.detach(local)
     writer[0] = None
     owned = agent.step(observe=False)[0]
     assert owned["state"] == "owned" and owned["epoch"] == 2
@@ -122,18 +126,21 @@ def test_automatic_exact_thread_lifecycle_and_idle_handback(scenario):
     assert store.read()["epoch"] == 2
     owner.thread_status = clients[0].status = "idle"
     released = agent.step(observe=False)[0]
-    assert released["state"] == "released"
+    assert released["state"] == "waiting_for_attach"
     assert clients[0].closed and writer[0] is None
-    assert agent.controllers == {}
-    assert store.attach("desktop-returned", "desktop-host", "vscode")["epoch"] == 3
-    assert agent.step(observe=False)[0]["state"] == "standby"
+    assert owner.binding.load()["state"] == "armed"
+    writer[0] = 777
+    assert store.attach("desktop-returned", "desktop-host", "vscode") is None
+    assert agent.step(observe=False)[0]["state"] == "observing"
+    assert store.read()["epoch"] == 2 and store.read()["state"] == "DETACHED_REMOTE"
+    assert len(clients) == 1  # Never resume the VS Code writer.
 
 
 def test_desktop_crash_takeover_and_remote_crash_restart_keep_same_thread(scenario):
     store, local, writer, clock, clients, make_agent = scenario
     first = make_agent()
     clock[0] += 21
-    assert first.step(observe=False)[0]["state"] == "standby"
+    assert first.step(observe=False)[0]["state"] == "observing"
     writer[0] = None
     assert first.step(observe=False)[0]["epoch"] == 2
     item = first.controllers.pop(THREAD)
@@ -237,7 +244,7 @@ def test_normal_handback_does_not_create_loss_alert(scenario):
     store, local, writer, clock, clients, make_agent = scenario
     agent, owner = detached(scenario)
     assert store.attach("desktop-returned", "desktop-host", "remote") is None
-    assert agent.step(observe=False)[0]["state"] == "released"
+    assert agent.step(observe=False)[0]["state"] == "waiting_for_attach"
     assert not owner.health.path.exists()
     assert not list((store.directory / "effects").glob("*.json"))
 
@@ -334,7 +341,7 @@ def test_handback_racing_observation_does_not_raise_a_loss_alert(scenario, monke
     monkeypatch.setattr(agent, "_cycle", handback)
     assert "notification" not in agent.step()[0]
     assert not owner.health.path.exists()
-    assert agent.step()[0]["state"] == "released"
+    assert agent.step(observe=False)[0]["state"] == "waiting_for_attach"
     assert all(call[1]["threadId"] == THREAD for client in clients for call in client.calls)
     assert not any(call[0] in ("thread/start", "turn/start") for client in clients for call in client.calls)
 
@@ -356,6 +363,68 @@ def test_second_remote_process_stays_standby(scenario):
     assert first.step(observe=False)[0]["state"] == "owned"
     assert second.step(observe=False)[0]["state"] == "standby"
     assert len(clients) == 1 and store.read()["epoch"] == 2
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="host helper requires an absolute POSIX repository path")
+def test_attached_completion_is_sent_by_host_once_without_resuming_vscode(scenario):
+    from codex_watchdog.mvp_service import MvpWatchdogService
+    from codex_watchdog.control_state import ControlError
+    store, local, writer, clock, clients, make_agent = scenario
+    agent = make_agent()
+    sent = []
+
+    def service_factory(runtime, **kwargs):
+        ns = kwargs["remote_ssh_adapter"].namespace
+        ns["ControlStore"] = lambda *args: store
+        ns["ControlError"] = ControlError
+        ns["control_exact_thread"] = lambda repo, thread: repo == store.repo_path and thread == THREAD
+        ns["git_observation"] = lambda repo: dict(status="observed", topology="equal", blockers=[],
+                                                  head_oid="a" * 40, upstream_oid="a" * 40)
+        ns["rollout_completion"] = lambda thread: dict(
+            turn_id="five-minute-turn", completed_at="2026-01-01T00:00:00Z", final_output="yes",
+            final_output_sha256="8a798890fe93817163b10b5f7bd2ca4d25d84c52739a645a889c173eee7d9d3d",
+            final_output_chars=3,
+        )
+        notifier = EnvironmentNotifier(runtime,
+            config=NotificationConfig(slack_webhook_url="https://hooks.slack.invalid/host"),
+            http_post=lambda url, payload, timeout: sent.append(json.loads(payload)["text"]) or 200)
+        return MvpWatchdogService(runtime, notifier=notifier, **kwargs)
+
+    agent.service_factory = service_factory
+    result = agent.step()[0]
+    assert result["state"] == "observing", result
+    assert len(sent) == 1 and sent[0].rstrip().endswith("yes")
+    assert store.read()["owner"]["instance"] == agent.instance
+    assert store.read()["remote_state"]["last_completion_turn"] == "five-minute-turn"
+    assert writer[0] == 777 and clients == []
+    assert agent.step()[0]["state"] == "observing"
+    assert len(sent) == 1
+    with pytest.raises(ControlError, match="stale_epoch"):
+        store.prepare_notification(local, "desktop-copy", "desktop-copy")
+    assert len(list((store.directory / "effects").glob("*.json"))) == 1
+
+
+def test_expired_observer_reacquires_after_desktop_fallback_without_resuming(scenario):
+    store, local, writer, clock, clients, make_agent = scenario
+    agent = make_agent()
+    assert agent.step(observe=False)[0]["state"] == "observing"
+    clock[0] += 121
+    assert store.attach("fallback", "desktop-host", "vscode")["epoch"] == 3
+    assert agent.step(observe=False)[0]["reason"] == "control_stale_epoch"
+    assert not agent.controllers and not clients
+    result = agent.step(observe=False)[0]
+    assert result["state"] == "observing" and result["epoch"] == 4
+    assert not clients and writer[0] == 777
+
+
+def test_stopping_observer_releases_authority_without_touching_vscode(scenario):
+    store, local, writer, clock, clients, make_agent = scenario
+    agent = make_agent()
+    assert agent.step(observe=False)[0]["state"] == "observing"
+    agent.stopping = True
+    assert agent.step(observe=False)[0]["state"] == "released"
+    assert writer[0] == 777 and not clients and not agent.controllers
+    assert store.attach("desktop", "desktop-host", "vscode")["epoch"] == 3
 
 
 def test_operator_release_stays_paused_until_explicit_bind(scenario, monkeypatch):

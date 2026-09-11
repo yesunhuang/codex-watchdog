@@ -296,11 +296,11 @@ def owner(setup, monkeypatch):
     return owner, client, cycles, pid
 
 
-def test_attached_writer_waits_without_sending_or_resuming(owner):
+def test_attached_writer_observes_completions_without_resuming(owner):
     instance, client, cycles, pid = owner
     pid[0] = 777
-    assert instance.step(observe=True)["owner_state"] == "waiting_for_detach"
-    assert client.requests == [] and cycles == []
+    assert instance.step(observe=True)["owner_state"] == "observing"
+    assert client.requests == [] and cycles == ["read-only-service"]
 
 
 def test_conflicting_writer_fails_closed(owner):
@@ -366,7 +366,7 @@ def test_opt_in_renewal_keeps_same_live_binding_without_another_resume(owner, mo
     instance.renew_lease = True
     if attached:
         pid[0] = 777
-    expected = "waiting_for_detach" if attached else "owned"
+    expected = "observing" if attached else "owned"
     assert instance.step(observe=False)["owner_state"] == expected
     value = instance.binding.load()
     assert value["expires_at"] == 96400.0 and value["thread_id"] == THREAD
