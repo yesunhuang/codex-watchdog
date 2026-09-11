@@ -139,7 +139,10 @@ requests. Existing queue receipts and journals survive restart, and uncertain
 sends are not retried blindly. Closing VS Code may interrupt an in-flight command;
 packaging does not make that command uninterrupted or replay it.
 
-Before reopening the same conversation in VS Code:
+From v0.2.20, completed idle work releases its writer automatically while
+monitoring and Slack replies stay enabled (`owner_state: parked`). VS Code can
+reopen the same conversation; choose Retry if its previous warning is still shown.
+To disable takeover explicitly instead:
 
 ```sh
 "$watchdog" linux-release

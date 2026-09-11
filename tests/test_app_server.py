@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import queue
 from pathlib import Path
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -85,3 +87,16 @@ def test_server_eof_is_not_retried(tmp_path, monkeypatch):
         assert client.next_id == 1
     finally:
         client.close()
+
+
+def test_pump_drains_pending_status_events_before_owner_checks_idle():
+    client = object.__new__(StdioAppServer)
+    client.messages = queue.Queue(maxsize=128)
+    client.failed = threading.Event()
+    events = []
+    client.on_event = events.append
+    for state in ("active", "idle", "active", "idle"):
+        client.messages.put({"method": "thread/status/changed", "params": {"status": {"type": state}}})
+    client.pump(timeout=0)
+    assert [event["params"]["status"]["type"] for event in events] == ["active", "idle", "active", "idle"]
+    assert client.messages.empty()

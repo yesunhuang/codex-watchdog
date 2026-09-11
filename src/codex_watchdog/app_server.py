@@ -128,6 +128,14 @@ class StdioAppServer:
         message = self._get(timeout)
         if message is not None:
             self._event(message)
+        # A Linux observation interval must not throttle native status handling
+        # to one event per cycle. Drain the bounded queue before using its state.
+        for _ in range(self.messages.maxsize):
+            try:
+                message = self.messages.get_nowait()
+            except queue.Empty:
+                break
+            self._event(message)
 
     def close(self) -> None:
         self.stopping.set()

@@ -128,6 +128,23 @@ must match. Neither option creates a conversation or enrolls an unobserved threa
 Without either filter it retains the existing discovery behavior. Automatic mode
 also accepts `--renew-lease` for persistent services.
 
+From v0.2.20, both Linux modes release an idle native writer automatically. After
+a five-second grace, the controller checks live native idle status and the empty
+queue under the same admission lock, then closes only its own App Server child.
+With a 30-second service interval, release normally happens on the next cycle.
+The reported state is `parked`: the binding stays armed, host notification
+authority is retained, and Slack/Git monitoring continues. New queued work or a
+changed native conversation record triggers a fresh same-thread check; an
+existing VS Code writer is observed. An active turn or unresolved queued
+continuation cannot be closed just because a final message appeared.
+
+The desktop does not need to send a handback request for this idle release. If
+VS Code still shows its cached ownership warning after the lock is released,
+choose Retry. Explicit release/service stop remains available to disable takeover.
+Repository filters retain separate conversations: the same Git update may wake
+multiple enrolled threads, and each completion has its own Slack notification.
+Matching answer text across different session IDs is not a duplicate delivery.
+
 From v0.2.8, detached-owner loss is reported immediately when the owner detects an App Server
 exit, a changed writer, unavailable exact-thread metadata, or an observation
 failure. From v0.2.18, automatic mode retires a confirmed exited backend and
