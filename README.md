@@ -271,6 +271,7 @@ because the project is developed by continuously using it on its own workflow.
 
 ## More docs
 
+- [Manual builds, tests, and releases (GitHub Actions disabled)](docs/MANUAL_RELEASE.md)
 - [Multi-agent project-contract example](examples/AGENTS.multi-agent.md)
 - [Windows package and first-time setup](WINDOWS_PACKAGE.md)
 - [Mac package, upgrades, and manual testing](docs/MACOS_PACKAGE.md)

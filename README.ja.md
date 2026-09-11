@@ -248,6 +248,7 @@ Dogfooding history は意図的に inspectable にしています。この proje
 
 ## その他のドキュメント
 
+- [手動ビルド・テスト・リリース（GitHub Actions は無効）](docs/MANUAL_RELEASE.md)
 - [Multi-agent project contract template](examples/AGENTS.multi-agent.md)
 - [Windows package / first-time setup](WINDOWS_PACKAGE.md)
 - [Mac package / upgrade / manual testing](docs/MACOS_PACKAGE.md)
