@@ -10,6 +10,15 @@ appropriate pinned release dependencies and run `python -m pytest` and
 need native OS permissions; record any platform skips and verify them on their
 own platform.
 
+When a Linux build host is newer than the supported glibc baseline, the build
+can reuse system libraries from a checksum-verified previous package of the same
+architecture: add `--native-runtime-package /path/to/previous-package` to the
+Linux build command. The recipe verifies the previous executable, each reused
+library and its license texts, preserves their actual versions and provenance,
+and still checks every bundled ELF against the original glibc limit. It does not
+replace the pinned build Python or application dependencies. Record the previous
+release/archive checksum alongside acceptance evidence.
+
 Build and validate on the corresponding platform:
 
 | Platform | Build | Acceptance |

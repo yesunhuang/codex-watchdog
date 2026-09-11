@@ -251,6 +251,26 @@ def test_normal_handback_does_not_create_loss_alert(scenario):
     assert not list((store.directory / "effects").glob("*.json"))
 
 
+def test_idle_parking_retains_host_epoch_and_completion_observation(scenario, monkeypatch):
+    store, _, writer, _, clients, _ = scenario
+    agent, owner = detached(scenario)
+    epoch = store.read()["epoch"]
+    observed = []
+    monkeypatch.setattr(agent, "_cycle", lambda item: observed.append(item["token"]) or SimpleNamespace(status="completed"))
+    owner._idle_since -= 6
+    assert agent.step()[0]["state"] == "parked"
+    assert clients[0].closed and writer[0] is None
+    assert store.read()["writer_pid"] is None
+    assert store.read()["owner"]["host_observer"] is True
+    assert store.read()["attached_request"] is None
+    assert agent.step()[0]["state"] == "parked"
+    assert len(clients) == 1 and len(observed) == 2
+    assert store.read()["epoch"] == epoch
+    writer[0] = 777
+    assert agent.step()[0]["state"] == "observing"
+    assert len(clients) == 1 and store.read()["epoch"] == epoch
+
+
 def test_failed_alert_does_not_become_successful_suppression(scenario):
     store, local, writer, clock, clients, make_agent = scenario
     agent, owner = detached(scenario)

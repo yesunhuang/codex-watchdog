@@ -252,7 +252,7 @@ class LinuxAutoWatchdog:
                     with store.guard(token) as current:
                         current["writer_pid"] = owner.client.process.pid if owner.client else None
                         control_atomic_json(store.path, current)
-                    if result["owner_state"] in ("owned", "observing", "waiting_for_attach") and observe:
+                    if result["owner_state"] in ("owned", "observing", "waiting_for_attach", "parked") and observe:
                         cycle = self._cycle(item)
                         if cycle.status != "completed":
                             raise ControlError("control_observation_failed")

@@ -244,6 +244,12 @@ approved-user list. This works independently of the laptop's Slack connection.
 Bot token/channel alone enable outgoing notifications only. See the
 [reply configuration and limits](docs/AUTOMATIC_REMOTE_HANDOFF.md).
 
+From v0.2.20, idle Linux conversations release their writer lock automatically
+after a short grace and live idle/empty-queue checks. Monitoring and Slack replies
+stay enabled; VS Code can reopen the same conversation. `--repo` includes every
+enrolled thread in that repository, so one Git update can wake several distinct
+conversations. Use `--thread UUID` when only one conversation should be monitored.
+
 On clusters with shared home directories, keep the WatchDog service and the VS
 Code execution workspace on the same chosen node. Shared installation files do
 not provide safe automatic roaming of one conversation between nodes; see the

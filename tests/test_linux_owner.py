@@ -338,6 +338,79 @@ def test_resume_same_id_only_and_idle_handback(owner):
     assert THREAD not in output and str(instance.binding.runtime) not in output
 
 
+def test_idle_writer_parks_without_desktop_request_and_keeps_monitoring(owner):
+    instance, client, cycles, pid = owner
+    instance.renew_lease = True
+    assert instance.step(observe=True)["owner_state"] == "owned"
+    instance._idle_since -= 6
+    assert instance.step(observe=True)["owner_state"] == "parked"
+    assert pid[0] is None and client.closed
+    assert instance.binding.load()["state"] == "armed"
+    requests = list(client.requests)
+    assert instance.step(observe=True)["owner_state"] == "parked"
+    assert client.requests == requests and len(cycles) == 3
+    pid[0] = 777
+    assert instance.step(observe=True)["owner_state"] == "observing"
+    assert client.requests == requests  # VS Code can acquire the vacant writer.
+
+
+@pytest.mark.parametrize("gate", ["active", "queued", "live_active", "queue_race", "writer_race", "continuation"])
+def test_idle_parking_rechecks_native_activity_and_admission(owner, gate):
+    instance, client, _, pid = owner
+    instance.step(observe=False)
+    instance._idle_since -= 6
+    request = client.request
+
+    def enqueue():
+        with sqlite3.connect(instance.binding.codex_home / "queue_1.sqlite") as db:
+            db.execute("INSERT INTO queued_items VALUES (?, ?, '{}')", (QUEUE, THREAD))
+
+    def race(method, params):
+        value = request(method, params)
+        if method == "thread/read":
+            if gate == "live_active":
+                value["thread"]["status"]["type"] = "active"
+            elif gate == "queue_race":
+                enqueue()
+            elif gate == "writer_race":
+                pid[0] = 999
+        return value
+
+    client.request = race
+    if gate == "active":
+        instance._event({"method": "turn/started", "params": {"threadId": THREAD}})
+    elif gate == "queued":
+        enqueue()
+    elif gate == "continuation":
+        instance.continuation_status = {"status": "consumed_or_started"}
+    if gate == "writer_race":
+        with pytest.raises(LinuxBindingError, match="linux_writer_changed"):
+            instance.step(observe=False)
+    else:
+        assert instance.step(observe=False)["owner_state"] == "owned"
+    assert not client.closed
+
+
+@pytest.mark.parametrize("trigger", ["queue", "rollout"])
+def test_parked_thread_resumes_only_for_new_work_in_same_thread(owner, trigger):
+    instance, client, _, pid = owner
+    instance.step(observe=False)
+    instance._idle_since -= 6
+    assert instance.step(observe=False)["owner_state"] == "parked"
+    workspace = instance.binding.workspace(instance.binding.load())
+    if trigger == "queue":
+        with sqlite3.connect(instance.binding.codex_home / "queue_1.sqlite") as db:
+            db.execute("INSERT INTO queued_items VALUES (?, ?, '{}')", (QUEUE, THREAD))
+    else:
+        path = linux_binding.exact_thread(instance.binding.codex_home, workspace)
+        path.write_text('{"new_interrupted_turn": true}\n')
+    replacement = FakeClient(workspace, pid)
+    instance.client_factory = lambda *a: replacement
+    assert instance.step(observe=False)["owner_state"] == "owned"
+    assert [params["threadId"] for _, params in replacement.requests] == [THREAD, THREAD]
+    assert client.closed and not replacement.closed
+
+
 def test_release_during_turn_waits_for_idle_and_empty_queue(owner):
     instance, client, cycles, _ = owner
     instance.step(observe=False)

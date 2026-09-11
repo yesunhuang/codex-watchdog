@@ -211,6 +211,10 @@ watchdog="${XDG_DATA_HOME:-$HOME/.local/share}/codex-watchdog/bin/codex-watchdog
 频道和用户白名单接收 Slack 回复，不依赖笔记本的 Slack 连接。只有 bot token 和频道时，
 仍然只能发送通知。详见[回复配置与限制](docs/AUTOMATIC_REMOTE_HANDOFF.md)。
 
+从 v0.2.20 起，Linux 会话空闲一小段时间，并确认实时空闲状态和队列为空后，会自动释放写入锁。
+监控和 Slack 回复仍然启用，VS Code 可以重新打开同一会话。`--repo` 会包含仓库内所有已纳管的
+thread，因此一次 Git 更新可能唤醒多个独立会话。如只需监控一个会话，请使用 `--thread UUID`。
+
 在使用共享 home 目录的集群上，请让 WatchDog 服务与 VS Code 工作区运行在同一个选定节点。
 安装文件可以共享，但这不代表同一会话可以安全地自动跨节点切换；详情见
 [共享目录限制](docs/AUTOMATIC_REMOTE_HANDOFF.md)。

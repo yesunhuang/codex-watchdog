@@ -91,6 +91,8 @@ class LinuxThreadOwner:
         self.continuation = None
         self.continuation_status = None
         self._next_continuation_check = 0.0
+        self._idle_since = None
+        self._parked_rollout = None
         if continue_interrupted:
             from .linux_continuation import LinuxContinuation
             self.continuation = LinuxContinuation(binding, self.service.queue_dispatcher, self.service.notifier)
@@ -108,11 +110,23 @@ class LinuxThreadOwner:
             return
         if method == "thread/status/changed":
             status = params.get("status", {})
-            self.thread_status = status.get("type", "unknown") if isinstance(status, dict) else "unknown"
+            self._thread_status(status.get("type", "unknown") if isinstance(status, dict) else "unknown")
         elif method == "turn/started":
-            self.thread_status = "active"
+            self._thread_status("active")
         # turn/completed alone is not idle proof: Stop continuation/queued turns
         # may already be starting. Wait for the explicit thread status.
+
+    def _thread_status(self, status):
+        if status != "idle":
+            self._idle_since = None
+        elif self.thread_status != "idle" or self._idle_since is None:
+            self._idle_since = time.monotonic()
+        self.thread_status = status
+
+    @staticmethod
+    def _rollout_stamp(path):
+        stat = path.stat()
+        return (str(path), stat.st_ino, stat.st_size, stat.st_mtime_ns)
 
     def _status(self, state: str, reason: Optional[str] = None) -> Dict[str, Any]:
         result = {**self.binding.status(), "owner_state": state,
@@ -130,6 +144,8 @@ class LinuxThreadOwner:
 
     def _resume(self, workspace) -> None:
         self.resumed = False
+        self._parked_rollout = None
+        self._idle_since = None
         self.client = self.client_factory(
             self.executable, self.binding.codex_home, workspace.repo_root, self._event
         )
@@ -146,7 +162,7 @@ class LinuxThreadOwner:
             raise LinuxBindingError("linux_resume_did_not_own_writer")
         self.resumed = True
         status = resumed["thread"].get("status", {})
-        self.thread_status = status.get("type", "unknown") if isinstance(status, dict) else "unknown"
+        self._thread_status(status.get("type", "unknown") if isinstance(status, dict) else "unknown")
 
     def _check_thread(self, response: Dict[str, Any], workspace) -> None:
         thread = response.get("thread", {})
@@ -166,7 +182,7 @@ class LinuxThreadOwner:
                 return self._status("standby", "control_operation_in_progress")
             result = self._owned_step(observe=False)
             if (self.renew_lease and not self.release_requested
-                    and result["owner_state"] in ("owned", "observing", "waiting_for_attach")):
+                    and result["owner_state"] in ("owned", "observing", "waiting_for_attach", "parked")):
                 try:
                     self.binding.renew_lease(self.thread)
                 except StoreBusyError:
@@ -187,7 +203,7 @@ class LinuxThreadOwner:
             except (ControlBusy, StoreBusyError):
                 return self._status("standby", "control_operation_in_progress")
             result = self._status("owned")
-        if observe and result["owner_state"] in ("owned", "observing", "waiting_for_attach"):
+        if observe and result["owner_state"] in ("owned", "observing", "waiting_for_attach", "parked"):
             cycle = self.service.run_once()
             if cycle.reason != "service_cycle_lock_held":
                 if (cycle.status == "completed" and len(cycle.workspaces) == 1
@@ -205,13 +221,53 @@ class LinuxThreadOwner:
                         return result  # An idle release can race the catalog read.
                     raise LinuxBindingError("linux_observation_failed")
                 self.health.report()
+        if result["owner_state"] == "owned":
+            result = self._park_idle(workspace, result)
+        return result
+
+    def _close_if_idle(self, workspace):
+        if self.thread_status != "idle" or pending_count(self.binding.codex_home, self.thread) != 0:
+            return False
+        # The same fence excludes relay admission. A cached idle event alone can
+        # precede a consumed queued turn, so also read the live native status.
+        current = self.client.request("thread/read", {"threadId": self.thread, "includeTurns": False})
+        self._check_thread(current, workspace)
+        status = current["thread"].get("status", {})
+        if (self.thread_status != "idle" or not isinstance(status, dict) or status.get("type") != "idle"
+                or pending_count(self.binding.codex_home, self.thread) != 0):
+            return False
+        if writer_pid(self.binding.codex_home, self.thread) != self.client.process.pid:
+            raise LinuxBindingError("linux_writer_changed")
+        stamp = self._rollout_stamp(exact_thread(self.binding.codex_home, workspace))
+        self.client.close()
+        self.client = None
+        record_writer_pid(None)
+        self._parked_rollout = stamp
+        return True
+
+    def _park_idle(self, workspace, result):
+        # Monitoring/Slack ownership does not require an idle native writer.
+        # Keep a brief grace for Stop/queued work, then release without depending
+        # on a desktop WatchDog to request handback. The binding stays armed.
+        if (self.client is None or self._idle_since is None
+                or time.monotonic() - self._idle_since < 5
+                or self.release_requested or self.yield_requested
+                or (self.continuation_status or {}).get("status") in (
+                    "prepared", "enqueued", "consumed_or_started", "dispatching", "uncertain")):
+            return result
+        try:
+            with effect_guard(self.binding.codex_home, workspace.session_id, "writer"):
+                if self._close_if_idle(workspace):
+                    return self._status("parked")
+        except ControlBusy:
+            pass  # Queue admission won; reconsider only after a fresh check.
         return result
 
     def _owned_step(self, *, observe: bool) -> Dict[str, Any]:
         value = self.binding.load()
         workspace = self.binding.workspace(value)
         self.thread = workspace.session_id
-        exact_thread(self.binding.codex_home, workspace)
+        rollout = exact_thread(self.binding.codex_home, workspace)
         if self.release_requested or value["expires_at"] <= time.time():
             value = self.binding.set_state("release_requested")
         releasing = value["state"] != "armed"
@@ -225,37 +281,27 @@ class LinuxThreadOwner:
                     raise LinuxBindingError("linux_conflicting_writer")
                 # The exact native writer remains untouched. Observation and
                 # completion delivery do not require owning its process.
-                self.thread_status = "unknown"
+                self._parked_rollout = None
+                self._thread_status("unknown")
                 return self._status("observing")
             if self.yield_requested:
-                self.thread_status = "unknown"
+                self._thread_status("unknown")
                 return self._status("waiting_for_attach")
+            if (self._parked_rollout == self._rollout_stamp(rollout)
+                    and pending_count(self.binding.codex_home, self.thread) == 0):
+                return self._status("parked")
             self._resume(workspace)
         else:
             self.client.pump(timeout=0.01)
             if pid != self.client.process.pid:
                 raise LinuxBindingError("linux_writer_changed")
         if releasing or self.yield_requested:
-            if self.thread_status == "idle" and pending_count(self.binding.codex_home, self.thread) == 0:
-                # A cached idle event alone can precede a consumed queued turn.
-                # Re-read the live first-party status while the client handles
-                # earlier events, then recheck the queue before closing stdio.
-                current = self.client.request("thread/read", {
-                    "threadId": self.thread, "includeTurns": False,
-                })
-                self._check_thread(current, workspace)
-                status = current["thread"].get("status", {})
-                if (self.thread_status == "idle" and isinstance(status, dict)
-                        and status.get("type") == "idle"
-                        and pending_count(self.binding.codex_home, self.thread) == 0):
-                    self.client.close()
-                    self.client = None
-                    record_writer_pid(None)
-                    if releasing:
-                        self.binding.set_state("released")
-                        return self._status("released")
-                    self.thread_status = "unknown"
-                    return self._status("waiting_for_attach")
+            if self._close_if_idle(workspace):
+                if releasing:
+                    self.binding.set_state("released")
+                    return self._status("released")
+                self._thread_status("unknown")
+                return self._status("waiting_for_attach")
             return self._status("releasing")
         if observe:
             self.service.run_once()
