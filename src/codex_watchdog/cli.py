@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 import sys
+import uuid
 from typing import Optional, Sequence
 
 from . import __version__
@@ -56,6 +57,13 @@ def _safe_id(value: str) -> str:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
+def _thread_id(value: str) -> str:
+    try:
+        return str(uuid.UUID(value))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an existing thread UUID") from exc
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="codex-watchdog")
     parser.add_argument(
@@ -80,11 +88,19 @@ def build_parser() -> argparse.ArgumentParser:
     linux_run.add_argument("--interval", type=float, default=5)
     linux_run.add_argument("--renew-lease", action="store_true",
                            help="keep the live binding renewed until this service is stopped or released")
+    linux_run.add_argument("--continue-interrupted", action="store_true",
+                           help="continue an interrupted turn once after acquiring its writer, then notify")
     linux_run.add_argument("--codex-executable", type=_path)
     linux_auto = commands.add_parser(
         "linux-auto-run", help="remain standby while attached and automatically own exact detached remote threads"
     )
     linux_auto.add_argument("--interval", type=float, default=5)
+    linux_auto.add_argument("--thread", action="append", type=_thread_id, default=[],
+                            help="restrict automatic handoff to this exact thread; may be repeated")
+    linux_auto.add_argument("--renew-lease", action="store_true",
+                            help="keep verified live bindings renewed until stopped or released")
+    linux_auto.add_argument("--continue-interrupted", action="store_true",
+                            help="continue interrupted turns after detached ownership and notify on confirmed starts")
     linux_auto.add_argument("--codex-executable", type=_path)
     linux_auto.add_argument("--exclude", action="append", default=[], help="exclude an exact repository path or name")
     commands.add_parser("linux-release", help="request idle writer release before VS Code reattachment")
@@ -286,6 +302,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     args.runtime, args.codex_home or detect_platform_adapter().default_codex_home(),
                     executable=str(args.codex_executable) if args.codex_executable else None,
                     exclude=args.exclude,
+                    threads=args.thread, renew_lease=args.renew_lease,
+                    continue_interrupted=args.continue_interrupted,
                 ).run(args.interval, emit=lambda value: print(json.dumps(value, sort_keys=True), flush=True))
             binding = LinuxBinding(
                 args.runtime, args.codex_home or detect_platform_adapter().default_codex_home()
@@ -303,11 +321,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     return LinuxAutoWatchdog(
                         args.runtime, binding.codex_home, threads=(value["thread_id"],), stop_on_release=True,
                         renew_lease=args.renew_lease,
+                        continue_interrupted=args.continue_interrupted,
                         executable=str(args.codex_executable) if args.codex_executable else None,
                     ).run(args.interval, emit=lambda value: print(json.dumps(value, sort_keys=True), flush=True))
                 return LinuxThreadOwner(
                     binding, executable=str(args.codex_executable) if args.codex_executable else None,
                     renew_lease=args.renew_lease,
+                    continue_interrupted=args.continue_interrupted,
                 ).run(args.interval, emit=lambda value: print(json.dumps(value, sort_keys=True), flush=True))
             result = binding.status()
             status_path = args.runtime / "linux" / "status.json"

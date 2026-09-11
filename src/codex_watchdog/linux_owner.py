@@ -66,6 +66,7 @@ class LinuxThreadOwner:
     def __init__(self, binding: LinuxBinding, *, executable: Optional[str] = None,
                  service: Optional[MvpWatchdogService] = None,
                  renew_lease: bool = False,
+                 continue_interrupted: bool = False,
                  client_factory: Callable[..., StdioAppServer] = StdioAppServer) -> None:
         self.binding = binding
         self.renew_lease = renew_lease
@@ -85,6 +86,12 @@ class LinuxThreadOwner:
         self.release_requested = False
         self.status_path = binding.runtime / "linux" / "status.json"
         self._last_status: Optional[dict] = None
+        self.continuation = None
+        self.continuation_status = None
+        self._next_continuation_check = 0.0
+        if continue_interrupted:
+            from .linux_continuation import LinuxContinuation
+            self.continuation = LinuxContinuation(binding, self.service.queue_dispatcher, self.service.notifier)
         self.health = LinuxOwnerHealth(
             binding.runtime, binding.codex_home, binding.workspace(binding.load()), self.service.notifier,
         )
@@ -109,6 +116,8 @@ class LinuxThreadOwner:
         result = {**self.binding.status(), "owner_state": state,
                   "thread_status": self.thread_status,
                   "approval_required": self.approval_required, "reason": reason}
+        if self.continuation_status is not None:
+            result["continuation"] = self.continuation_status
         if result != self._last_status:
             InstructionStore._atomic_json(self.status_path, result)
             self._last_status = result
@@ -140,6 +149,7 @@ class LinuxThreadOwner:
 
     def step(self, *, observe: bool) -> Dict[str, Any]:
         workspace = self.binding.workspace(self.binding.load())
+        continuation_checked = False
         with ExitStack() as admitted:
             try:
                 admitted.enter_context(effect_guard(self.binding.codex_home, workspace.session_id, "writer"))
@@ -154,6 +164,21 @@ class LinuxThreadOwner:
                     self.binding.renew_lease(self.thread)
                 except StoreBusyError:
                     pass  # Retry next owner check; a released/expired lease stays fenced.
+            if (self.continuation is not None and result["owner_state"] == "owned"
+                    and not self.release_requested and time.monotonic() >= self._next_continuation_check):
+                try:
+                    self.continuation_status = self.continuation.step(self, workspace)
+                except StoreBusyError:
+                    return self._status("standby", "control_operation_in_progress")
+                self._next_continuation_check = time.monotonic() + 5
+                continuation_checked = True
+                result = self._status("owned")
+        if continuation_checked:
+            try:
+                self.continuation_status = self.continuation.notify_pending(self, workspace)
+            except (ControlBusy, StoreBusyError):
+                return self._status("standby", "control_operation_in_progress")
+            result = self._status("owned")
         if observe and result["owner_state"] == "owned":
             cycle = self.service.run_once()
             if cycle.reason != "service_cycle_lock_held":
