@@ -1,3 +1,28 @@
+# Release notes
+
+## v0.2.19
+
+- Linux can receive allowlisted Slack replies independently of the desktop with
+  `CODEX_WATCHDOG_SLACK_REPLY_MODE=poll`, the existing bot token/channel, and an
+  approved-user list. Bot/channel-only configuration remains notifications only.
+- Both bound and automatic Linux modes start their reply listener. Polling uses
+  exact saved parents, durable cursors and existing queue receipts; uncertain
+  delivery is never blindly replayed. Existing Socket Mode state stays separate
+  and unchanged, preventing competing listeners from duplicating a reply.
+- Concurrent host observation and reply requests retain separate helper results.
+- The three README translations explain reply configuration and shared-home
+  limits. Sharing installation files does not make native conversation locks
+  safe across cluster nodes; keep execution and WatchDog on the same node.
+
+## v0.2.18
+
+Automatic Linux mode can select exact repositories with repeated `--repo` paths.
+Confirmed exited backends release stale ownership for safe same-thread recovery.
+Failed observation no longer renews its lease indefinitely; live or uncertain
+writers remain protected.
+
+## v0.2.17
+
 Version 0.2.17 fixes missing or delayed Linux completion notifications while
 VS Code is attached. The running host WatchDog now keeps observation and
 notification authority for its enrolled threads. VS Code retains its native
