@@ -233,6 +233,7 @@ watchdog="${XDG_DATA_HOME:-$HOME/.local/share}/codex-watchdog/bin/codex-watchdog
 
 ## 更多文档
 
+- [手动构建、测试与发布（已停用 GitHub Actions）](docs/MANUAL_RELEASE.md)
 - [多 Agent 项目 contract 模板](examples/AGENTS.multi-agent.md)
 - [Windows 安装与首次设置](WINDOWS_PACKAGE.md)
 - [Mac 安装、升级与手动测试](docs/MACOS_PACKAGE.md)
