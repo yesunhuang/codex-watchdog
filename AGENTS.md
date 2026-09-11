@@ -32,6 +32,8 @@ When a proposed feature or packaging change conflicts with these rules, stop and
 
 ## Release discipline
 
+- **Manual builds, tests and releases only (user instruction, 2026-09-11).** GitHub Actions is disabled for both WatchDog repositories to stop Actions-minute usage. Do not re-enable Actions, dispatch workflows, or rely on new Actions runs unless the user explicitly reverses this instruction. Run required checks on approved local/remote machines and publish releases manually. Reading existing logs or downloading already completed artifacts does not start a build.
+
 - `pyproject.toml` is the canonical application version source unless the architecture explicitly changes.
 - Do not overwrite an existing release/tag to hide a packaging or migration error; publish a new version.
 - Every Windows release executable must embed the approved Codex WatchDog application icon in the executable itself. Shipping the PNG/logo beside the EXE or merely including it in the ZIP does not satisfy this requirement. Release acceptance must verify the built Windows executable contains the intended icon resource.
