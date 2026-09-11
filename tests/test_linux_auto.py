@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from codex_watchdog import linux_auto, linux_binding, linux_owner
+from codex_watchdog.app_server import AppServerError
 from codex_watchdog.control_state import ControlStore, control_atomic_json
 from codex_watchdog.linux_auto import LinuxAutoWatchdog
 from codex_watchdog.linux_owner import LinuxThreadOwner
@@ -49,7 +50,7 @@ def scenario(tmp_path, monkeypatch):
 
     class Client:
         def __init__(self, executable, codex_home, cwd, event):
-            self.process = SimpleNamespace(pid=900 + len(clients))
+            self.process = SimpleNamespace(pid=900 + len(clients), returncode=None)
             self.status = "idle"
             self.calls = []
             self.closed = False
@@ -68,16 +69,17 @@ def scenario(tmp_path, monkeypatch):
             return dict(thread=dict(id=THREAD, cwd=str(repo), status=dict(type=self.status)))
 
         def pump(self, timeout):
-            pass
+            if self.process.returncode is not None:
+                raise AppServerError("app_server_exited")
 
         def close(self):
             self.closed = True
             if writer[0] == self.process.pid:
                 writer[0] = None
 
-    def make_agent(exclude=()):
+    def make_agent(exclude=(), **options):
         return LinuxAutoWatchdog(
-            tmp_path / "agent-runtime", home, executable="fixture-codex", exclude=exclude,
+            tmp_path / "agent-runtime", home, executable="fixture-codex", exclude=exclude, **options,
             store_factory=factory,
             owner_factory=lambda binding, **kwargs: LinuxThreadOwner(binding, client_factory=Client, **kwargs),
             service_factory=lambda runtime, **kwargs: SimpleNamespace(
@@ -88,8 +90,8 @@ def scenario(tmp_path, monkeypatch):
 
     agents = []
 
-    def agent(exclude=()):
-        value = make_agent(exclude)
+    def agent(exclude=(), **options):
+        value = make_agent(exclude, **options)
         agents.append(value)
         return value
 
@@ -452,3 +454,139 @@ def test_operator_release_stays_paused_until_explicit_bind(scenario, monkeypatch
     assert not store.read()["auto_paused"]
     assert agent.step(observe=False)[0]["state"] == "owned"
     assert len(clients) == 2
+
+
+def test_exited_backend_releases_stale_claim_and_recovers_same_thread(scenario):
+    store, local, writer, clock, clients, make_agent = scenario
+    agent, owner = detached(scenario)
+    exited = clients[0]
+    exited.process.returncode = -15
+    writer[0] = None
+    result = agent.step(observe=False)[0]
+    assert result["reason"] == "app_server_exited"
+    assert json.loads(owner.status_path.read_text())["owner_state"] == "blocked"
+    assert not agent.controllers and exited.closed
+    assert store.read()["owner"] is None and store.read()["writer_pid"] is None
+    desktop = store.attach("returning-desktop", "desktop-host", "absent")
+    assert desktop is not None  # A dead controller cannot block its workspace.
+    assert agent.step(observe=False)[0]["state"] == "owned"
+    assert len(clients) == 2
+    assert all(params["threadId"] == THREAD for client in clients for _, params in client.calls)
+    assert not any(method == "turn/start" for client in clients for method, _ in client.calls)
+
+
+def test_exited_backend_preserves_replacement_vscode_writer(scenario):
+    store, local, writer, clock, clients, make_agent = scenario
+    agent, owner = detached(scenario)
+    clients[0].process.returncode = -9
+    writer[0] = 777
+    assert agent.step(observe=False)[0]["reason"] == "app_server_exited"
+    assert not agent.controllers and writer[0] == 777
+    assert agent.step(observe=False)[0]["state"] == "observing"
+    assert len(clients) == 1 and writer[0] == 777
+
+
+def test_failed_monitor_does_not_renew_forever_or_close_live_backend(scenario):
+    store, local, writer, clock, clients, make_agent = scenario
+    agent, owner = detached(scenario)
+    writer[0] = None  # Uncertain writer loss; the owned child is still alive.
+    assert agent.step(observe=False)[0]["state"] == "blocked"
+    expires = store.read()["owner"]["expires"]
+    clock[0] += 60
+    assert agent.step(observe=False)[0]["state"] == "blocked"
+    assert store.read()["owner"]["expires"] == expires
+    assert not clients[0].closed and len(clients) == 1
+    assert json.loads(owner.status_path.read_text())["reason"] == "linux_writer_changed"
+
+
+@pytest.mark.parametrize("matches", [False, True])
+def test_repository_scope_selects_exact_path_and_keeps_native_thread_identity(scenario, matches):
+    store, local, writer, clock, clients, make_agent = scenario
+    selected = Path(store.repo_path) if matches else Path(store.repo_path).parent / "other" / Path(store.repo_path).name
+    agent = make_agent(repos=(str(selected),))
+    before = store.path.read_bytes()
+    result = agent.step(observe=False)
+    if matches:
+        assert result[0]["state"] == "observing"
+        assert set(agent.controllers) == {THREAD}
+    else:
+        assert result == [] and store.path.read_bytes() == before
+    assert not clients and writer[0] == 777
+
+
+def test_repository_scope_includes_new_registered_thread_without_merging_siblings(scenario):
+    store, local, writer, clock, clients, make_agent = scenario
+    second = "22222222-3333-4444-8555-666666666666"
+    home = store.directory.parent.parent
+    repo = Path(store.repo_path)
+    rollout = home / "sessions" / "second.jsonl"
+    rollout.write_text("{}\n")
+    with sqlite3.connect(home / "state_5.sqlite") as db:
+        db.execute("INSERT INTO threads VALUES (?,?,'vscode','user',0,?)", (second, str(repo), str(rollout)))
+    other = ControlStore(home, second, repo, clock=lambda: clock[0], boot_id="boot")
+    token = other.attach("other-desktop", "desktop-host", "vscode")
+    with other.guard(token) as value:
+        value["runtime_path"] = str(other.directory / "runtime")
+        value["remote_target"] = dict(authority="ssh-remote+example.invalid", repo_path=str(repo), storage_key="a" * 32)
+        control_atomic_json(other.path, value)
+    agent = make_agent(repos=(str(repo),))
+    assert [row["state"] for row in agent.step(observe=False)] == ["observing", "observing"]
+    assert set(agent.controllers) == {THREAD, second}
+    assert len({item["target"].workspace_id for item in agent.controllers.values()}) == 2
+    assert {item["owner"].binding.load()["thread_id"] for item in agent.controllers.values()} == {THREAD, second}
+    assert not clients and writer[0] == 777
+
+
+def test_initial_resume_exit_is_not_retried_until_native_attachment(scenario, monkeypatch):
+    store, local, writer, clock, clients, make_agent = scenario
+    store.detach(local)
+    writer[0] = None
+    agent = make_agent()
+    original = LinuxThreadOwner._resume
+
+    def fail(owner, workspace):
+        owner.client = owner.client_factory(owner.executable, owner.binding.codex_home, workspace.repo_root, owner._event)
+        owner.client.process.returncode = 1
+        raise AppServerError("app_server_exited")
+
+    monkeypatch.setattr(LinuxThreadOwner, "_resume", fail)
+    assert agent.step(observe=False)[0]["reason"] == "app_server_exited"
+    assert not agent.controllers and store.read()["owner"] is None
+    monkeypatch.setattr(LinuxThreadOwner, "_resume", original)
+    assert agent.step(observe=False)[0]["state"] == "blocked"
+    assert len(clients) == 1
+    writer[0] = 777
+    assert agent.step(observe=False)[0]["state"] == "observing"
+    assert len(clients) == 1
+
+
+def test_exited_backend_preserves_uncertain_notification_barrier(scenario):
+    store, local, writer, clock, clients, make_agent = scenario
+    agent, owner = detached(scenario)
+    class UncertainNotifier:
+        def notify(self, event):
+            raise RuntimeError("interrupted notification")
+    owner.health.notifier = UncertainNotifier()
+    clients[0].process.returncode = -15
+    writer[0] = None
+    assert agent.step(observe=False)[0]["recovery"]["reason"] == "control_release_not_safe"
+    barrier = store.read()["external_effect"]
+    assert barrier is not None and not agent.controllers
+    assert agent.step(observe=False)[0]["reason"] == "control_external_effect_unresolved"
+    assert store.read()["external_effect"] == barrier and len(clients) == 1
+
+
+def test_auto_cli_passes_repository_scope(scenario, monkeypatch):
+    from codex_watchdog import cli
+    store, local, writer, clock, clients, make_agent = scenario
+    calls = []
+    class Agent:
+        def __init__(self, *args, **kwargs):
+            calls.append(kwargs)
+        def run(self, *args, **kwargs):
+            return 0
+    monkeypatch.setattr(linux_auto, "LinuxAutoWatchdog", Agent)
+    assert cli.main(["--runtime", str(store.directory / "runtime"), "--codex-home", str(store.directory.parent.parent),
+                     "linux-auto-run", "--repo", store.repo_path]) == 0
+    assert calls[0]["repos"] == [Path(store.repo_path)]
+    assert calls[0]["threads"] == []

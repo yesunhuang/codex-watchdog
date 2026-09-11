@@ -80,6 +80,7 @@ class LinuxThreadOwner:
         )
         self.client_factory = client_factory
         self.client: Optional[StdioAppServer] = None
+        self.resumed = False
         self.thread: Optional[str] = None
         self.thread_status = "unknown"
         self.approval_required = False
@@ -119,12 +120,16 @@ class LinuxThreadOwner:
                   "approval_required": self.approval_required, "reason": reason}
         if self.continuation_status is not None:
             result["continuation"] = self.continuation_status
+        exit_code = getattr(self.client.process, "returncode", None) if self.client else None
+        if exit_code is not None:
+            result["backend_exit_code"] = exit_code
         if result != self._last_status:
             InstructionStore._atomic_json(self.status_path, result)
             self._last_status = result
         return result
 
     def _resume(self, workspace) -> None:
+        self.resumed = False
         self.client = self.client_factory(
             self.executable, self.binding.codex_home, workspace.repo_root, self._event
         )
@@ -139,6 +144,7 @@ class LinuxThreadOwner:
         self._check_thread(resumed, workspace)
         if writer_pid(self.binding.codex_home, self.thread) != self.client.process.pid:
             raise LinuxBindingError("linux_resume_did_not_own_writer")
+        self.resumed = True
         status = resumed["thread"].get("status", {})
         self.thread_status = status.get("type", "unknown") if isinstance(status, dict) else "unknown"
 

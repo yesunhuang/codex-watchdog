@@ -97,6 +97,8 @@ def build_parser() -> argparse.ArgumentParser:
     linux_auto.add_argument("--interval", type=float, default=5)
     linux_auto.add_argument("--thread", action="append", type=_thread_id, default=[],
                             help="restrict automatic handoff to this exact thread; may be repeated")
+    linux_auto.add_argument("--repo", action="append", type=_path, default=[],
+                            help="monitor registered threads in this exact repository; may be repeated")
     linux_auto.add_argument("--renew-lease", action="store_true",
                             help="keep verified live bindings renewed until stopped or released")
     linux_auto.add_argument("--continue-interrupted", action="store_true",
@@ -302,7 +304,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     args.runtime, args.codex_home or detect_platform_adapter().default_codex_home(),
                     executable=str(args.codex_executable) if args.codex_executable else None,
                     exclude=args.exclude,
-                    threads=args.thread, renew_lease=args.renew_lease,
+                    threads=args.thread, repos=args.repo, renew_lease=args.renew_lease,
                     continue_interrupted=args.continue_interrupted,
                 ).run(args.interval, emit=lambda value: print(json.dumps(value, sort_keys=True), flush=True))
             binding = LinuxBinding(

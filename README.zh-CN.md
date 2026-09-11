@@ -202,6 +202,11 @@ watchdog="${XDG_DATA_HOME:-$HOME/.local/share}/codex-watchdog/bin/codex-watchdog
 从 v0.2.17 起，运行中的 Linux WatchDog 优先监控本机已纳管的 thread，并在 VS Code
 仍连接时发送完成通知。只有主机 WatchDog 不可用时，笔记本 WatchDog 才接管监控。
 
+从 v0.2.18 起，可使用 `linux-auto-run --repo /absolute/repository/path` 监控工作区中
+已纳管的会话，包括新打开的 thread；多个仓库可重复指定 `--repo`。`--thread UUID`
+则明确只监控指定会话。后端退出后会释放失效的所有权；恢复时保留原 thread，且不会
+干扰仍在运行的 VS Code writer。
+
 > [!IMPORTANT]
 > 升级默认应保留兼容的用户状态。WatchDog 会尽量复用已有 runtime/profile/provider
 > 设置，不把“重新配置一遍”当成正常升级步骤。任何 hook executable 改变后，在完成检查
