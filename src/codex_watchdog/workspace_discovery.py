@@ -1265,6 +1265,20 @@ class VSCodeWorkspaceDiscovery:
                 return None
             folder = raw.get("folder")
             workspace = raw.get("workspace")
+            identifier = raw.get("workspaceIdentifier")
+            if identifier is not None:
+                if not isinstance(identifier, dict):
+                    return None
+                config_uri = identifier.get("configURIPath")
+                if not isinstance(config_uri, str) or not config_uri:
+                    return None
+                # Current VS Code stores saved workspaces here. Conflicting
+                # targets must not silently fall back to the legacy fields.
+                if (isinstance(folder, str) and folder) or (
+                    isinstance(workspace, str) and workspace and workspace != config_uri
+                ):
+                    return None
+                workspace = config_uri
             if isinstance(folder, str) and folder:
                 uri = folder
                 kind = "folder"

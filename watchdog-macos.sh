@@ -5,11 +5,12 @@ set -euo pipefail
 usage() {
     cat <<'EOF'
 Usage:
-  ./watchdog-macos.sh [--runtime PATH] [--slack-only] [--dry-run] [--] [RUN_OPTIONS...]
-  ./watchdog-macos.sh [--runtime PATH] [--slack-only] --relay-test WORKSPACE
+  ./watchdog-macos.sh [--runtime PATH] [--slack-only] [--shared-slack-app] [--dry-run] [--] [RUN_OPTIONS...]
+  ./watchdog-macos.sh [--runtime PATH] [--slack-only] [--shared-slack-app] --relay-test WORKSPACE
 
 Loads Slack reply-relay credentials from the current user's macOS Keychain.
 Use --slack-only to remove SMTP and Outlook settings from the child process.
+Use --shared-slack-app to poll this Mac's mapped replies when other machines use the same Slack app.
 Arguments after -- are passed to `codex-watchdog run`.
 EOF
 }
@@ -42,6 +43,10 @@ while (($#)); do
             ;;
         --slack-only)
             slack_only=1
+            shift
+            ;;
+        --shared-slack-app)
+            export CODEX_WATCHDOG_SLACK_REPLY_MODE=poll
             shift
             ;;
         --dry-run)
@@ -240,6 +245,7 @@ if ((dry_run == 1)); then
     fi
     "$python_bin" - "$runtime_path" "$relay_source" "$smtp_configured" "$slack_only" <<'PY'
 import json
+import os
 import sys
 
 print(
@@ -248,6 +254,7 @@ print(
             "status": "ready",
             "runtime": sys.argv[1],
             "slack_reply": sys.argv[2],
+            "slack_reply_mode": os.environ.get("CODEX_WATCHDOG_SLACK_REPLY_MODE", "socket"),
             "smtp_configured": sys.argv[3] == "true",
             "slack_only": sys.argv[4] == "1",
         },

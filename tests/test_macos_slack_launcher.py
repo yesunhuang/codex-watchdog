@@ -84,7 +84,8 @@ def _write_config(path: Path) -> None:
     )
 
 
-def test_macos_launcher_loads_keychain_and_disables_email(tmp_path: Path) -> None:
+@pytest.mark.parametrize("shared_app", [False, True])
+def test_macos_launcher_loads_keychain_and_disables_email(tmp_path: Path, shared_app: bool) -> None:
     security, log = _fake_security(tmp_path)
     environment = _base_environment(tmp_path)
     environment.update(
@@ -105,6 +106,7 @@ def test_macos_launcher_loads_keychain_and_disables_email(tmp_path: Path) -> Non
             "--runtime",
             str(tmp_path / "runtime"),
             "--slack-only",
+            *(["--shared-slack-app"] if shared_app else []),
             "--dry-run",
         ],
         cwd=REPO_ROOT,
@@ -121,6 +123,7 @@ def test_macos_launcher_loads_keychain_and_disables_email(tmp_path: Path) -> Non
         "runtime": str(tmp_path / "runtime"),
         "slack_only": True,
         "slack_reply": "macos_keychain",
+        "slack_reply_mode": "poll" if shared_app else "socket",
         "smtp_configured": False,
         "status": "ready",
     }

@@ -472,6 +472,63 @@ def test_default_baselines_then_matches_only_completed_exact_stop(
     assert not mutator.preserve_calls
 
 
+@pytest.mark.parametrize("scan_before_completion", [False, True])
+def test_new_window_keeps_first_stop_completed_before_discovery(
+    tmp_path: Path, scan_before_completion: bool,
+) -> None:
+    runtime = tmp_path / "runtime"
+    repo = tmp_path / "new-window"
+    repo.mkdir()
+    tracked = workspace(repo)
+    write_audit(runtime, "a-historical.json", tracked, audit_id="historical")
+    registry = FakeRegistry([])
+    adapter = FakeAdapter({str(repo.resolve()): [observation(repo)]})
+    notifier = FakeNotifier(runtime)
+    service = MvpWatchdogService(
+        runtime, registry=registry, git_adapter=adapter, notifier=notifier,
+        queue_dispatcher=FakeQueue(), codex_home=runtime / "codex-home",
+    )
+    if scan_before_completion:
+        assert service.run_once().workspaces == ()
+
+    # The hook can finish before discovery resolves the new window's owner.
+    write_audit(runtime, "z-live-stop.json", tracked, audit_id="live-stop")
+    registry.workspaces = (tracked,)
+    first = service.run_once().workspaces[0]
+    assert first.stop_count == 1
+    assert first.stop_audit_id == "live-stop"
+    assert [event.event_type for event in notifier.events] == ["codex_parked"]
+    assert notifier.events[0].relay_target.thread_id == tracked.session_id
+    assert service.run_once().workspaces[0].stop_count == 0
+
+    restarted = MvpWatchdogService(
+        runtime, registry=registry, git_adapter=adapter, notifier=notifier,
+        queue_dispatcher=FakeQueue(), codex_home=runtime / "codex-home",
+    )
+    assert restarted.run_once().workspaces[0].stop_count == 0
+    assert len(notifier.events) == 1
+
+
+def test_late_discovery_does_not_replay_stops_from_before_service_start(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    repo = tmp_path / "existing-window"
+    repo.mkdir()
+    tracked = workspace(repo)
+    write_audit(runtime, "a-historical.json", tracked, audit_id="historical")
+    registry = FakeRegistry([])
+    notifier = FakeNotifier(runtime)
+    service = MvpWatchdogService(
+        runtime, registry=registry,
+        git_adapter=FakeAdapter({str(repo.resolve()): [observation(repo)]}),
+        notifier=notifier, queue_dispatcher=FakeQueue(),
+        codex_home=runtime / "codex-home",
+    )
+    service.run_once()
+    registry.workspaces = (tracked,)
+    assert service.run_once().workspaces[0].stop_count == 0
+    assert notifier.events == []
+
+
 def test_opt_in_replays_latest_stop_without_mutating_git(tmp_path: Path,) -> None:
     runtime = tmp_path / "runtime"
     repo = tmp_path / "repo"
