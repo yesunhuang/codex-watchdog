@@ -164,7 +164,8 @@ Use Apple Silicon Python 3.12, pip 26.0.1, and the exact versions in
 `scripts/test_macos_package.py --package PATH_TO_EXTRACTED_PACKAGE`.
 
 The recipe uses [PyInstaller's ARM64 and ad-hoc signing support](https://pyinstaller.org/en/stable/feature-notes.html#macos-multi-arch-support)
-and validates its executable on a [GitHub-hosted ARM64 Mac](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
+and validates its executable manually on a native Apple Silicon Mac. GitHub
+Actions remains disabled; see [manual release instructions](MANUAL_RELEASE.md).
 The package test hides Python and the source checkout from child execution,
 uses paths with spaces, checks doctor/privacy and foreground/hook commands,
 and tests source-profile reuse and package replacement with an isolated

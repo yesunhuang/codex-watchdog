@@ -25,7 +25,6 @@ from .slack_mapping import (
 )
 from .storage import FileLock, InstructionStore
 from .control_context import current_effect
-from . import slack_presentation
 
 
 NOTIFICATION_STATE_SCHEMA_VERSION = 1
@@ -699,20 +698,16 @@ class EnvironmentNotifier:
         )
 
     def _send_slack(self, event: NotificationEvent) -> None:
-        context = []
+        try:
+            machine = _notification_label_component(socket.gethostname()) or "unknown"
+        except OSError:
+            machine = "unknown"
+        context = f"Machine: {escape(machine, quote=False)}"
         if event.relay_target is not None and event.relay_target.execution_locality == "remote_ssh":
             remote = (event.relay_target.remote_authority or "unknown").removeprefix("ssh-remote+")
-            context.append(f"Thread location (SSH): {escape(remote, quote=False)}")
-        if slack_presentation.host_platform == "darwin":
-            try:
-                machine = _notification_label_component(socket.gethostname()) or "unknown"
-            except OSError:
-                machine = "unknown"
-            label = "WatchDog machine" if context else "Machine"
-            context.append(f"{label}: {escape(machine, quote=False)}")
-        text = slack_presentation.slack_message_with_host(
-            "\n".join((event.subject.strip(), *context, event.message))
-        )
+            context = (f"Thread location (SSH): {escape(remote, quote=False)}\n"
+                       f"WatchDog machine: {escape(machine, quote=False)}")
+        text = f"{event.subject.strip()}\n{context}\n{event.message}"
         if self.config.slack_post_configured:
             assert self.config.slack_bot_token is not None
             assert self.config.slack_channel_id is not None

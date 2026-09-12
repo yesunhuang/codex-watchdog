@@ -10,8 +10,7 @@
   `workspaceIdentifier.configURIPath`. Conflicting workspace targets still
   fail closed, and the exact existing Codex conversation remains the target.
 - Slack notifications show the native machine name. Windows and Linux
-  notifications and reply acknowledgements begin with `WatchDog host: <hostname>`;
-  macOS retains its `Machine:` notification label. Remote-SSH notifications
+  reply acknowledgements also identify their sending host. Remote-SSH notifications
   identify the thread's SSH destination separately from the WatchDog machine.
   Routing, duplicate suppression and saved configuration are unchanged.
 - The Mac launcher supports `--shared-slack-app`; the small Desktop helper uses
