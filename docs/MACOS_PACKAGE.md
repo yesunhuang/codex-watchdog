@@ -73,7 +73,7 @@ installation leaves the file unchanged.
 
 ## Foreground operation
 
-For an existing 0.2.23.dev2 or later installation at the default path, copy the repository helper
+For an existing 0.2.23 or later installation at the default path, copy the repository helper
 [`Start Codex WatchDog.command`](../packaging/Start%20Codex%20WatchDog.command)
 to your Desktop and double-click it. Terminal opens automatically and runs the
 installed WatchDog with saved Keychain settings, Slack only, automatic workspace
@@ -90,7 +90,7 @@ Slack notifications identify the machine by its runtime hostname. For a
 Remote-SSH thread, they identify the SSH destination separately from the machine
 running WatchDog, so a desktop relay is not mislabeled as the thread's host.
 
-From 0.2.23.dev3, a window first discovered after a turn finishes retains that
+From 0.2.23, a window first discovered after a turn finishes retains that
 completion when its Stop hook was recorded during the current monitor process.
 This covers the first turn in a newly opened window. Stops already present when
 WatchDog starts remain excluded by default; persisted delivery state is reused.
@@ -164,7 +164,8 @@ Use Apple Silicon Python 3.12, pip 26.0.1, and the exact versions in
 `scripts/test_macos_package.py --package PATH_TO_EXTRACTED_PACKAGE`.
 
 The recipe uses [PyInstaller's ARM64 and ad-hoc signing support](https://pyinstaller.org/en/stable/feature-notes.html#macos-multi-arch-support)
-and validates its executable on a [GitHub-hosted ARM64 Mac](https://docs.github.com/en/actions/reference/runners/github-hosted-runners).
+and validates its executable manually on a native Apple Silicon Mac. GitHub
+Actions remains disabled; see [manual release instructions](MANUAL_RELEASE.md).
 The package test hides Python and the source checkout from child execution,
 uses paths with spaces, checks doctor/privacy and foreground/hook commands,
 and tests source-profile reuse and package replacement with an isolated

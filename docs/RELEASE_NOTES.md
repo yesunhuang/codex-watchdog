@@ -1,18 +1,25 @@
 # Release notes
 
-## Unreleased
+## v0.2.23
 
-- Slack notifications identify the native WatchDog machine, with a separate
-  thread location for Remote-SSH targets. Windows and Linux reply
-  acknowledgements also identify their sending host. Routing, duplicate
-  suppression and saved configuration are unchanged.
-- Newly discovered windows retain their first completion when it occurs after
-  monitor startup. Older completions remain excluded by default, and saved
-  cursors continue to prevent replay.
-- The macOS launcher supports an existing Slack app shared with other machines
-  through polling of its own mapped notification threads. Saved-workspace
-  discovery and the lightweight Finder shortcut are included from the macOS
-  development branch.
+- A newly discovered workspace retains its first completed Stop when the hook
+  finishes after WatchDog starts but before discovery resolves the window.
+  Existing completion cursors and notification deduplication are preserved;
+  completions present before startup remain excluded by default.
+- Discovery recognizes saved VS Code workspaces recorded with
+  `workspaceIdentifier.configURIPath`. Conflicting workspace targets still
+  fail closed, and the exact existing Codex conversation remains the target.
+- Slack notifications show the native machine name. Windows and Linux
+  reply acknowledgements also identify their sending host. Remote-SSH notifications
+  identify the thread's SSH destination separately from the WatchDog machine.
+  Routing, duplicate suppression and saved configuration are unchanged.
+- The Mac launcher supports `--shared-slack-app`; the small Desktop helper uses
+  it to poll the Mac's mapped notification threads when the same Slack app is
+  also connected on another machine. Existing Socket Mode mappings are retained
+  without replaying old replies across transports.
+- Compatible profiles, runtime paths, Slack settings, Keychain entries, trusted
+  hook commands and delivery receipts are reused during upgrade. No UI or
+  background service is added.
 
 ## v0.2.19
 
@@ -140,7 +147,7 @@ are copied between hosts or security boundaries.
 
 The four executable packages retain their existing platform baselines: Windows
 x64, macOS 15 ARM64 preview, Linux ARM64/glibc 2.35 and Linux x64/glibc 2.28.
-The Mac package remains ad-hoc signed and not notarized. Automatic publication
+The Mac package remains ad-hoc signed and not notarized. Manual publication
 requires three-OS tests, all four package gates, complete-history secret scanning,
 the approved embedded Windows icon and upgrade from the actual immediately
 previous public Windows v0.2.12 executable. Earlier releases remain immutable.
