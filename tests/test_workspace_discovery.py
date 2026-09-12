@@ -721,6 +721,101 @@ def test_last_active_window_is_deduplicated_from_opened_windows(
     assert len(snapshot.effective_workspaces) == 1
 
 
+@pytest.mark.parametrize("field", ["workspace", "workspaceIdentifier"])
+@pytest.mark.parametrize("last_active_only", [False, True])
+def test_saved_workspace_resolves_exact_thread(
+    tmp_path: Path, field: str, last_active_only: bool,
+) -> None:
+    repo = (tmp_path / "repo").resolve()
+    repo.mkdir()
+    workspace_file = tmp_path / "saved project.code-workspace"
+    workspace_file.write_text(json.dumps({"folders": [{"path": "repo"}]}))
+    uri = workspace_file.resolve().as_uri()
+    entry = {field: uri if field == "workspace" else {"id": "saved-id", "configURIPath": uri}}
+    user_data = tmp_path / "Code" / "User"
+    state = user_data / "globalStorage" / "storage.json"
+    write_windows_state(state, [] if last_active_only else [entry])
+    if last_active_only:
+        state.write_text(json.dumps({"windowsState": {"openedWindows": [], "lastActiveWindow": entry}}))
+    write_workspace(user_data / "workspaceStorage", "saved-key", uri)
+    (user_data / "workspaceStorage/saved-key/workspace.json").write_text(json.dumps({"workspace": uri}))
+    write_threads(tmp_path / ".codex", [
+        (SESSION_OLD, str(repo), "vscode", "user", 0),
+        (SESSION_CURRENT, str(repo), "vscode", "user", 0),
+    ])
+
+    discovery = make_discovery(tmp_path, GitRootResolver(repo), lambda path: path.stem == SESSION_CURRENT)
+    snapshot = discovery.snapshot()
+
+    assert snapshot.status == "ok"
+    assert snapshot.issues == ()
+    assert [item.session_id for item in snapshot.effective_workspaces] == [SESSION_CURRENT]
+    assert snapshot.windows[0].workspace_path == str(repo)
+    assert snapshot.windows[0].workspace_storage_key == "saved-key"
+
+
+def test_saved_workspace_identifier_deduplicates_legacy_entry_and_keeps_folder_window(
+    tmp_path: Path,
+) -> None:
+    saved_repo = (tmp_path / "saved-repo").resolve()
+    folder_repo = (tmp_path / "folder-repo").resolve()
+    saved_repo.mkdir()
+    folder_repo.mkdir()
+    workspace_file = tmp_path / "saved.code-workspace"
+    workspace_file.write_text(json.dumps({"folders": [{"path": "saved-repo"}]}))
+    uri = workspace_file.resolve().as_uri()
+    user_data = tmp_path / "Code" / "User"
+    state = user_data / "globalStorage" / "storage.json"
+    write_windows_state(state, [])
+    state.write_text(json.dumps({"windowsState": {
+        "openedWindows": [{"workspace": uri}, {"folder": folder_repo.as_uri()}],
+        "lastActiveWindow": {"workspaceIdentifier": {"id": "saved-id", "configURIPath": uri}},
+    }}))
+    write_workspace(user_data / "workspaceStorage", "saved-key", uri)
+    (user_data / "workspaceStorage/saved-key/workspace.json").write_text(json.dumps({"workspace": uri}))
+    write_workspace(user_data / "workspaceStorage", "folder-key", folder_repo.as_uri())
+    write_threads(tmp_path / ".codex", [
+        (SESSION_CURRENT, str(saved_repo), "vscode", "user", 0),
+        (SESSION_OTHER, str(folder_repo), "vscode", "user", 0),
+    ])
+
+    snapshot = make_discovery(tmp_path, lambda path: path.resolve(), lambda _path: True).snapshot()
+
+    assert snapshot.status == "ok"
+    assert len(snapshot.windows) == 2
+    assert {item.session_id for item in snapshot.effective_workspaces} == {SESSION_CURRENT, SESSION_OTHER}
+    assert {item.repo_root for item in snapshot.effective_workspaces} == {saved_repo, folder_repo}
+
+
+@pytest.mark.parametrize("extra", [
+    {"workspaceIdentifier": "invalid"},
+    {"workspaceIdentifier": {}},
+    {"workspaceIdentifier": {"configURIPath": ""}},
+    {"workspaceIdentifier": {"configURIPath": 123}},
+    {"workspaceIdentifier": {"configURIPath": "file:///different.code-workspace"}},
+    {"workspaceIdentifier": {"configURIPath": "file:///saved.code-workspace"}, "folder": "file:///repo"},
+])
+def test_invalid_saved_workspace_identity_preserves_manual_entries_without_guessing(
+    tmp_path: Path, extra: dict,
+) -> None:
+    repo = (tmp_path / "repo").resolve()
+    repo.mkdir()
+    registry = WorkspaceRegistry(tmp_path / "runtime")
+    registered = registry.add("manual", repo, SESSION_CURRENT).workspace
+    state = tmp_path / "Code/User/globalStorage/storage.json"
+    write_windows_state(state, [{"workspace": "file:///saved.code-workspace", **extra}])
+    snapshot = make_discovery(
+        tmp_path,
+        lambda _path: (_ for _ in ()).throw(AssertionError("Git must not run")),
+        lambda _path: False, registry=registry,
+    ).snapshot()
+
+    assert snapshot.status == "error"
+    assert snapshot.windows == ()
+    assert snapshot.effective_workspaces == (registered,)
+    assert snapshot.issues == ("vscode_window_state_malformed",)
+
+
 def test_same_repo_with_distinct_window_sessions_fails_closed(tmp_path: Path) -> None:
     repo = (tmp_path / "repo").resolve()
     first = repo / "first"

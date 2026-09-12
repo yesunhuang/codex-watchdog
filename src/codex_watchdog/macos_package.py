@@ -272,6 +272,7 @@ def main(argv: Sequence[str], executable: Path) -> int:
             return 0
         if len(arguments) == 5 and arguments[0] == "_macos-launcher-summary":
             print(json.dumps({"status": "ready", "runtime": arguments[1], "slack_reply": arguments[2],
+                              "slack_reply_mode": os.environ.get("CODEX_WATCHDOG_SLACK_REPLY_MODE", "socket"),
                               "smtp_configured": arguments[3] == "true", "slack_only": arguments[4] == "1"}, sort_keys=True))
             return 0
         if not arguments:

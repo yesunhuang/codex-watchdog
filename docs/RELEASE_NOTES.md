@@ -2,11 +2,17 @@
 
 ## Unreleased
 
-- Windows and Linux Slack notifications and reply acknowledgements now begin
-  with `WatchDog host: <hostname>`, identifying the native machine that sent
-  the message. The repository's remote alias remains separate. Routing,
-  duplicate suppression and saved configuration are unchanged. macOS message
-  formatting is unchanged.
+- Slack notifications identify the native WatchDog machine, with a separate
+  thread location for Remote-SSH targets. Windows and Linux reply
+  acknowledgements also identify their sending host. Routing, duplicate
+  suppression and saved configuration are unchanged.
+- Newly discovered windows retain their first completion when it occurs after
+  monitor startup. Older completions remain excluded by default, and saved
+  cursors continue to prevent replay.
+- The macOS launcher supports an existing Slack app shared with other machines
+  through polling of its own mapped notification threads. Saved-workspace
+  discovery and the lightweight Finder shortcut are included from the macOS
+  development branch.
 
 ## v0.2.19
 

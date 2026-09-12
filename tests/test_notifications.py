@@ -15,7 +15,6 @@ from codex_watchdog.notifications import (
 )
 from codex_watchdog.slack_mapping import SlackRelayTarget, SlackThreadStore
 from codex_watchdog.slack_relay import SlackReplyRelay
-from codex_watchdog import slack_presentation
 
 
 WEBHOOK = "https://hooks.slack.invalid/services/secret/path"
@@ -26,6 +25,11 @@ SLACK_BOT_TOKEN = "xoxb-test-secret"
 SLACK_APP_TOKEN = "xapp-test-secret"
 SLACK_CHANNEL = "C12345678"
 SLACK_USER = "U12345678"
+
+
+@pytest.fixture(autouse=True)
+def fixed_machine_name(monkeypatch):
+    monkeypatch.setattr("codex_watchdog.notifications.socket.gethostname", lambda: "test-machine")
 
 
 def test_notification_workspace_label_prefers_repo_name_and_supports_locality(
@@ -82,12 +86,9 @@ class FakeSmtp:
         self.calls.append(("quit", None))
 
 
-@pytest.mark.parametrize("system", ["win32", "linux", "darwin"])
 def test_slack_delivery_is_primary_and_identical_event_is_persistently_suppressed(
-    tmp_path: Path, monkeypatch, system,
+    tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(slack_presentation, "host_platform", system)
-    monkeypatch.setattr(slack_presentation, "gethostname", lambda: "sender-a.example")
     calls = []
 
     def post(url: str, payload: bytes, timeout: float) -> int:
@@ -107,9 +108,9 @@ def test_slack_delivery_is_primary_and_identical_event_is_persistently_suppresse
     assert second.duplicate is True
     assert len(calls) == 1
     assert calls[0][0] == WEBHOOK
-    prefix = "WatchDog host: sender-a.example\n" if system != "darwin" else ""
     assert calls[0][1] == {
-        "text": prefix + "[Codex Watchdog] local-watchdog needs attention\n"
+        "text": "[Codex Watchdog] local-watchdog needs attention\n"
+        "Machine: test-machine\n"
         "Untracked files were left untouched."
     }
 
@@ -117,15 +118,11 @@ def test_slack_delivery_is_primary_and_identical_event_is_persistently_suppresse
     assert WEBHOOK not in durable
     assert "Untracked files" not in durable
     assert "local-watchdog" not in durable
-    assert "sender-a.example" not in durable
 
 
-@pytest.mark.parametrize("system", ["win32", "linux", "darwin"])
 def test_slack_bot_delivery_persists_exact_reply_thread_without_message_text(
-    tmp_path: Path, monkeypatch, system,
+    tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(slack_presentation, "host_platform", system)
-    monkeypatch.setattr(slack_presentation, "gethostname", lambda: "sender-c.example")
     calls = []
 
     def api_post(token: str, method: str, payload: Dict[str, Any], timeout: float):
@@ -161,9 +158,8 @@ def test_slack_bot_delivery_persists_exact_reply_thread_without_message_text(
     assert result.channel == "slack"
     assert calls[0][0:2] == (SLACK_BOT_TOKEN, "chat.postMessage")
     assert calls[0][2]["channel"] == SLACK_CHANNEL
-    prefix = "WatchDog host: sender-c.example\n" if system != "darwin" else ""
-    assert calls[0][2]["text"].startswith(prefix + "[Codex Watchdog] stopped\n")
     assert "Reply in this Slack thread" in calls[0][2]["text"]
+    assert "Machine: test-machine\n" in calls[0][2]["text"]
     mapping = store.lookup_thread(SLACK_CHANNEL, "1760000000.000100")
     assert mapping is not None
     assert mapping.target == target
@@ -173,15 +169,13 @@ def test_slack_bot_delivery_persists_exact_reply_thread_without_message_text(
         SLACK_BOT_TOKEN,
         SLACK_APP_TOKEN,
         "Sensitive output for the operator.",
-        "sender-c.example",
+        "test-machine",
     ):
         assert secret not in durable
 
 
-@pytest.mark.parametrize("system", ["win32", "linux", "darwin"])
-def test_slack_webhook_fallback_keeps_sending_host_without_creating_reply_mapping(tmp_path, monkeypatch, system):
-    monkeypatch.setattr(slack_presentation, "host_platform", system)
-    monkeypatch.setattr(slack_presentation, "gethostname", lambda: "sender-d.example")
+def test_slack_webhook_fallback_keeps_sending_host_without_creating_reply_mapping(tmp_path, monkeypatch):
+    monkeypatch.setattr("codex_watchdog.notifications.socket.gethostname", lambda: "sender-d.example")
     calls = []
     def reject(*args):
         raise RuntimeError("provider unavailable")
@@ -193,17 +187,54 @@ def test_slack_webhook_fallback_keeps_sending_host_without_creating_reply_mappin
     notifier = EnvironmentNotifier(tmp_path, config, slack_api_post=reject, http_post=post)
     assert notifier.notify(event()).status == "sent"
     assert len(calls) == 1
-    prefix = "WatchDog host: sender-d.example\n" if system != "darwin" else ""
-    assert calls[0].startswith(prefix + event().subject + "\n")
-    assert calls[0].count("WatchDog host:") == (0 if system == "darwin" else 1)
+    assert calls[0].startswith(event().subject + "\nMachine: sender-d.example\n")
+    assert calls[0].count("Machine: sender-d.example") == 1
     assert "mapping is unavailable" in calls[0]
     assert not notifier.slack_thread_store.has_notification_mapping(event().event_fingerprint())
 
 
-@pytest.mark.parametrize("system", ["win32", "linux", "darwin"])
-def test_bot_and_channel_send_notifications_without_a_reply_listener(tmp_path: Path, monkeypatch, system) -> None:
-    monkeypatch.setattr(slack_presentation, "host_platform", system)
-    monkeypatch.setattr(slack_presentation, "gethostname", lambda: "sender-b.example")
+
+def test_remote_slack_identifies_thread_location_separately_from_sender(tmp_path: Path) -> None:
+    calls = []
+    target = SlackRelayTarget(
+        workspace_id="remote-watchdog", thread_id=OUTLOOK_CLIENT_ID,
+        execution_locality="remote_ssh", remote_authority="ssh-remote+worker.example",
+        remote_repo_path="/workspace", remote_storage_key="a" * 32,
+    )
+    notice = NotificationEvent("remote-watchdog", "stopped", "turn", "Stopped", "done", target)
+    notifier = EnvironmentNotifier(tmp_path, NotificationConfig(slack_webhook_url=WEBHOOK),
+        http_post=lambda url, payload, timeout: (calls.append(json.loads(payload)) or 200))
+    assert notifier.notify(notice).status == "sent"
+    assert calls[0]["text"] == (
+        "Stopped\nThread location (SSH): worker.example\nWatchDog machine: test-machine\ndone")
+
+
+def test_machine_label_is_escaped_without_changing_notification_identity(tmp_path, monkeypatch):
+    calls = []
+    config = NotificationConfig(slack_webhook_url=WEBHOOK)
+    def post(url, payload, timeout):
+        calls.append(json.loads(payload))
+        return 200
+    monkeypatch.setattr("codex_watchdog.notifications.socket.gethostname", lambda: "Mac & <name>")
+    assert EnvironmentNotifier(tmp_path, config, http_post=post).notify(event()).status == "sent"
+    assert "Machine: Mac &amp; &lt;name&gt;\n" in calls[0]["text"]
+    monkeypatch.setattr("codex_watchdog.notifications.socket.gethostname", lambda: "renamed-machine")
+    assert EnvironmentNotifier(tmp_path, config, http_post=post).notify(event()).status == "suppressed"
+    assert len(calls) == 1
+
+
+def test_machine_lookup_failure_does_not_prevent_notification(tmp_path, monkeypatch):
+    calls = []
+    def unavailable():
+        raise OSError("unavailable")
+    monkeypatch.setattr("codex_watchdog.notifications.socket.gethostname", unavailable)
+    notifier = EnvironmentNotifier(tmp_path, NotificationConfig(slack_webhook_url=WEBHOOK),
+        http_post=lambda url, payload, timeout: (calls.append(json.loads(payload)) or 200))
+    assert notifier.notify(event()).status == "sent"
+    assert "Machine: unknown\n" in calls[0]["text"]
+
+
+def test_bot_and_channel_send_notifications_without_a_reply_listener(tmp_path: Path) -> None:
     config = NotificationConfig.from_environment(
         {
             "CODEX_WATCHDOG_SLACK_BOT_TOKEN": SLACK_BOT_TOKEN,
@@ -241,8 +272,7 @@ def test_bot_and_channel_send_notifications_without_a_reply_listener(tmp_path: P
     assert repeated.status == "suppressed" and repeated.duplicate is True
     assert calls == [(SLACK_BOT_TOKEN, "chat.postMessage", {
         "channel": SLACK_CHANNEL,
-        "text": ("WatchDog host: sender-b.example\n" if system != "darwin" else "")
-        + "[Codex Watchdog] Monitoring lost\nThe owner stopped.",
+        "text": "[Codex Watchdog] Monitoring lost\nMachine: test-machine\nThe owner stopped.",
         "unfurl_links": False, "unfurl_media": False,
     })]
     assert not SlackThreadStore(tmp_path).has_notification_mapping(notification.event_fingerprint())

@@ -140,6 +140,25 @@ def test_deferral_does_not_skip_reply_and_pagination_uses_durable_oldest(tmp_pat
     assert len(deliveries) == 1
 
 
+def test_shared_app_polling_delivers_own_reply_when_other_machine_receives_socket_event(tmp_path):
+    mac, deliveries, _ = fixture(tmp_path / "mac")
+    windows_deliveries = []
+    windows = SlackReplyRelay.from_notification_config(tmp_path / "windows",
+        config(slack_reply_mode="socket", slack_app_token="xapp-fixture"),
+        queue_dispatcher=SimpleNamespace(dispatch=lambda *args: windows_deliveries.append(args)),
+        remote_ssh_adapter=None)
+    # Slack can give the Mac reply to Windows, where the exact local mapping is absent.
+    assert windows.handle_message(dict(event(), channel=CHANNEL), event_id="EvSharedApp").status == "ignored_unknown_thread"
+    assert windows_deliveries == []
+    # Polling reads the Mac's own parent without relying on which socket got the event.
+    poller = SlackReplyPoller(mac, api=lambda method, params:
+        dict(messages=[event()]) if method == "conversations.replies" else dict(ok=True))
+    assert poller.poll_once()[0]["status"] == "queued"
+    assert poller.poll_once() == []
+    assert len(deliveries) == 1 and deliveries[0][0] == THREAD
+    assert not SlackThreadStore(tmp_path / "windows").has_notification_mapping("a" * 64)
+
+
 def test_single_listener_lock_and_close(tmp_path):
     relay, _, _ = fixture(tmp_path)
     with FileLock(tmp_path / "locks/slack-poll-listener.lock"):
