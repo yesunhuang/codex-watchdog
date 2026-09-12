@@ -1,5 +1,26 @@
 # Release notes
 
+## v0.2.25
+
+- Corrects the Slack mapping API mismatch in the unpublished v0.2.24 candidate
+  that prevented Linux controllers from starting with Slack configured. Native
+  package acceptance now exercises Slack-enabled node startup and restart with
+  synthetic state and no provider credentials. v0.2.24 was not released.
+
+- Linux node mode registers verified native VS Code writers independently of
+  the configured Git/notification observation interval. A new thread can now be
+  recorded while a slower observation is in progress, preserving its eligibility
+  for same-thread continuation after the window closes. Previously a brief
+  attachment entirely between observation cycles could be missed.
+- Registration checks the current node's kernel writer and exact repository;
+  shared-home logs still cannot authorize another node's conversation. The
+  registration worker stops before the controller lock is released. Existing
+  profiles, trusted hooks, Slack settings and delivery receipts are preserved.
+- Automatic continuation remains opt-in with `--continue-interrupted`; it
+  resumes only a verified interrupted turn and sends its existing confirmation
+  after the continuation actually starts. The configured observation interval
+  and desktop foreground behavior are unchanged.
+
 ## v0.2.23
 
 - A newly discovered workspace retains its first completed Stop when the hook
