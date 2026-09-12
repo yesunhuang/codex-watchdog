@@ -10,6 +10,8 @@ import pytest
 from codex_watchdog.slack_mapping import SlackRelayTarget, SlackThreadStore
 from codex_watchdog.slack_mapping import valid_slack_channel_id
 from codex_watchdog.slack_relay import SlackReplyRelay
+from codex_watchdog.slack_relay import SlackReplyResult as ReplyResult
+from codex_watchdog import slack_presentation
 from codex_watchdog.storage import FileLock, StoreBusyError
 
 
@@ -181,3 +183,30 @@ def test_direct_message_id_is_not_a_supported_relay_channel() -> None:
     assert valid_slack_channel_id("C12345678") is True
     assert valid_slack_channel_id("G12345678") is True
     assert valid_slack_channel_id("D12345678") is False
+
+
+@pytest.mark.parametrize("system", ["win32", "linux", "darwin"])
+@pytest.mark.parametrize("controlled", [False, True])
+@pytest.mark.parametrize("status", ["queued", "uncertain"])
+def test_reply_acknowledgement_identifies_sender_and_keeps_exact_parent(tmp_path, monkeypatch, system, controlled, status):
+    monkeypatch.setattr(slack_presentation, "host_platform", system)
+    monkeypatch.setattr(slack_presentation, "gethostname", lambda: "courier-a.example")
+    service = relay(tmp_path)
+    sends = []
+    events = []
+    def notify(target, token, event, notifier):
+        events.append(event)
+        return notifier.notify(event)
+    control = (SimpleNamespace(notify=notify), object(), object()) if controlled else None
+    result = ReplyResult(status, "watchdog", "instruction-a", control=control)
+    service.acknowledge(reply_event(), result, SimpleNamespace(chat_postMessage=lambda **args: sends.append(args)))
+    text = ("Queued for the exact existing Codex thread." if status == "queued" else
+            "WatchDog could not confirm exact-thread delivery and will not blindly resend this reply.")
+    prefix = "WatchDog host: courier-a.example\n" if system != "darwin" else ""
+    assert sends == [dict(channel=CHANNEL, thread_ts=THREAD_TS, text=prefix + text,
+                          unfurl_links=False, unfurl_media=False)]
+    assert len(events) == int(controlled)
+    # Ignored/duplicate events still produce no new Slack acknowledgement.
+    service.acknowledge(reply_event(), ReplyResult("duplicate"),
+                        SimpleNamespace(chat_postMessage=lambda **args: sends.append(args)))
+    assert len(sends) == 1

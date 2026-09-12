@@ -15,6 +15,7 @@ from codex_watchdog.notifications import (
 )
 from codex_watchdog.slack_mapping import SlackRelayTarget, SlackThreadStore
 from codex_watchdog.slack_relay import SlackReplyRelay
+from codex_watchdog import slack_presentation
 
 
 WEBHOOK = "https://hooks.slack.invalid/services/secret/path"
@@ -29,6 +30,7 @@ SLACK_USER = "U12345678"
 
 @pytest.fixture(autouse=True)
 def fixed_machine_name(monkeypatch):
+    monkeypatch.setattr(slack_presentation, "host_platform", "darwin")
     monkeypatch.setattr("codex_watchdog.notifications.socket.gethostname", lambda: "test-machine")
 
 
@@ -86,9 +88,12 @@ class FakeSmtp:
         self.calls.append(("quit", None))
 
 
+@pytest.mark.parametrize("system", ["win32", "linux", "darwin"])
 def test_slack_delivery_is_primary_and_identical_event_is_persistently_suppressed(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch, system,
 ) -> None:
+    monkeypatch.setattr(slack_presentation, "host_platform", system)
+    monkeypatch.setattr(slack_presentation, "gethostname", lambda: "sender-a.example")
     calls = []
 
     def post(url: str, payload: bytes, timeout: float) -> int:
@@ -108,21 +113,26 @@ def test_slack_delivery_is_primary_and_identical_event_is_persistently_suppresse
     assert second.duplicate is True
     assert len(calls) == 1
     assert calls[0][0] == WEBHOOK
+    prefix = "WatchDog host: sender-a.example\n" if system != "darwin" else ""
     assert calls[0][1] == {
-        "text": "[Codex Watchdog] local-watchdog needs attention\n"
-        "Machine: test-machine\n"
-        "Untracked files were left untouched."
+        "text": prefix + "[Codex Watchdog] local-watchdog needs attention\n"
+        + ("Machine: test-machine\n" if system == "darwin" else "")
+        + "Untracked files were left untouched."
     }
 
     durable = notifier.state_path.read_text(encoding="utf-8")
     assert WEBHOOK not in durable
     assert "Untracked files" not in durable
     assert "local-watchdog" not in durable
+    assert "sender-a.example" not in durable
 
 
+@pytest.mark.parametrize("system", ["win32", "linux", "darwin"])
 def test_slack_bot_delivery_persists_exact_reply_thread_without_message_text(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch, system,
 ) -> None:
+    monkeypatch.setattr(slack_presentation, "host_platform", system)
+    monkeypatch.setattr(slack_presentation, "gethostname", lambda: "sender-c.example")
     calls = []
 
     def api_post(token: str, method: str, payload: Dict[str, Any], timeout: float):
@@ -158,8 +168,10 @@ def test_slack_bot_delivery_persists_exact_reply_thread_without_message_text(
     assert result.channel == "slack"
     assert calls[0][0:2] == (SLACK_BOT_TOKEN, "chat.postMessage")
     assert calls[0][2]["channel"] == SLACK_CHANNEL
+    prefix = "WatchDog host: sender-c.example\n" if system != "darwin" else ""
+    assert calls[0][2]["text"].startswith(prefix + "[Codex Watchdog] stopped\n")
     assert "Reply in this Slack thread" in calls[0][2]["text"]
-    assert "Machine: test-machine\n" in calls[0][2]["text"]
+    assert ("Machine: test-machine\n" in calls[0][2]["text"]) == (system == "darwin")
     mapping = store.lookup_thread(SLACK_CHANNEL, "1760000000.000100")
     assert mapping is not None
     assert mapping.target == target
@@ -170,11 +182,15 @@ def test_slack_bot_delivery_persists_exact_reply_thread_without_message_text(
         SLACK_APP_TOKEN,
         "Sensitive output for the operator.",
         "test-machine",
+        "sender-c.example",
     ):
         assert secret not in durable
 
 
-def test_remote_slack_identifies_thread_location_separately_from_sender(tmp_path: Path) -> None:
+@pytest.mark.parametrize("system", ["win32", "linux", "darwin"])
+def test_remote_slack_identifies_thread_location_separately_from_sender(tmp_path: Path, monkeypatch, system) -> None:
+    monkeypatch.setattr(slack_presentation, "host_platform", system)
+    monkeypatch.setattr(slack_presentation, "gethostname", lambda: "test-machine")
     calls = []
     target = SlackRelayTarget(
         workspace_id="remote-watchdog", thread_id=OUTLOOK_CLIENT_ID,
@@ -185,8 +201,11 @@ def test_remote_slack_identifies_thread_location_separately_from_sender(tmp_path
     notifier = EnvironmentNotifier(tmp_path, NotificationConfig(slack_webhook_url=WEBHOOK),
         http_post=lambda url, payload, timeout: (calls.append(json.loads(payload)) or 200))
     assert notifier.notify(notice).status == "sent"
+    prefix = "WatchDog host: test-machine\n" if system != "darwin" else ""
     assert calls[0]["text"] == (
-        "Stopped\nThread location (SSH): worker.example\nWatchDog machine: test-machine\ndone")
+        prefix + "Stopped\nThread location (SSH): worker.example\n"
+        + ("WatchDog machine: test-machine\n" if system == "darwin" else "") + "done")
+    assert calls[0]["text"].count("test-machine") == 1
 
 
 def test_machine_label_is_escaped_without_changing_notification_identity(tmp_path, monkeypatch):
@@ -214,7 +233,32 @@ def test_machine_lookup_failure_does_not_prevent_notification(tmp_path, monkeypa
     assert "Machine: unknown\n" in calls[0]["text"]
 
 
-def test_bot_and_channel_send_notifications_without_a_reply_listener(tmp_path: Path) -> None:
+@pytest.mark.parametrize("system", ["win32", "linux", "darwin"])
+def test_slack_webhook_fallback_keeps_sending_host_without_creating_reply_mapping(tmp_path, monkeypatch, system):
+    monkeypatch.setattr(slack_presentation, "host_platform", system)
+    monkeypatch.setattr(slack_presentation, "gethostname", lambda: "sender-d.example")
+    calls = []
+    def reject(*args):
+        raise RuntimeError("provider unavailable")
+    def post(url, payload, timeout):
+        calls.append(json.loads(payload)["text"])
+        return 200
+    config = NotificationConfig(slack_webhook_url=WEBHOOK, slack_bot_token=SLACK_BOT_TOKEN,
+                                slack_channel_id=SLACK_CHANNEL)
+    notifier = EnvironmentNotifier(tmp_path, config, slack_api_post=reject, http_post=post)
+    assert notifier.notify(event()).status == "sent"
+    assert len(calls) == 1
+    prefix = "WatchDog host: sender-d.example\n" if system != "darwin" else ""
+    assert calls[0].startswith(prefix + event().subject + "\n")
+    assert calls[0].count("WatchDog host:") == (0 if system == "darwin" else 1)
+    assert "mapping is unavailable" in calls[0]
+    assert not notifier.slack_thread_store.has_notification_mapping(event().event_fingerprint())
+
+
+@pytest.mark.parametrize("system", ["win32", "linux", "darwin"])
+def test_bot_and_channel_send_notifications_without_a_reply_listener(tmp_path: Path, monkeypatch, system) -> None:
+    monkeypatch.setattr(slack_presentation, "host_platform", system)
+    monkeypatch.setattr(slack_presentation, "gethostname", lambda: "sender-b.example")
     config = NotificationConfig.from_environment(
         {
             "CODEX_WATCHDOG_SLACK_BOT_TOKEN": SLACK_BOT_TOKEN,
@@ -252,7 +296,9 @@ def test_bot_and_channel_send_notifications_without_a_reply_listener(tmp_path: P
     assert repeated.status == "suppressed" and repeated.duplicate is True
     assert calls == [(SLACK_BOT_TOKEN, "chat.postMessage", {
         "channel": SLACK_CHANNEL,
-        "text": "[Codex Watchdog] Monitoring lost\nMachine: test-machine\nThe owner stopped.",
+        "text": ("WatchDog host: sender-b.example\n" if system != "darwin" else "")
+        + "[Codex Watchdog] Monitoring lost\n"
+        + ("Machine: test-machine\n" if system == "darwin" else "") + "The owner stopped.",
         "unfurl_links": False, "unfurl_media": False,
     })]
     assert not SlackThreadStore(tmp_path).has_notification_mapping(notification.event_fingerprint())
