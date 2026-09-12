@@ -183,6 +183,31 @@ def test_host_observes_attached_thread_and_keeps_observation_after_idle_handback
     assert len(clients) == 1  # Never resume the VS Code writer.
 
 
+@pytest.mark.parametrize("scenario", [True], indirect=True)
+def test_slack_configured_native_controller_starts_and_restarts(scenario, monkeypatch):
+    """Use the real store/service interface, including Slack listener startup."""
+    from codex_watchdog.slack_poll import SlackReplyPoller
+
+    store, local, writer, clock, clients, make_agent = scenario
+    monkeypatch.setenv("CODEX_WATCHDOG_SLACK_BOT_TOKEN", "xoxb-fixture-not-real")
+    monkeypatch.setenv("CODEX_WATCHDOG_SLACK_CHANNEL_ID", "C12345678")
+    monkeypatch.setenv("CODEX_WATCHDOG_SLACK_ALLOWED_USER_IDS", "U12345678")
+    monkeypatch.setenv("CODEX_WATCHDOG_SLACK_REPLY_MODE", "poll")
+    calls = []
+    monkeypatch.setattr(SlackReplyPoller, "_api", lambda *args: calls.append(args))
+    agent = make_agent()
+    agent.service_factory = linux_auto.MvpWatchdogService
+    for _ in range(2):
+        assert agent.step(observe=False)[0]["state"] == "observing"
+        item = agent.controllers[THREAD]
+        relay = item["service"].slack_reply_relay
+        assert relay is not None and relay._poller.thread.is_alive()
+        item["owner"].release_requested = True
+        assert agent.step(observe=False)[0]["state"] == "released"
+        assert THREAD not in agent.controllers and relay._poller is None
+    assert not clients and not calls
+
+
 def test_desktop_crash_takeover_and_remote_crash_restart_keep_same_thread(scenario):
     store, local, writer, clock, clients, make_agent = scenario
     first = make_agent()

@@ -1,6 +1,11 @@
 # Release notes
 
-## v0.2.24
+## v0.2.25
+
+- Corrects the Slack mapping API mismatch in the unpublished v0.2.24 candidate
+  that prevented Linux controllers from starting with Slack configured. Native
+  package acceptance now exercises Slack-enabled node startup and restart with
+  synthetic state and no provider credentials. v0.2.24 was not released.
 
 - Linux node mode registers verified native VS Code writers independently of
   the configured Git/notification observation interval. A new thread can now be
