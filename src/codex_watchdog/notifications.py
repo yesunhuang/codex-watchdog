@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from email.message import EmailMessage
+from html import escape
 import json
 import os
 from pathlib import Path
 import re
 import smtplib
+import socket
 import ssl
 import subprocess
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
@@ -696,7 +698,16 @@ class EnvironmentNotifier:
         )
 
     def _send_slack(self, event: NotificationEvent) -> None:
-        text = f"{event.subject.strip()}\n{event.message}"
+        try:
+            machine = _notification_label_component(socket.gethostname()) or "unknown"
+        except OSError:
+            machine = "unknown"
+        context = f"Machine: {escape(machine, quote=False)}"
+        if event.relay_target is not None and event.relay_target.execution_locality == "remote_ssh":
+            remote = (event.relay_target.remote_authority or "unknown").removeprefix("ssh-remote+")
+            context = (f"Thread location (SSH): {escape(remote, quote=False)}\n"
+                       f"WatchDog machine: {escape(machine, quote=False)}")
+        text = f"{event.subject.strip()}\n{context}\n{event.message}"
         if self.config.slack_post_configured:
             assert self.config.slack_bot_token is not None
             assert self.config.slack_channel_id is not None

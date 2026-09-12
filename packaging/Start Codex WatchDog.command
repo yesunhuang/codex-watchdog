@@ -9,4 +9,4 @@ fi
 
 printf '%s\n' 'Starting Codex WatchDog (Slack only, every 30 seconds).' \
     'Keep this window open. Press Control-C to stop.'
-exec "$watchdog_launcher" --slack-only -- --interval 30
+exec "$watchdog_launcher" --slack-only --shared-slack-app -- --interval 30

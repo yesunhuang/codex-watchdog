@@ -622,6 +622,14 @@ These are the standard [Slack Bolt Socket Mode][slack-bolt-socket-mode] and
 required. Stop any older WatchDog process before starting the configured one;
 running two Socket Mode clients for the same Slack app can split deliveries.
 
+When a Windows listener already uses the same app, the Mac launcher supports
+`--shared-slack-app` (from 0.2.23.dev2). It uses the existing polling transport:
+each machine reads replies only from its own mapped notifications and keeps
+exact-thread delivery, user authorization and duplicate suppression. No second
+Socket Mode connection is opened. Saved tokens/channel settings are reused.
+Use a new notification after switching transports; historical Socket Mode
+mappings and receipts are retained separately to avoid replaying old replies.
+
 Install the relay dependency. The direct form also works with older pip
 versions that cannot perform a PEP 517 editable install:
 

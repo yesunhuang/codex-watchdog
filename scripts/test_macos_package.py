@@ -179,7 +179,9 @@ def main() -> None:
             launcher = installed.with_name("watchdog-macos.sh")
             summary = json.loads(run([launcher, "--slack-only", "--dry-run"], env=keychain_env).stdout)
             assert summary == {"status": "ready", "runtime": str(runtime), "slack_reply": "macos_keychain",
-                               "smtp_configured": False, "slack_only": True}
+                               "slack_reply_mode": "socket", "smtp_configured": False, "slack_only": True}
+            shared = json.loads(run([launcher, "--slack-only", "--shared-slack-app", "--dry-run"], env=keychain_env).stdout)
+            assert shared == {**summary, "slack_reply_mode": "poll"}
             once = run([launcher, "--slack-only", "--", "--once", "--manual-only"], env=keychain_env)
             assert json.loads(once.stdout.splitlines()[-1])["workspace_count"] == 0
             run([installed.with_name("setup-slack-relay-macos.sh"), "--help"], env=keychain_env)

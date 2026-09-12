@@ -73,13 +73,22 @@ installation leaves the file unchanged.
 
 ## Foreground operation
 
-For an existing installation at the default path, copy the repository helper
+For an existing 0.2.23.dev2 or later installation at the default path, copy the repository helper
 [`Start Codex WatchDog.command`](../packaging/Start%20Codex%20WatchDog.command)
 to your Desktop and double-click it. Terminal opens automatically and runs the
 installed WatchDog with saved Keychain settings, Slack only, automatic workspace
 discovery and a 30-second interval. No command entry is needed. Keep that window
 open; press **Control-C** there to stop. This small helper needs no graphical
 frontend or additional runtime, and reuses the installed executable after upgrades.
+It also selects `--shared-slack-app`, which polls replies to this Mac's own
+notifications instead of opening a competing Socket Mode connection. This lets
+the Mac share a Slack app with a Windows listener. The existing saved credentials
+and channel remain in place. Replies to new notifications use polling; older
+Socket Mode mappings and receipts are preserved without importing or replaying them.
+
+Slack notifications identify the machine by its runtime hostname. For a
+Remote-SSH thread, they identify the SSH destination separately from the machine
+running WatchDog, so a desktop relay is not mislabeled as the thread's host.
 
 For the accepted Keychain Slack workflow with only your explicit registrations:
 
