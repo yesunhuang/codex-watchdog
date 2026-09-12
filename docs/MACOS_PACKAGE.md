@@ -90,6 +90,11 @@ Slack notifications identify the machine by its runtime hostname. For a
 Remote-SSH thread, they identify the SSH destination separately from the machine
 running WatchDog, so a desktop relay is not mislabeled as the thread's host.
 
+From 0.2.23.dev3, a window first discovered after a turn finishes retains that
+completion when its Stop hook was recorded during the current monitor process.
+This covers the first turn in a newly opened window. Stops already present when
+WatchDog starts remain excluded by default; persisted delivery state is reused.
+
 For the accepted Keychain Slack workflow with only your explicit registrations:
 
 ```sh

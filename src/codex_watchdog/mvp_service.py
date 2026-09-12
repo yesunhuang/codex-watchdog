@@ -247,6 +247,10 @@ class MvpWatchdogService:
             str, Tuple[Path, int, int, Optional[Dict[str, Any]]]
         ] = {}
         self._observed_rollout_completions = set()
+        # A newly discovered window may already have completed a turn while
+        # this monitor was running. Baseline once per process, not per window.
+        startup_audits = self._audit_files()
+        self._startup_audit_cursor = startup_audits[-1].name if startup_audits else None
 
     def state_path(self, workspace_id: str) -> Path:
         return self.states / f"{sha256_text(workspace_id)}.json"
@@ -1281,10 +1285,15 @@ class MvpWatchdogService:
                 "pending_remote_oid": None,
                 "pending_remote_detected_at": None,
             }
-            matches = self._matching_stops(workspace, audit_files)
+            candidates = audit_files if replay_latest_stop else tuple(
+                audit_path for audit_path in audit_files
+                if self._startup_audit_cursor is None
+                or audit_path.name > self._startup_audit_cursor
+            )
+            matches = self._matching_stops(workspace, candidates)
             if replay_latest_stop and matches:
                 return state, (matches[-1],)
-            return state, ()
+            return state, matches
 
         original = path.read_bytes()
         state = self._read_state(path, workspace, allow_thread_change=True)
