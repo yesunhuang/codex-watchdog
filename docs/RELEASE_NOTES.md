@@ -1,5 +1,24 @@
 # Release notes
 
+## v0.2.23
+
+- A newly discovered workspace retains its first completed Stop when the hook
+  finishes after WatchDog starts but before discovery resolves the window.
+  Existing completion cursors and notification deduplication are preserved;
+  completions present before startup remain excluded by default.
+- Discovery recognizes saved VS Code workspaces recorded with
+  `workspaceIdentifier.configURIPath`. Conflicting workspace targets still
+  fail closed, and the exact existing Codex conversation remains the target.
+- Slack notifications show the native machine name. Remote-SSH notifications
+  identify the thread's SSH destination separately from the WatchDog machine.
+- The Mac launcher supports `--shared-slack-app`; the small Desktop helper uses
+  it to poll the Mac's mapped notification threads when the same Slack app is
+  also connected on another machine. Existing Socket Mode mappings are retained
+  without replaying old replies across transports.
+- Compatible profiles, runtime paths, Slack settings, Keychain entries, trusted
+  hook commands and delivery receipts are reused during upgrade. No UI or
+  background service is added.
+
 ## v0.2.19
 
 - Linux can receive allowlisted Slack replies independently of the desktop with
@@ -126,7 +145,7 @@ are copied between hosts or security boundaries.
 
 The four executable packages retain their existing platform baselines: Windows
 x64, macOS 15 ARM64 preview, Linux ARM64/glibc 2.35 and Linux x64/glibc 2.28.
-The Mac package remains ad-hoc signed and not notarized. Automatic publication
+The Mac package remains ad-hoc signed and not notarized. Manual publication
 requires three-OS tests, all four package gates, complete-history secret scanning,
 the approved embedded Windows icon and upgrade from the actual immediately
 previous public Windows v0.2.12 executable. Earlier releases remain immutable.

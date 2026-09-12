@@ -73,7 +73,7 @@ installation leaves the file unchanged.
 
 ## Foreground operation
 
-For an existing 0.2.23.dev2 or later installation at the default path, copy the repository helper
+For an existing 0.2.23 or later installation at the default path, copy the repository helper
 [`Start Codex WatchDog.command`](../packaging/Start%20Codex%20WatchDog.command)
 to your Desktop and double-click it. Terminal opens automatically and runs the
 installed WatchDog with saved Keychain settings, Slack only, automatic workspace
@@ -90,7 +90,7 @@ Slack notifications identify the machine by its runtime hostname. For a
 Remote-SSH thread, they identify the SSH destination separately from the machine
 running WatchDog, so a desktop relay is not mislabeled as the thread's host.
 
-From 0.2.23.dev3, a window first discovered after a turn finishes retains that
+From 0.2.23, a window first discovered after a turn finishes retains that
 completion when its Stop hook was recorded during the current monitor process.
 This covers the first turn in a newly opened window. Stops already present when
 WatchDog starts remain excluded by default; persisted delivery state is reused.
