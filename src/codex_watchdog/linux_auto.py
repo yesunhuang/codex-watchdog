@@ -105,6 +105,9 @@ class LinuxAutoWatchdog:
         self.controllers = {}
         self.failed_resumes = {}
         self.stopping = False
+        self._discovery_stop = threading.Event()
+        self._discovery_thread = None
+        self._discovery_results = ()
 
     def _excluded(self, repo):
         return str(repo).casefold() in self.exclude or Path(repo).name.casefold() in self.exclude
@@ -145,7 +148,7 @@ class LinuxAutoWatchdog:
             relay = getattr(service, "slack_reply_relay", None)
             if relay is not None:
                 relay.thread_store.cache_mappings(
-                    store.slack_mappings(),
+                    store.relay_mappings(),
                     SlackRelayTarget(canonical_id, store.thread_id, "process_local"),
                 )
                 relay.start()
@@ -204,7 +207,8 @@ class LinuxAutoWatchdog:
     def step(self, *, observe=True):
         results = []
         if self.node_local and not self.stopping:
-            results.extend(self._discover_native())
+            results.extend(self._discover_native() if self._discovery_thread is None
+                           else self._discovery_results)
         paths = sorted((control_root(self.codex_home)).glob("*/owner.json"))
         for path in paths:
             thread = path.parent.name
@@ -335,19 +339,45 @@ class LinuxAutoWatchdog:
                                     reason=owner_failure_reason(exc)))
         return results
 
+    def _watch_native_attachments(self):
+        # A new VS Code writer may disappear during the configured observation
+        # interval or a slow Git/network probe. Record only its verified native
+        # attachment here; the main loop still owns every controller and effect.
+        while not self.stopping and not self._discovery_stop.is_set():
+            try:
+                result = self._discover_native()
+            except (OSError, ValueError) as exc:
+                result = [dict(state="blocked", reason=owner_failure_reason(exc))]
+            # Publish an immutable snapshot; never mutate the main loop's list.
+            self._discovery_results = tuple(result)
+            self._discovery_stop.wait(1)
+
+    def _stop_native_discovery(self):
+        self._discovery_stop.set()
+        self._discovery_thread.join()
+        self._discovery_thread = None
+
     def run(self, interval_seconds=5, emit=None):
         if not 1 <= interval_seconds <= 60:
             raise ControlError("control_interval_must_be_1_to_60_seconds")
         root = control_root(self.codex_home)
         handlers = {}
         try:
-            with FileLock(root / "agent.lock"):
+            with FileLock(root / "agent.lock"), ExitStack() as running:
                 # This advertisement contains no secrets and is not liveness
                 # proof; only the kernel lock, writer, epoch and lease are proof.
                 control_atomic_json(root / "agent.json", dict(schema_version=1, instance=self.instance,
                                                                runtime_path=str(self.runtime)))
                 for signum in (signal.SIGINT, signal.SIGTERM):
                     handlers[signum] = signal.signal(signum, self._stop)
+                if self.node_local:
+                    self._discovery_stop.clear()
+                    self._discovery_thread = threading.Thread(
+                        target=self._watch_native_attachments, name="watchdog-native-discovery", daemon=True,
+                    )
+                    self._discovery_thread.start()
+                    # Join before releasing agent.lock, including on failure.
+                    running.callback(self._stop_native_discovery)
                 while True:
                     result = self.step()
                     if emit is not None:
