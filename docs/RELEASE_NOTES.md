@@ -1,5 +1,47 @@
 # Release notes
 
+## v0.2.26
+
+- Git-attention alerts now queue a deduplicated prompt to the exact existing
+  Codex thread even when the read-only Git check cannot obtain an upstream
+  commit ID. Codex handles the blocker; WatchDog performs no Git mutations.
+  Pending and uncertain deliveries survive restart without a blind resend.
+- Linux automatic controllers reconcile the saved wake ID with its original
+  courier receipt, so a delivered wake does not remain pending indefinitely.
+- Cluster node mode retains Git observation after an idle thread parks. A small
+  shared observation receipt retains the verified node, excludes old parked
+  nodes, and requires fresh native ownership for a handoff. Active or pending
+  work blocks that handoff. Changed foreign history and foreign queue items
+  cannot authorize a wake. Existing Slack parent routing is preserved.
+- Linux controller shutdown checks the actual child process status when an
+  expired lease prevented normal polling. Proven exited children are retired;
+  live or uncertain writers remain protected.
+- Existing profiles, hooks, credentials, mappings and completion cursors remain
+  in place. Shared-home upgrades with ambiguous old node records need fresh
+  native attachment before selecting a Git observer. Automatic migration of
+  an active conversation between login nodes remains unsupported.
+
+## v0.2.25
+
+- Corrects the Slack mapping API mismatch in the unpublished v0.2.24 candidate
+  that prevented Linux controllers from starting with Slack configured. Native
+  package acceptance now exercises Slack-enabled node startup and restart with
+  synthetic state and no provider credentials. v0.2.24 was not released.
+
+- Linux node mode registers verified native VS Code writers independently of
+  the configured Git/notification observation interval. A new thread can now be
+  recorded while a slower observation is in progress, preserving its eligibility
+  for same-thread continuation after the window closes. Previously a brief
+  attachment entirely between observation cycles could be missed.
+- Registration checks the current node's kernel writer and exact repository;
+  shared-home logs still cannot authorize another node's conversation. The
+  registration worker stops before the controller lock is released. Existing
+  profiles, trusted hooks, Slack settings and delivery receipts are preserved.
+- Automatic continuation remains opt-in with `--continue-interrupted`; it
+  resumes only a verified interrupted turn and sends its existing confirmation
+  after the continuation actually starts. The configured observation interval
+  and desktop foreground behavior are unchanged.
+
 ## v0.2.23
 
 - A newly discovered workspace retains its first completed Stop when the hook

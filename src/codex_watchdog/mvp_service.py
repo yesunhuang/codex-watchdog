@@ -43,6 +43,12 @@ MVP_STATE_SCHEMA_VERSION = 2
 _NON_ERROR_WAKE_STATES = frozenset({"enqueued", "consumed_or_started", "started"})
 _COMPLETED_WAKE_STATES = frozenset({"consumed_or_started", "started"})
 _TRANSIENT_GIT_BLOCKER = "state_changed_during_observation"
+_GIT_ATTENTION_PROMPT = (
+    "Git attention: WatchDog's read-only Git check reported a blocker. "
+    "Codex owns Git operations; inspect the repository and handle the issue "
+    "within the user's existing task. This alert alone does not establish "
+    "a new upstream commit.\n\n" + REMOTE_UPDATE_PROMPT
+)
 _STOP_OUTPUT_MAX_CHARS = 32_000
 _ROLLOUT_TAIL_MAX_BYTES = 1_048_576
 _ROLLOUT_STOP_FALLBACK_DELAY_SECONDS = 45
@@ -562,6 +568,7 @@ class MvpWatchdogService:
                 last_remote_oid=None,
                 pending_remote_oid=None,
                 pending_instruction_id=None,
+                last_git_attention=None,
             )
         state["session_id"] = session_id
 
@@ -615,20 +622,20 @@ class MvpWatchdogService:
                 if isinstance(blocker, str) and blocker != _TRANSIENT_GIT_BLOCKER
             )
         )
+        attention_id = None
         if git_blockers:
+            attention_fingerprint = self._fingerprint(
+                {"blockers": git_blockers, "head_oid": head_oid,
+                 "topology": git.get("topology"), "workspace_id": workspace_id}
+            )
+            attention_key = sha256_text(session_id + "\0" + attention_fingerprint)
+            attention_id = f"git-attention:{sha256_text(workspace_id)[:16]}:{attention_key}"
             notifications.append(
                 self._safe_notify(
                     NotificationEvent(
                         workspace_id=workspace_id,
                         event_type="git_attention",
-                        transition_fingerprint=self._fingerprint(
-                            {
-                                "blockers": git_blockers,
-                                "head_oid": head_oid,
-                                "topology": git.get("topology"),
-                                "workspace_id": workspace_id,
-                            }
-                        ),
+                        transition_fingerprint=attention_fingerprint,
                         subject=f"[Codex Watchdog] {target.label} needs Git attention",
                         message=(
                             "The read-only Remote-SSH workflow is blocked. Blockers: "
@@ -638,15 +645,22 @@ class MvpWatchdogService:
                     )
                 )
             )
+        if attention_id and str(state.get("pending_instruction_id", "")).startswith("git:"):
+            # The existing Git prompt already asks Codex to inspect this state.
+            state["last_git_attention"] = attention_id
         if wake is not None and wake.get("state") in _COMPLETED_WAKE_STATES:
-            state["last_remote_oid"] = state.get("pending_remote_oid")
+            if state.get("pending_remote_oid") is not None:
+                state["last_remote_oid"] = state["pending_remote_oid"]
             state["pending_remote_oid"] = None
             state["pending_instruction_id"] = None
         if isinstance(remote_oid, str) and remote_oid == head_oid:
             state["last_remote_oid"] = remote_oid
-            state["pending_remote_oid"] = None
-            state["pending_instruction_id"] = None
-        elif isinstance(remote_oid, str) and state.get("pending_remote_oid") is None:
+            # Equal refs can reconcile a commit wake, but say nothing about
+            # delivery of an attention prompt (e.g. an unfinished merge).
+            if not str(state.get("pending_instruction_id", "")).startswith("git-attention:"):
+                state["pending_remote_oid"] = None
+                state["pending_instruction_id"] = None
+        elif isinstance(remote_oid, str) and state.get("pending_instruction_id") is None:
             if (
                 state.get("last_remote_oid") is None
                 and git.get("topology")
@@ -672,8 +686,22 @@ class MvpWatchdogService:
                 )
                 state["pending_remote_oid"] = remote_oid
                 state["pending_instruction_id"] = instruction_id
+                if attention_id:
+                    state["last_git_attention"] = attention_id
         elif isinstance(remote_oid, str) and state.get("last_remote_oid") is None:
             state["last_remote_oid"] = remote_oid
+
+        if (attention_id and state.get("pending_instruction_id") is None
+                and state.get("last_git_attention") != attention_id):
+            # A valid upstream hash is a change trigger, not a prerequisite
+            # for waking the exact existing thread to handle a Git blocker.
+            # The stable ID also lets the courier reconcile a crash after send.
+            probe = self._remote_probe(
+                target, wake={"instruction_id": attention_id, "prompt": _GIT_ATTENTION_PROMPT},
+            )
+            wake = probe.get("wake") if isinstance(probe.get("wake"), dict) else {"state": "uncertain"}
+            state.update(last_git_attention=attention_id, pending_instruction_id=attention_id,
+                         pending_remote_oid=None)
 
         if wake is not None and wake.get("state") == "uncertain":
             notifications.append(
@@ -721,6 +749,7 @@ class MvpWatchdogService:
             "last_remote_oid": None,
             "pending_remote_oid": None,
             "pending_instruction_id": None,
+            "last_git_attention": None,
             "presence_tracking": False,
             "last_seen_at": None,
             "connection_status": "unknown",

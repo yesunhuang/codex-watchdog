@@ -1,6 +1,6 @@
 """Persistent Linux mode composed from the existing exact-thread owner/service."""
 
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 import json
 from pathlib import Path
 import signal
@@ -12,7 +12,7 @@ from .control_context import acting_as
 from .app_server import AppServerError
 from .control_state import ControlBusy, ControlError, ControlStore, control_atomic_json, control_read_json, control_root, control_state_home, control_native_repo
 from .linux_binding import LinuxBinding, exact_thread, locality_identity, reservation_path
-from .linux_owner import LinuxThreadOwner, writer_pid, vscode_writer
+from .linux_owner import LinuxThreadOwner, writer_pid, vscode_writer, pending_count
 from .linux_health import owner_failure_reason
 from .models import sha256_text
 from .mvp_service import MvpWatchdogService
@@ -20,6 +20,7 @@ from .remote_ssh import RemoteSshTarget, _REMOTE_SCRIPT
 from .storage import FileLock, StoreBusyError, InstructionStore
 from .workspace_registry import TrackedWorkspace, WorkspaceRegistry
 from .slack_mapping import SlackRelayTarget
+from .node_observation import NodeObservation
 
 
 def bind_for_operator(binding, workspace, lease_seconds):
@@ -53,6 +54,17 @@ class HostRemoteAdapter:
         self.probe_lock = threading.Lock()
         exec(compile(_REMOTE_SCRIPT, "<watchdog-host-helper>", "exec"), self.namespace)
         self.namespace["remote_codex_home"] = lambda: Path(codex_home)
+        self.git_admission_check = None
+        self._dispatch_wake = self.namespace["dispatch_wake"]
+        self.namespace["dispatch_wake"] = self._dispatch_checked
+
+    def _dispatch_checked(self, request, session):
+        if (self.git_admission_check is not None
+                and str(request.get("instruction_id", "")).startswith(("git:", "git-attention:"))):
+            # The read-only Git probe may have taken time. Recheck immediately
+            # before the courier, not only before starting that network read.
+            self.git_admission_check()
+        return self._dispatch_wake(request, session)
 
     def probe(self, target, *, control=None, pending_instruction_id=None, wake=None):
         # Observation and the reply listener share this embedded helper. Its
@@ -105,6 +117,9 @@ class LinuxAutoWatchdog:
         self.controllers = {}
         self.failed_resumes = {}
         self.stopping = False
+        self._discovery_stop = threading.Event()
+        self._discovery_thread = None
+        self._discovery_results = ()
 
     def _excluded(self, repo):
         return str(repo).casefold() in self.exclude or Path(repo).name.casefold() in self.exclude
@@ -155,6 +170,9 @@ class LinuxAutoWatchdog:
                 owner_options["continue_interrupted"] = True
             owner = self.owner_factory(binding, executable=self.executable, service=service, **owner_options)
             item = dict(store=store, token=token, owner=owner, service=service, target=target, locks=locks)
+            if self.node_local:
+                item["observation"] = NodeObservation(store, token)
+                adapter.git_admission_check = item["observation"].validate_snapshot
             self.controllers[store.thread_id] = item
             return item
         except Exception:
@@ -163,9 +181,15 @@ class LinuxAutoWatchdog:
 
     def _cycle(self, item):
         service, target, token = item["service"], item["target"], item["token"]
-        probe = service.remote_control.probe(target, token)
+        saved = item["store"].read().get("remote_state")
+        pending = saved.get("pending_instruction_id") if isinstance(saved, dict) else None
+        probe = service.remote_control.probe(
+            target, token, pending_instruction_id=pending if isinstance(pending, str) else None,
+        )
         if probe.get("status") != "ok":
             raise ControlError(probe.get("reason", "control_probe_failed"))
+        if item.get("observation") is not None:
+            item["observation"].validate_snapshot()
         state = probe["control"].get("state")
         if not isinstance(state, dict):
             state = service._read_remote_state(service.state_path(target.workspace_id), target)
@@ -180,7 +204,10 @@ class LinuxAutoWatchdog:
         """Release a proven-dead child, never terminate an uncertain live writer."""
         owner, store, token = item["owner"], item["store"], item["token"]
         client = owner.client
-        if client is None or getattr(client.process, "returncode", None) is None:
+        # A failed lease guard can prevent the normal app-server pump from
+        # polling this child. Refresh its native status instead of trusting the
+        # cached returncode, which otherwise leaves an exited child unretired.
+        if client is None or client.process.poll() is None:
             return
         if not owner.resumed:
             # A failed initial resume has no verified ownership receipt. Wait
@@ -204,7 +231,8 @@ class LinuxAutoWatchdog:
     def step(self, *, observe=True):
         results = []
         if self.node_local and not self.stopping:
-            results.extend(self._discover_native())
+            results.extend(self._discover_native() if self._discovery_thread is None
+                           else self._discovery_results)
         paths = sorted((control_root(self.codex_home)).glob("*/owner.json"))
         for path in paths:
             thread = path.parent.name
@@ -258,13 +286,22 @@ class LinuxAutoWatchdog:
                     with store.guard(token) as current:
                         current["writer_pid"] = owner.client.process.pid if owner.client else None
                         control_atomic_json(store.path, current)
-                    if (result["owner_state"] in ("owned", "observing", "waiting_for_attach", "parked") and observe
-                            and (not self.node_local or result["owner_state"] in ("owned", "observing")
-                                 or owner.just_parked)):
-                        cycle = self._cycle(item)
-                        if cycle.status != "completed":
-                            raise ControlError("control_observation_failed")
-                        owner.health.report()
+                    observation = item.get("observation")
+                    if result["owner_state"] in ("owned", "observing", "waiting_for_attach", "parked", "released"):
+                        # Keep Git observation after releasing an idle writer.
+                        # A shared native-ownership receipt suppresses stale
+                        # nodes; sharing a transcript is never admission.
+                        admission = observation.guard(
+                            rollout_stamp=owner.rollout_stamp,
+                            foreign_queue=(result["owner_state"] == "parked"
+                                           and pending_count(self.codex_home, thread) != 0),
+                        ) if observation else nullcontext(True)
+                        with admission as admitted:
+                            if admitted and observe and result["owner_state"] != "released":
+                                cycle = self._cycle(item)
+                                if cycle.status != "completed":
+                                    raise ControlError("control_observation_failed")
+                                owner.health.report()
                 if item.get("failed"):
                     store.renew(token, ttl=120)
                     item.pop("failed", None)
@@ -281,6 +318,8 @@ class LinuxAutoWatchdog:
                                state=result["owner_state"], thread_status=result["thread_status"])
                 if "continuation" in result:
                     summary["continuation"] = result["continuation"]
+                if item.get("observation") is not None and item["observation"].reason:
+                    summary["observation"] = item["observation"].reason
                 results.append(summary)
             except (ControlError, AppServerError, StoreBusyError, ValueError, OSError) as exc:
                 reason = owner_failure_reason(exc)
@@ -335,19 +374,45 @@ class LinuxAutoWatchdog:
                                     reason=owner_failure_reason(exc)))
         return results
 
+    def _watch_native_attachments(self):
+        # A new VS Code writer may disappear during the configured observation
+        # interval or a slow Git/network probe. Record only its verified native
+        # attachment here; the main loop still owns every controller and effect.
+        while not self.stopping and not self._discovery_stop.is_set():
+            try:
+                result = self._discover_native()
+            except (OSError, ValueError) as exc:
+                result = [dict(state="blocked", reason=owner_failure_reason(exc))]
+            # Publish an immutable snapshot; never mutate the main loop's list.
+            self._discovery_results = tuple(result)
+            self._discovery_stop.wait(1)
+
+    def _stop_native_discovery(self):
+        self._discovery_stop.set()
+        self._discovery_thread.join()
+        self._discovery_thread = None
+
     def run(self, interval_seconds=5, emit=None):
         if not 1 <= interval_seconds <= 60:
             raise ControlError("control_interval_must_be_1_to_60_seconds")
         root = control_root(self.codex_home)
         handlers = {}
         try:
-            with FileLock(root / "agent.lock"):
+            with FileLock(root / "agent.lock"), ExitStack() as running:
                 # This advertisement contains no secrets and is not liveness
                 # proof; only the kernel lock, writer, epoch and lease are proof.
                 control_atomic_json(root / "agent.json", dict(schema_version=1, instance=self.instance,
                                                                runtime_path=str(self.runtime)))
                 for signum in (signal.SIGINT, signal.SIGTERM):
                     handlers[signum] = signal.signal(signum, self._stop)
+                if self.node_local:
+                    self._discovery_stop.clear()
+                    self._discovery_thread = threading.Thread(
+                        target=self._watch_native_attachments, name="watchdog-native-discovery", daemon=True,
+                    )
+                    self._discovery_thread.start()
+                    # Join before releasing agent.lock, including on failure.
+                    running.callback(self._stop_native_discovery)
                 while True:
                     result = self.step()
                     if emit is not None:

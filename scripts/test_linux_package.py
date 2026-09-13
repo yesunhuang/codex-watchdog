@@ -556,6 +556,87 @@ def main() -> None:
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGTERM)
                 process.communicate(timeout=15)
+        # An empty controller never exercises the real store/Slack interface.
+        # Keep a synthetic VS Code-shaped writer attached while starting and
+        # restarting the frozen controller with a credential-free polling setup.
+        node_repo = root / "node Slack project"
+        run([git, "init", "-q", node_repo])
+        (node_home / "sessions").mkdir()
+        (node_home / "thread-writer-locks").mkdir()
+        node_rollout = node_home / "sessions/thread.jsonl"
+        node_rollout.write_text(json.dumps(dict(type="session_meta", payload=dict(
+            id=THREAD, cwd=str(node_repo), source="vscode"))) + "\n")
+        with sqlite3.connect(node_home / "state_5.sqlite") as database:
+            database.execute("CREATE TABLE threads(id,cwd,source,thread_source,archived,rollout_path,updated_at)")
+            database.execute("INSERT INTO threads VALUES (?,?,'vscode','user',0,?,?)",
+                             (THREAD, str(node_repo), str(node_rollout), int(time.time())))
+        ready, release = root / "native-writer-ready", root / "native-writer-release"
+        native_child = '''import fcntl,os,pathlib,sys,time
+lock,ready,release=map(pathlib.Path,sys.argv[1:4])
+with lock.open("w") as handle:
+ fcntl.flock(handle,fcntl.LOCK_EX);ready.write_text(str(os.getpid()))
+ deadline=time.monotonic()+120
+ while not release.exists() and time.monotonic()<deadline:time.sleep(0.02)
+'''
+        native_parent = ('import subprocess,sys;raise SystemExit(subprocess.call([sys.executable,"-c",'
+                         + repr(native_child) + ',*sys.argv[1:4],"app-server"]))')
+        native_writer = subprocess.Popen([str(args.fixture_python), "-c", native_parent,
+            str(node_home / "thread-writer-locks" / (THREAD + ".lock")), str(ready), str(release),
+            "--type=extensionHost"], env=node_environment, stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, start_new_session=True)
+        polling_environment = {**node_environment,
+            "CODEX_WATCHDOG_SLACK_BOT_TOKEN": "xoxb-isolated-fixture-not-real",
+            "CODEX_WATCHDOG_SLACK_CHANNEL_ID": "C12345678",
+            "CODEX_WATCHDOG_SLACK_ALLOWED_USER_IDS": "U12345678",
+            "CODEX_WATCHDOG_SLACK_REPLY_MODE": "poll",
+            "HTTP_PROXY": "http://127.0.0.1:9", "HTTPS_PROXY": "http://127.0.0.1:9", "NO_PROXY": ""}
+        process = None
+        try:
+            deadline = time.monotonic() + 5
+            while not ready.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert ready.exists(), "native writer fixture did not start"
+            previous_epoch = 0
+            for _ in range(2):
+                process = subprocess.Popen([str(executable), "--runtime", str(node_runtime),
+                    "--codex-home", str(node_home), "linux-auto-run", "--interval", "1",
+                    "--repo", str(node_repo), "--codex-executable", "/bin/false"],
+                    cwd=work, env=polling_environment, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+                observation = None
+                with selectors.DefaultSelector() as selector:
+                    selector.register(process.stdout, selectors.EVENT_READ)
+                    deadline = time.monotonic() + 25
+                    while time.monotonic() < deadline:
+                        if not selector.select(timeout=1):
+                            continue
+                        line = process.stdout.readline()
+                        if not line:
+                            break
+                        for row in json.loads(line)["owners"]:
+                            if row.get("state") == "observing":
+                                observation = row
+                        if observation:
+                            break
+                assert observation, ("Slack-enabled node startup failed", process.poll(),
+                                     process.stderr.read() if process.poll() is not None else "no observation")
+                assert observation["epoch"] > previous_epoch and native_writer.poll() is None
+                previous_epoch = observation["epoch"]
+                health = node_runtime.parent / "watchdog-control" / THREAD / "runtime/slack/poll-health.json"
+                deadline = time.monotonic() + 5
+                while not health.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                assert json.loads(health.read_text())["status"] == "waiting_for_mapped_notification"
+                process.send_signal(signal.SIGTERM)
+                stdout, stderr = process.communicate(timeout=15)
+                assert process.returncode == 0, (stdout, stderr)
+        finally:
+            if process is not None and process.poll() is None:
+                process.send_signal(signal.SIGTERM)
+                process.communicate(timeout=15)
+            release.touch()
+            native_writer.communicate(timeout=5)
+            assert native_writer.returncode == 0
     result = {"schema_version": 1, "status": "passed", "version": manifest["version"],
               "architecture": manifest["architecture"], "source_commit": manifest["source_commit"],
               "minimum_glibc": manifest["minimum_glibc"], "host_glibc": platform.libc_ver()[1],
@@ -570,6 +651,7 @@ def main() -> None:
               "bounded_release_lock_admission": True,
               "node_unit_idempotent_and_host_conditioned": True,
               "node_controller_runtime_isolated": True,
+              "node_slack_startup_and_restart": True,
               "queue_courier_invocations": len(courier_calls),
               "queue_admission_rejections_without_side_effects": queue_admission_rejections,
               "detached_owner_loss_and_recovery_notifications": True,
