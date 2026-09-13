@@ -42,10 +42,60 @@ Manager 可以是人，也可以是 AI；可以集中，也可以分布式。整
 
 ![Parrot Dog 工作流程：Codex 请求帮助，Slack 转达消息，用户回复，然后 Codex 继续工作](images/parrot_workflow_cn.png)
 
+### 单用户、多 Agent 工作流
+
+一个用户可以通过 GitHub 和 Slack 协调多个现有 Agent，也可以选择由人或 AI
+担任 manager。
+
+```text
+                         Human / Manager
+                               |
+                        聚合控制界面
+                               |
+                 +-------------+-------------+
+                 |                           |
+              GitHub                       Slack
+          持久指令 / 报告              快速通知 / 回复
+                 |                           |
+                 +-------------+-------------+
+                               |
+                           WatchDog
+                    observe / wake / route
+                    relay / notify / handoff
+                               |
+           +-------------------+-------------------+
+           |                   |                   |
+     Codex A（本地）     Codex B（Remote-SSH）   Codex C（detached）
+       原生 session          原生 session           原生 session
+           |                   |                   |
+           +------------ checkpoint reports -------+
+                               |
+                             GitHub
+```
+
+Codex 负责 Git 操作并撰写进度报告；WatchDog 检测更新、唤醒准确的会话并发送通知。
+Parrot Dog 将白名单用户的 Slack 回复送回同一会话。这只是一种可选结构，不要求中央
+manager 或 WatchDog 服务器。
+
 ## 多人协作：Bring Your Own Agents
 
 WatchDog 不要求团队先把所有机器和 agent 注册到同一个中央 runtime。每个人都可以在自己的
 机器上运行自己的 WatchDog，并把愿意共享的 agent 接到团队本来就在使用的协作界面上。
+
+### 多用户、多 Agent 工作流
+
+```text
+        Alice 的机器                           Bob 的机器
+   +----------------------+               +----------------------+
+   | Windows / Codex A1   |               | Linux / Codex B1     |
+   | HPC / Codex A2       |               | macOS / Codex B2     |
+   +----------+-----------+               +-----------+----------+
+              |                                       |
+          Alice 的狗                               Bob 的狗
+              |                                       |
+              +------------- GitHub + Slack ----------+
+                            团队共享协作界面
+```
 
 Slack 通知会带上 machine identity，团队成员可以知道消息来自哪个 locality。只有 owner 主动
 把某只狗配置到共享 Slack 界面，它才会在那里出现；如果 owner 不愿共享，就不需要加入这个 channel。
