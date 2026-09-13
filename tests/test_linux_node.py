@@ -143,6 +143,91 @@ def test_node_discovery_filters_native_targets_before_creating_records(nodes, mo
     assert make_store(home, repo).read()["runtime_path"] == str(make_store(home, repo).directory / "runtime")
 
 
+def test_brief_native_attachment_is_registered_while_observation_is_blocked(nodes, monkeypatch):
+    """A new writer can attach and close before the next 30-second cycle."""
+    import threading
+    import time
+    from codex_watchdog import linux_auto
+
+    home, repo, _, roots, pid = nodes
+    pid[0] = None
+    monkeypatch.setattr(linux_auto, "locality_identity", lambda: "host-a")
+    monkeypatch.setattr(linux_auto, "writer_pid", lambda *args: pid[0])
+    monkeypatch.setattr(linux_auto, "vscode_writer", lambda p: p == 123)
+    store = make_store(home, repo)
+    dog = LinuxAutoWatchdog(roots["login-a.example"] / "runtime", home,
+                           store_factory=lambda h, t, r: make_store(h, r))
+    observing = threading.Event()
+    detached = threading.Event()
+    captured = []
+
+    def native_attachment():
+        if not observing.wait(5):
+            return
+        pid[0] = 123
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and not store.path.exists():
+            time.sleep(0.01)
+        captured.append(store.path.exists())
+        pid[0] = None
+        detached.set()
+
+    def slow_observation():
+        # Discovery at the beginning of the cycle sees no writer. Simulate
+        # bounded Git/network work; the native attachment ends before it returns.
+        assert dog._discover_native() == []
+        observing.set()
+        try:
+            assert detached.wait(5)
+        finally:
+            dog.stopping = True
+        return []
+
+    monkeypatch.setattr(dog, "step", slow_observation)
+    writer = threading.Thread(target=native_attachment)
+    writer.start()
+    try:
+        assert dog.run(interval_seconds=30) == 0
+    finally:
+        observing.set()
+        writer.join(timeout=5)
+    assert not writer.is_alive()
+    assert captured == [True]
+    assert store.read()["epoch"] == 0 and store.read()["owner"] is None
+    # The writer has disappeared, but its exact node/boot registration remains
+    # sufficient for the existing fenced controller to continue this same thread.
+    assert store.claim_remote("dog", "host-a", "absent", host_observer=True) is not None
+    assert not (home / "watchdog-control").exists()
+
+
+def test_native_discovery_stops_on_observation_failure_before_unlock(nodes, monkeypatch):
+    import threading
+    from codex_watchdog import linux_auto
+    from codex_watchdog.storage import FileLock
+
+    home, _, _, roots, _ = nodes
+    monkeypatch.setattr(linux_auto, "locality_identity", lambda: "host-a")
+    dog = LinuxAutoWatchdog(roots["login-a.example"] / "runtime", home)
+    started = threading.Event()
+    workers = []
+
+    def discover():
+        workers.append(threading.current_thread())
+        started.set()
+        return []
+
+    def failed_observation():
+        assert started.wait(5)
+        raise RuntimeError("fixture observation failed")
+
+    monkeypatch.setattr(dog, "_discover_native", discover)
+    monkeypatch.setattr(dog, "step", failed_observation)
+    with pytest.raises(RuntimeError, match="fixture observation failed"):
+        dog.run(interval_seconds=30)
+    with FileLock(roots["login-a.example"] / "watchdog-control/agent.lock"):
+        assert workers and all(not worker.is_alive() for worker in workers)
+
+
 def test_unconfigured_host_keeps_previous_paths(nodes):
     home, repo, host, _, _ = nodes
     host[0] = "login-legacy.example"

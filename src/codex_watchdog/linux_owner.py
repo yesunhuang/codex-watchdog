@@ -122,6 +122,7 @@ class LinuxThreadOwner:
         self._next_continuation_check = 0.0
         self._idle_since = None
         self._parked_rollout = None
+        self.rollout_stamp = None
         self.just_parked = False
         self.node_local = control_state_home(binding.codex_home) != binding.codex_home
         if continue_interrupted:
@@ -271,7 +272,6 @@ class LinuxThreadOwner:
             return False
         if writer_pid(self.binding.codex_home, self.thread) != self.client.process.pid:
             raise LinuxBindingError("linux_writer_changed")
-        stamp = self._rollout_stamp(exact_thread(self.binding.codex_home, workspace))
         store = self._node_store()
         if store is not None:
             value = store.read()
@@ -280,7 +280,10 @@ class LinuxThreadOwner:
         self.client.close()
         self.client = None
         record_writer_pid(None)
-        self._parked_rollout = stamp
+        # The closed backend can finish flushing its own journal during close.
+        # Retain the settled local snapshot, not a pre-close size/mtime.
+        self._parked_rollout = self._rollout_stamp(exact_thread(self.binding.codex_home, workspace))
+        self.rollout_stamp = self._parked_rollout
         self.just_parked = True
         return True
 
@@ -311,6 +314,7 @@ class LinuxThreadOwner:
         workspace = self.binding.workspace(value)
         self.thread = workspace.session_id
         rollout = exact_thread(self.binding.codex_home, workspace)
+        self.rollout_stamp = self._rollout_stamp(rollout)
         if self.release_requested or value["expires_at"] <= time.time():
             value = self.binding.set_state("release_requested")
         releasing = value["state"] != "armed"

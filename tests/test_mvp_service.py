@@ -1841,7 +1841,7 @@ def test_remote_vscode_window_disappearance_and_return_are_notified(
     assert results[3].workspaces[0].status == "completed"
 
 
-def test_remote_ssh_git_blocker_still_notifies(tmp_path: Path) -> None:
+def test_remote_ssh_git_blocker_notifies_and_wakes(tmp_path: Path) -> None:
     runtime = tmp_path / "runtime"
     notifier = FakeNotifier(runtime)
     service = MvpWatchdogService(
@@ -1872,8 +1872,11 @@ def test_remote_ssh_git_blocker_still_notifies(tmp_path: Path) -> None:
         codex_home=runtime / "codex-home",
     )
 
-    service.run_once()
+    adapter = service.remote_ssh_adapter
+    adapter.responses.append({**adapter.responses[0], "wake": {"state": "enqueued"}})
+    result = service.run_once().workspaces[0]
 
+    assert result.wake["state"] == "enqueued"
     assert [event.event_type for event in notifier.events] == ["git_attention"]
     assert (
         notifier.events[0].subject

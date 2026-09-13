@@ -3,25 +3,32 @@
 On a cluster with a shared home, run one persistent WatchDog on each login node
 that hosts VS Code/Codex. Every dog enrolls only threads whose native writer lock
 and VS Code process are visible on its own node. Shared session history and VS
-Code logs alone are insufficient. There is no coordinator, shared thread registry
-or transparent conversation migration. Do not intentionally work in the same
+Code logs alone are insufficient. There is no transparent active conversation
+migration. Do not intentionally work in the same
 repository on several login nodes at once.
 
 The opt-in layout is `$CODEX_HOME/watchdog-nodes/<native-hostname>/` (with
 `~/.codex` as the usual Codex home). It contains a schema-1 `node.json`, the
 controller runtime, ownership/binding records, per-thread runtimes, wake receipts,
-health records and Slack mappings/cursors. Codex's own databases, session files
-and writer locks remain in their original Codex home. A reboot requires fresh
+health records and Slack mappings/cursors. Codex's own databases and session files
+remain in their original Codex home. Native temporary files and writer locks must
+be isolated per node when the filesystem's `flock` is host-local; a shared path
+does not prove cross-node exclusion. A reboot requires fresh
 local native writer evidence before automatic control can resume a saved thread.
 
 Once a detached conversation finishes and releases its idle writer, a transcript
 change or queue item from another node must not reopen it. Node mode waits for a
 fresh local VS Code writer or an actually queued message with this node's own
 accepted courier receipt. Its Slack mappings remain available. Git observation
-pauses while it has no native writer after this idle release; reopening locally
-or replying to its own mapped Slack parent restores execution and observation.
-This rule also survives a controller restart. The ordinary single-host mode
-retains its existing idle monitoring behavior.
+continues while parked on the verified node, using a schema-1 receipt in
+`$CODEX_HOME/watchdog-observers/` and a cross-node POSIX record lock. The filesystem
+must support that lock across participating nodes. Another node requires fresh
+native writer evidence to take observation after prior work is idle and no wake
+is pending. An old parked node cannot observe foreign history or send a competing
+Git wake. These checks survive controller restart. On upgrade, one unambiguous
+same-boot registration can be reused; multiple old registrations require fresh
+native attachment. The ordinary single-host mode retains its existing idle
+monitoring behavior.
 
 Unconfigured nodes retain their previous layout. Installation bytes and a private
 notification environment file may be shared; volatile state must not be shared.
