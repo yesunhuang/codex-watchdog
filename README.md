@@ -8,17 +8,26 @@
   <img src="images/parrotDogLogo.png" alt="Codex WatchDog and Parrot Dog logo" width="320">
 </p>
 
-**Distributed execution, unified control.**
+**Bring your own agents. Keep your tools. Work as one distributed team.**
+
+*Ultra-lightweight, no-migration multi-user and multi-agent collaboration across machines and platforms.*
 
 Codex WatchDog is a lightweight coordination and control fabric for **existing**
-VS Code Codex sessions across machines, terminals, and communication surfaces.
-It watches, wakes, routes, hands off, relays, and notifies exact existing sessions
-without becoming another AI agent or a heavyweight orchestration runtime.
+VS Code Codex sessions. It connects people, agents, machines, and communication
+surfaces without asking a team to move into another agent platform, runtime,
+dashboard, database, scheduler, or mandatory central manager.
 
-The project started as a watchdog. Its broader value is the workflow around it:
-local and remote agents may be distributed, while the human/manager keeps one
-coherent control surface through GitHub, Slack, progress reports, and exact-thread
-routing.
+The core idea is simple: mature tools already solve their own jobs well. GitHub is
+good at durable collaborative state and audit history. Slack is good at team
+communication. SSH is good at reaching remote machines. VS Code is already the
+developer workspace. Codex already owns the conversation and execution context.
+**WatchDog does not rebuild smaller copies of them; it connects the missing edges.**
+
+Each teammate can keep their own machines, credentials, native Codex sessions, and
+preferred management style. Selected agents can join shared GitHub/Slack surfaces;
+where project policy and configured reply permissions allow it, another teammate or
+manager can address that exact existing agent. Managers may be human or AI,
+centralized or distributed. No single manager or WatchDog server is required.
 
 ## Workflows at a glance
 
@@ -32,53 +41,67 @@ routing.
 
 ## What this project is really optimizing for
 
+- **No workflow migration.** Keep the VS Code windows, Codex threads, repositories,
+  SSH hosts, GitHub projects, Slack channels, and habits the team already uses.
 - **Extremely lightweight coordination.** No Redis, database, orchestration
-  cluster, second agent runtime, or central AI scheduler is required for the core
-  workflow.
+  cluster, second agent runtime, mandatory central service, or central AI scheduler
+  is required for the core workflow.
+- **Multi-user by composition.** Different people can keep their own agents and
+  machines while participating in the same GitHub/Slack collaboration surfaces.
+  Sharing an agent does not require surrendering its native session or host.
 - **Cross-platform, cross-machine operation.** Windows is the packaged reference;
   Linux Remote-SSH and detached same-thread handoff are real tested paths; macOS
   has a native developer-preview path.
-- **Multiple terminals, one workflow.** VS Code, GitHub, Slack, local shells, and
-  remote hosts can participate without forcing the user to live in one terminal.
 - **Multiple Codex sessions without flattening them into one runtime.** Each agent
   keeps its own native session, context, repository, and execution environment.
   WatchDog routes to the exact thread instead of replacing those sessions.
-- **Aggregated human/manager interface.** Durable direction lives in GitHub;
-  quick authenticated replies live in Slack; progress reports compress agent state
-  back to the manager.
+- **Managers are optional and distributed.** A human, ChatGPT, another Codex, or
+  automation can act as a manager. A team may use one manager, several managers,
+  or direct human-to-agent control without changing the transport layer.
 - **Asynchronous but auditable.** Git history, progress reports, queue receipts,
-  notification receipts, and exact-thread identity preserve what happened even
-  when machines and people are not online at the same time.
-- **Mechanism, not policy.** WatchDog does not decide team hierarchy, work-time
-  limits, checkpoint rules, or merge authority. Those belong to each project's
-  own `AGENTS.md` contract.
+  notification receipts, machine identity, and exact-thread identity preserve what
+  happened even when machines and people are not online at the same time.
+- **Mechanism, not policy.** WatchDog does not decide who may command which agent,
+  team hierarchy, work-time limits, checkpoint rules, or merge authority. Those
+  belong to GitHub permissions, branches, and each project's own `AGENTS.md`
+  contract.
 
 ## Design philosophy
 
+- **Reuse mature infrastructure instead of rebuilding it.** GitHub, Slack, SSH,
+  VS Code, Git, Codex, and the operating system already solve difficult problems.
+  WatchDog should integrate them, not replace them with less mature copies.
+- **Only implement the missing edges.** Identity/routing, exact-thread wakeup,
+  handoff, fencing, notification, and relay belong here only when the surrounding
+  tools do not already provide them.
 - **Keep the mechanism dumb.** WatchDog should mostly observe, wake, notify, relay,
   route, and then get out of the way.
 - **Preserve native agent ownership.** WatchDog does not create replacement chats
   just to simplify orchestration. Existing Codex sessions stay authoritative.
 - **WatchDog observes Git; Codex owns Git.** WatchDog never stages, commits, pulls,
   merges, rebases, resets, checks out, or pushes.
-- **GitHub is the durable management plane.** Comments, commits, and progress
-  reports survive terminals, machines, restarts, and time zones.
-- **Slack is the quick interrupt/relay plane.** It is for notifications and short
-  allowlisted replies, not durable project history.
+- **GitHub is the durable coordination plane.** Comments, commits, branches, and
+  progress reports survive terminals, machines, managers, restarts, and time zones.
+- **Slack is the shared fast interaction plane.** It provides mature users,
+  channels, threads, notifications, and visibility boundaries for quick team
+  interaction; it is not a replacement for durable project history.
+- **No mandatory center.** Each machine/locality can keep its own WatchDog and
+  native sessions. Managers can also be distributed; the fabric does not require
+  one authoritative manager session.
 - **Manager-agnostic, Codex-specific.** The management side can be a human,
   ChatGPT, another agent, or automation that writes durable direction. The
   execution side currently relies on Codex's exact-thread queue, hooks, state, and
   completion contracts.
 - **Many observers, one actor.** Where local and detached WatchDogs coexist, they
   coordinate ownership rather than racing to perform side effects.
-- **Delete machinery before adding machinery.** Prefer files, Git, locks, and
-  existing CLIs over inventing another control platform.
+- **Reuse before rebuilding. Integrate before inventing.** Prefer files, Git,
+  GitHub, Slack, SSH, locks, and existing CLIs over inventing another platform.
 
 ## Multi-agent projects: policy stays in `AGENTS.md`
 
-WatchDog itself does **not** assign Codex A/B/C, impose work-hour limits, or decide
-who may merge. That would turn a thin control fabric into a project-management
-framework.
+WatchDog itself does **not** assign Codex A/B/C, impose work-hour limits, decide
+who may instruct somebody else's agent, or decide who may merge. That would turn
+a thin control fabric into a project-management framework.
 
 Instead, this repository includes an optional project-contract template:
 
@@ -103,7 +126,37 @@ implements four lightweight coordination rules:
 This is deliberately just a template. **Policy lives with the project; WatchDog
 provides the transport/control mechanism.**
 
-## A typical aggregated workflow
+## Multi-user collaboration: bring your own agents
+
+WatchDog does not require a team to register every machine and agent under one
+central runtime. Each person can run their own WatchDog on their own machines and
+connect selected agents to the collaboration surfaces the team already shares.
+
+```text
+        Alice's machines                         Bob's machines
+   +----------------------+                 +----------------------+
+   | Windows / Codex A1   |                 | Linux / Codex B1     |
+   | HPC / Codex A2       |                 | macOS / Codex B2     |
+   +----------+-----------+                 +-----------+----------+
+              |                                         |
+          Alice's dogs                              Bob's dogs
+              |                                         |
+              +------------- GitHub + Slack ------------+
+                               shared team surfaces
+```
+
+Slack notifications include the machine identity so teammates can tell which
+locality produced a message. A dog only appears on a shared Slack surface if its
+owner configures it there. Where the project's rules and configured reply
+allowlist permit it, a teammate can reply to that dog's Slack thread and have the
+message routed back to the **exact existing Codex session** on the owner's machine.
+
+GitHub branches, repository permissions, and `AGENTS.md` can define **who should be
+allowed to do what**. WatchDog supplies the separate mechanism: **find the right
+machine/thread and deliver the message safely**. Policy remains outside the
+transport layer.
+
+## One possible topology: an aggregated manager
 
 ```text
                          Human / Manager
@@ -137,8 +190,9 @@ then compresses its state into a checkpoint progress report. WatchDog surfaces t
 result. If the user answers a WatchDog-created Slack thread, Parrot Dog relays the
 allowlisted text back to that exact session.
 
-For multiple agents, the optional `AGENTS.md` template supplies the team contract;
-WatchDog does not need to understand or enforce that contract.
+This is only one topology. The manager itself may be a persistent Codex session on
+AWS, several distributed managers, a human working directly with individual
+agents, or any mixture of those patterns. The WatchDog layer does not change.
 
 ## Platform status
 
@@ -173,6 +227,8 @@ still needs resolvable routing evidence. See [details and limitations](docs/PLAT
 - Sends Slack notifications with Outlook/SMTP fallback and a local audit trail.
 - Relays allowlisted Slack replies back to the mapped exact thread through
   **Parrot Dog**.
+- Includes machine identity in routed Slack notifications so distributed sessions
+  remain distinguishable in shared channels.
 - Discovers local and VS Code Remote-SSH workspaces and keeps session identities
   distinct.
 - Keeps local VS Code discovery working when older routing logs disappear, by
