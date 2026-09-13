@@ -8,16 +8,24 @@
   <img src="images/parrotDogLogo.png" alt="Codex WatchDog 与 Parrot Dog 标志" width="320">
 </p>
 
-**分布式执行，统一控制。**
+**带上自己的 Agent，继续用熟悉的工具，组成一个分布式团队。**
 
-Codex WatchDog 是一层面向**现有** VS Code Codex 会话的极轻量协调与控制层。
-它可以跨机器、跨终端、跨通信界面观察、唤醒、路由、交接、转发和通知准确的
-现有会话，但不会自己变成另一个 AI agent，也不会搭一套重量级 orchestration runtime。
+*一个无需迁移工作流的超轻量多人、多 Agent、跨机器、跨平台协作层。*
 
-这个项目最初只是一个 watchdog；现在真正有价值的是围绕它形成的工作流：
-agent 可以分散在本地、Remote-SSH、detached 主机和不同 VS Code 窗口里，
-但人类/manager 仍然可以通过 GitHub、Slack、progress report 和 exact-thread routing
-保持一个统一的控制面。
+Codex WatchDog 是一层面向**现有** VS Code Codex 会话的轻量协调与控制层。
+它负责把人、Agent、机器和通信界面连接起来，但不会要求团队迁移到另一套 agent 平台、
+runtime、dashboard、数据库、scheduler 或强制性的中央 manager。
+
+核心思想很简单：很多成熟工具已经把各自擅长的事情做得很好。GitHub 适合持久协作状态与
+审计历史，Slack 适合团队通信，SSH 适合连接远程机器，VS Code 已经是开发工作区，Codex
+本身已经拥有 conversation 与 execution context。**WatchDog 不重新造这些工具的缩水版；
+它只补上它们之间缺失的连接。**
+
+每个团队成员都可以继续拥有自己的机器、credential、原生 Codex session 和管理方式。
+用户只需要把愿意共享的 agent 接入团队已有的 GitHub/Slack 协作界面；在项目 policy 和
+回复白名单允许时，其他成员或 manager 也可以向这条准确的现有 agent session 发出指令。
+Manager 可以是人，也可以是 AI；可以集中，也可以分布式。整个系统不要求唯一 manager，
+也不要求中央 WatchDog server。
 
 ## 工作流程一览
 
@@ -31,42 +39,52 @@ agent 可以分散在本地、Remote-SSH、detached 主机和不同 VS Code 窗�
 
 ## 这个项目真正优化的是什么
 
-- **极轻量协调。** 核心工作流不需要 Redis、数据库、orchestration cluster、
-  第二套 agent runtime 或中央 AI scheduler。
-- **跨平台、跨机器。** Windows 是打包参考实现；Linux Remote-SSH 与 detached
-  同线程交接已有真实验证路径；macOS 有原生开发者预览路径。
-- **多终端，一个工作流。** VS Code、GitHub、Slack、本地 shell 与远程主机都能参与，
-  用户不需要被锁死在某一个终端里。
-- **多 Codex session，但不把它们压成一个 runtime。** 每个 agent 仍保留自己的原生
-  会话、上下文、仓库和执行环境；WatchDog 只把消息路由回准确线程。
-- **聚合的人类/manager interface。** GitHub 保存持久指令，Slack 承担快速中断与回复，
-  progress report 把 agent 的工作状态压缩回 manager。
-- **异步但可审计。** Git 历史、progress report、queue receipt、notification receipt
-  与 exact-thread identity 让机器和人不必同时在线也能继续工作。
-- **机制与策略分离。** WatchDog 不决定团队层级、单 session 工时、checkpoint 规则或
-  merge 权限；这些属于每个项目自己的 `AGENTS.md` contract。
+- **无需迁移工作流。** 团队继续使用原来的 VS Code window、Codex thread、repository、
+  SSH host、GitHub project、Slack channel 和工作习惯。
+- **极轻量协调。** 核心工作流不需要 Redis、数据库、orchestration cluster、第二套
+  agent runtime、强制中央服务或中央 AI scheduler。
+- **天然支持多人协作。** 不同成员可以继续拥有自己的 agent 和机器，同时接入同一个
+  GitHub/Slack 协作空间；共享 agent 不等于交出它的原生 session 或主机所有权。
+- **跨平台、跨机器。** Windows 是打包参考实现；Linux Remote-SSH 与 detached 同线程交接
+  已有真实验证路径；macOS 有原生开发者预览路径。
+- **多 Codex session，但不把它们压成一个 runtime。** 每个 agent 仍保留自己的原生会话、
+  上下文、仓库和执行环境；WatchDog 只把消息路由回准确线程。
+- **Manager 可选且可分布。** Human、ChatGPT、其他 Codex 或自动化都可以成为 manager。
+  团队可以只有一个 manager、多个 manager，或者直接 human-to-agent，而无需改变底层 transport。
+- **异步但可审计。** Git 历史、progress report、queue receipt、notification receipt、
+  machine identity 与 exact-thread identity 让机器和人不必同时在线也能继续协作。
+- **机制与策略分离。** WatchDog 不决定谁能命令谁、团队层级、单 session 工时、checkpoint
+  规则或 merge 权限；这些属于 GitHub permission、branch 与项目自己的 `AGENTS.md` contract。
 
 ## 设计理念
 
-- **让机制保持笨而薄。** WatchDog 主要负责 observe / wake / notify / relay / route，
-  做完就让开。
-- **保留原生 agent ownership。** 不为了方便 orchestration 就新建替代 chat；
-  现有 Codex session 继续是权威执行上下文。
-- **WatchDog observes Git; Codex owns Git。** WatchDog 不做 stage、commit、pull、merge、
-  rebase、reset、checkout 或 push。
-- **GitHub 是 durable management plane。** 评论、提交与 progress report 可以跨终端、
-  跨机器、跨重启长期保留。
-- **Slack 是 quick interrupt/relay plane。** 用于通知和短回复，不替代持久项目历史。
-- **上游 manager 无关，下游当前 Codex 特定。** manager 可以是人、ChatGPT、其他 agent
-  或自动化；执行侧目前依赖 Codex 的 exact-thread queue、hook、state 与 completion contract。
-- **允许多个 observer，但同一时刻只有一个 actor。** 本地狗和 detached 狗共存时，
-  通过 ownership/fencing 协调，而不是抢着做副作用。
-- **能删机制就不要加机制。** 优先使用文件、Git、锁和已有 CLI，而不是再造一套控制平台。
+- **复用成熟基础设施，而不是重造。** GitHub、Slack、SSH、VS Code、Git、Codex 和操作系统
+  已经解决了大量困难问题；WatchDog 应该连接它们，而不是自己做一套更不成熟的复制品。
+- **只实现缺失的边。** identity/routing、exact-thread wakeup、handoff、fencing、notification、
+  relay 只有在周边成熟工具没有提供时才属于 WatchDog。
+- **让机制保持笨而薄。** WatchDog 主要负责 observe / wake / notify / relay / route，做完就让开。
+- **保留原生 agent ownership。** 不为了方便 orchestration 就新建替代 chat；现有 Codex session
+  继续是权威执行上下文。
+- **WatchDog observes Git; Codex owns Git。** WatchDog 不做 stage、commit、pull、merge、rebase、
+  reset、checkout 或 push。
+- **GitHub 是 durable coordination plane。** 评论、提交、branch 与 progress report 可以跨终端、
+  跨机器、跨 manager、跨重启长期保留。
+- **Slack 是 shared fast interaction plane。** 它已经提供成熟的用户、channel、thread、通知与
+  可见性边界，适合团队快速交互；但它不替代持久项目历史。
+- **没有强制中央节点。** 每台机器/locality 可以保留自己的 WatchDog 和原生 session；manager
+  也可以分布式存在，不要求唯一权威 manager session。
+- **上游 manager 无关，下游当前 Codex 特定。** manager 可以是人、ChatGPT、其他 agent 或自动化；
+  执行侧目前依赖 Codex 的 exact-thread queue、hook、state 与 completion contract。
+- **允许多个 observer，但同一时刻只有一个 actor。** 本地狗和 detached 狗共存时，通过
+  ownership/fencing 协调，而不是抢着做副作用。
+- **Reuse before rebuilding. Integrate before inventing.** 优先使用文件、Git、GitHub、Slack、SSH、
+  lock 和已有 CLI，而不是再造一套平台。
 
 ## 多 Agent 项目：策略留在 `AGENTS.md`
 
-WatchDog 自己**不会**给 agent 分配 Codex A/B/C，不会强制 2 小时工时，也不会决定谁有
-merge 权。否则一个薄 control fabric 很快就会膨胀成 project-management framework。
+WatchDog 自己**不会**给 agent 分配 Codex A/B/C，不会强制 2 小时工时，不会决定谁可以命令
+别人的 agent，也不会决定谁有 merge 权。否则一个薄 control fabric 很快就会膨胀成
+project-management framework。
 
 本仓库只提供一个可选模板：
 
@@ -87,12 +105,39 @@ merge 权。否则一个薄 control fabric 很快就会膨胀成 project-managem
 
 这故意只是一个模板。**Policy 跟着项目走，WatchDog 只提供 transport/control mechanism。**
 
-## 一个典型的聚合工作流
+## 多人协作：Bring Your Own Agents
+
+WatchDog 不要求团队先把所有机器和 agent 注册到同一个中央 runtime。每个人都可以在自己的
+机器上运行自己的 WatchDog，并把愿意共享的 agent 接到团队本来就在使用的协作界面上。
+
+```text
+        Alice 的机器                           Bob 的机器
+   +----------------------+               +----------------------+
+   | Windows / Codex A1   |               | Linux / Codex B1     |
+   | HPC / Codex A2       |               | macOS / Codex B2     |
+   +----------+-----------+               +-----------+----------+
+              |                                       |
+          Alice 的狗                               Bob 的狗
+              |                                       |
+              +------------- GitHub + Slack ----------+
+                            团队共享协作界面
+```
+
+Slack 通知会带上 machine identity，团队成员可以知道消息来自哪个 locality。只有 owner 主动
+把某只狗配置到共享 Slack 界面，它才会在那里出现；如果 owner 不愿共享，就不需要加入这个 channel。
+在项目规则和回复白名单允许时，团队成员可以直接回复那只狗的 Slack thread，消息会被路由回 owner
+机器上的**准确现有 Codex session**。
+
+GitHub branch、repository permission 与 `AGENTS.md` 可以定义**谁应该被允许做什么**；
+WatchDog 负责的是另一件事：**找到正确的机器/thread，并安全地把消息送过去。**
+Policy 继续留在 transport layer 之外。
+
+## 一种可选拓扑：聚合 Manager
 
 ```text
                          Human / Manager
                                |
-                        统一控制界面
+                        聚合控制界面
                                |
                  +-------------+-------------+
                  |                           |
@@ -120,7 +165,8 @@ Codex 自己执行工作并拥有 Git，然后把状态压缩进 checkpoint prog
 再把结果通知出来。如果用户在 WatchDog 创建的 Slack thread 中回复，Parrot Dog 会把
 白名单文本原样送回准确 session。
 
-多 agent 时，可选 `AGENTS.md` 模板负责团队 contract；WatchDog 不需要理解或执行这些策略。
+这只是其中一种拓扑。Manager 可以是一条常驻 AWS 上的 Codex session，也可以是多个分布式
+manager、人类直接介入单个 agent，或者这些模式的任意组合；底层 WatchDog 不需要改变。
 
 ## 平台状态
 
@@ -151,6 +197,7 @@ Codex 自己执行工作并拥有 Git，然后把状态压缩进 checkpoint prog
 - 用只读 Git remote OID 作为 GitHub 更新门铃，把所有 Git mutation 留给 Codex。
 - 发送 Slack 通知，支持 Outlook/SMTP fallback 与本地 audit trail。
 - 通过 **Parrot Dog** 把白名单 Slack 回复转回对应的 exact thread。
+- Slack 路由通知中包含 machine identity，让共享 channel 中的分布式 session 仍然可区分。
 - 自动发现本地与 VS Code Remote-SSH workspace，并保持不同 session identity 不串线。
 - 本地 VS Code 的旧路由日志消失后，仍可通过当前窗口的原生写入进程验证准确的现有线程。
 - 在 Remote-SSH 关闭后支持 Linux persistent detached owner 接管同一 thread。
