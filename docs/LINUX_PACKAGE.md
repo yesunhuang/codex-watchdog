@@ -9,19 +9,14 @@ Choose `codex-watchdog-vX.Y.Z-linux-arm64.zip` for `aarch64`, or
 [GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases).
 Verify its entry in `SHA256SUMS.txt` before extracting the complete ZIP.
 
-From v0.2.6, the x64 package targets RHEL 8.10 and Ubuntu 22.04 or newer. It is
-built natively against glibc 2.28 in a pinned Red Hat UBI 8 container, with the
-same Python 3.12.14 and application dependency versions. ARM64 continues to
-target Ubuntu 22.04 or newer with glibc 2.35. Alpine/musl is not supported by
+The x64 package targets RHEL 8.10 and Ubuntu 22.04 or newer, and is built against
+glibc 2.28 in a pinned Red Hat UBI 8 container. The ARM64 package targets Ubuntu
+22.04 or newer with glibc 2.35. Alpine/musl is not supported by
 these recipes. Linux packages still use the operating system's glibc and ELF
 loader. The manifest records the verified minimum glibc required by every
 bundled native library and the bootloader. See
 [PyInstaller's Linux compatibility guidance](https://pyinstaller.org/en/stable/usage.html#making-gnu-linux-apps-forward-compatible).
 An executable temporary directory is needed for the bundled runtime to unpack.
-
-The older v0.2.5 x64 package needs glibc 2.35 and fails before startup on RHEL 8.
-Use v0.2.6 or newer there. The compatible package uses the existing installation
-and state-preservation procedure below; no host glibc replacement is involved.
 
 The frozen executable selects the current host's Ubuntu or RHEL CA bundle for
 HTTPS and SMTP TLS, with bundled certifi roots only when no supported host
@@ -30,7 +25,7 @@ This selection affects only the running process; it changes no saved profile,
 credential store, or operating-system trust setting.
 
 Packaging does not expand thread discovery. The explicit same-thread workflow
-is separate from general Linux desktop discovery, which remains a CI-verified
+is separate from general Linux desktop discovery, which remains a
 preview awaiting real desktop E2E. See [platform support](PLATFORM_SUPPORT.md)
 for the current acceptance level of each architecture and workflow.
 
@@ -92,25 +87,36 @@ replacements keep the command/path stable, so unchanged hooks retain their trust
 
 ## Automatic Remote-SSH handoff
 
-From v0.2.7, upgrade the desktop WatchDog, remote executable and trusted hook
-implementation together. Keep the remote owner running under an existing
-current-user supervisor whose lifetime is independent of the SSH client:
+Keep the desktop WatchDog, remote executable and trusted hooks compatible.
+Run the remote monitor under a persistent current-user service whose lifetime
+is independent of the SSH client. Its foreground command is:
 
 ```sh
 watchdog="${XDG_DATA_HOME:-$HOME/.local/share}/codex-watchdog/bin/codex-watchdog"
-"$watchdog" linux-auto-run --interval 5
+"$watchdog" linux-auto-run --repo /absolute/repository/path \
+  --interval 30 --renew-lease --continue-interrupted
 ```
 
-The desktop resolves the exact open Remote-SSH conversation and has control
-priority. Linux remains standby while VS Code is attached, takes over that same
-thread after a clean detach, and releases at a safe idle boundary when the desktop
-returns. Normal automatic operation does not require `linux-bind`. If VS Code's
-resume remains pending after handback, reload that window and reopen the same
-conversation. The native source acceptance needed this reload before VS Code
-reacquired its writer.
+Repeat `--repo` for more repositories, or add `--thread UUID` to monitor one
+existing conversation. These filters select eligible threads; they do not create
+or enroll a conversation. Normal automatic operation does not need `linux-bind`.
 
-See the [automatic handoff guide](https://github.com/yesunhuang/codex-watchdog/blob/main/docs/AUTOMATIC_REMOTE_HANDOFF.md)
-for the persistence example, fencing semantics, exclusions, and recovery steps.
+The Linux host's WatchDog monitors its enrolled threads and sends completion
+notifications using its local settings, including while VS Code owns execution.
+The desktop WatchDog provides fallback when the host observer is unavailable.
+After detach, Linux can acquire the same conversation's writer and continue
+interrupted work when the option above is enabled. At a safe idle boundary it
+releases the writer while monitoring continues. If VS Code's resume remains
+pending after handback, choose Retry or reload that window and reopen the same
+conversation.
+
+For Slack replies, configure `CODEX_WATCHDOG_SLACK_REPLY_MODE=poll` with the
+existing bot token, channel and approved-user list on the Linux host. A token
+and channel alone enable outgoing notifications only. See the
+[automatic handoff guide](AUTOMATIC_REMOTE_HANDOFF.md) for persistent startup,
+provider configuration and recovery, and [login-node setup](LINUX_NODE_SETUP.md)
+for one node-local monitor per eligible shared-home login node.
+
 Run `linux-release` with the same runtime and wait for `linux-status` to report
 `released` before stopping its supervisor or replacing the executable.
 
@@ -139,7 +145,7 @@ requests. Existing queue receipts and journals survive restart, and uncertain
 sends are not retried blindly. Closing VS Code may interrupt an in-flight command;
 packaging does not make that command uninterrupted or replay it.
 
-From v0.2.20, completed idle work releases its writer automatically while
+Completed idle work releases its writer automatically while
 monitoring and Slack replies stay enabled (`owner_state: parked`). VS Code can
 reopen the same conversation; choose Retry if its previous warning is still shown.
 To disable takeover explicitly instead:
@@ -171,8 +177,8 @@ installs the pinned package dependencies. Build the image with
 Mount that checkout at `/workspace` when running the image, install the project
 with `python -m pip install --no-deps --no-build-isolation .`, and run
 `python scripts/build_linux_package.py` inside the container. The
-[Linux package workflow](../.github/workflows/linux-package.yml) gives the full
-build and acceptance commands, including output ownership for hosted runners.
+[manual release guide](MANUAL_RELEASE.md) describes local and approved remote
+builds and acceptance. GitHub Actions remains disabled.
 
 ARM64 retains native Ubuntu 22.04, Python 3.12.14 and pip 26.0.1. Install
 `requirements-linux-package.txt`, then the project with

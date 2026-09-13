@@ -8,12 +8,26 @@
   <img src="images/parrotDogLogo.png" alt="Codex WatchDog and Parrot Dog logo" width="320">
 </p>
 
-**Distributed execution, unified control.**
+**Bring your own agents. Keep your tools. Work as one distributed team.**
 
-Codex WatchDog connects **existing VS Code Codex conversations** to GitHub and
-Slack across local computers and Remote-SSH servers. It watches for updates and
-completed work, wakes the right conversation, sends notifications, and relays
-approved Slack replies. Each conversation keeps its own context and workspace.
+*Ultra-lightweight, no-migration multi-user and multi-agent collaboration across machines and platforms.*
+
+Codex WatchDog is a lightweight coordination and control fabric for **existing**
+VS Code Codex sessions. It connects people, agents, machines, and communication
+surfaces without asking a team to move into another agent platform, runtime,
+dashboard, database, scheduler, or mandatory central manager.
+
+The core idea is simple: mature tools already solve their own jobs well. GitHub is
+good at durable collaborative state and audit history. Slack is good at team
+communication. SSH is good at reaching remote machines. VS Code is already the
+developer workspace. Codex already owns the conversation and execution context.
+**WatchDog does not rebuild smaller copies of them; it connects the missing edges.**
+
+Each teammate can keep their own machines, credentials, native Codex sessions, and
+preferred management style. Selected agents can join shared GitHub/Slack surfaces;
+where project policy and configured reply permissions allow it, another teammate or
+manager can address that exact existing agent. Managers may be human or AI,
+centralized or distributed. No single manager or WatchDog server is required.
 
 ## Architecture and philosophy
 
@@ -32,6 +46,23 @@ approved Slack replies. Each conversation keeps its own context and workspace.
 ![WatchDog workflow: discuss the task, publish a GitHub comment, detect the update, wake Codex, run the task, and notify the user](images/watchdog_workflow_en.png)
 
 ![Parrot Dog workflow: Codex asks for help, Slack relays the message, the human replies, and Codex continues](images/parrot_workflow_en.png)
+
+## Multi-user collaboration: bring your own agents
+
+WatchDog does not require a team to register every machine and agent under one
+central runtime. Each person can run their own WatchDog on their own machines and
+connect selected agents to the collaboration surfaces the team already shares.
+
+Slack notifications include the machine identity so teammates can tell which
+locality produced a message. A dog only appears on a shared Slack surface if its
+owner configures it there. Where the project's rules and configured reply
+allowlist permit it, a teammate can reply to that dog's Slack thread and have the
+message routed back to the **exact existing Codex session** on the owner's machine.
+
+GitHub branches, repository permissions, and `AGENTS.md` can define **who should be
+allowed to do what**. WatchDog supplies the separate mechanism: **find the right
+machine/thread and deliver the message safely**. Policy remains outside the
+transport layer.
 
 ## Supported topologies
 

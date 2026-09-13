@@ -8,11 +8,24 @@
   <img src="images/parrotDogLogo.png" alt="Codex WatchDog 与 Parrot Dog 标志" width="320">
 </p>
 
-**分布式执行，统一控制。**
+**带上自己的 Agent，继续用熟悉的工具，组成一个分布式团队。**
 
-Codex WatchDog 将本地电脑和 Remote-SSH 服务器上的**现有 VS Code Codex 会话**
-与 GitHub、Slack 连接起来。它观察更新和任务完成，唤醒正确的会话，发送通知，
-并转发获准的 Slack 回复。每个会话保留自己的上下文和工作区。
+*一个无需迁移工作流的超轻量多人、多 Agent、跨机器、跨平台协作层。*
+
+Codex WatchDog 是一层面向**现有** VS Code Codex 会话的轻量协调与控制层。
+它负责把人、Agent、机器和通信界面连接起来，但不会要求团队迁移到另一套 agent 平台、
+runtime、dashboard、数据库、scheduler 或强制性的中央 manager。
+
+核心思想很简单：很多成熟工具已经把各自擅长的事情做得很好。GitHub 适合持久协作状态与
+审计历史，Slack 适合团队通信，SSH 适合连接远程机器，VS Code 已经是开发工作区，Codex
+本身已经拥有 conversation 与 execution context。**WatchDog 不重新造这些工具的缩水版；
+它只补上它们之间缺失的连接。**
+
+每个团队成员都可以继续拥有自己的机器、credential、原生 Codex session 和管理方式。
+用户只需要把愿意共享的 agent 接入团队已有的 GitHub/Slack 协作界面；在项目 policy 和
+回复白名单允许时，其他成员或 manager 也可以向这条准确的现有 agent session 发出指令。
+Manager 可以是人，也可以是 AI；可以集中，也可以分布式。整个系统不要求唯一 manager，
+也不要求中央 WatchDog server。
 
 ## 架构与设计理念
 
@@ -28,6 +41,20 @@ Codex WatchDog 将本地电脑和 Remote-SSH 服务器上的**现有 VS Code Cod
 ![WatchDog 工作流程：讨论任务，在 GitHub 发布指令，检测更新，唤醒 Codex，执行任务并通知用户](images/watchdog_workflow_cn.png)
 
 ![Parrot Dog 工作流程：Codex 请求帮助，Slack 转达消息，用户回复，然后 Codex 继续工作](images/parrot_workflow_cn.png)
+
+## 多人协作：Bring Your Own Agents
+
+WatchDog 不要求团队先把所有机器和 agent 注册到同一个中央 runtime。每个人都可以在自己的
+机器上运行自己的 WatchDog，并把愿意共享的 agent 接到团队本来就在使用的协作界面上。
+
+Slack 通知会带上 machine identity，团队成员可以知道消息来自哪个 locality。只有 owner 主动
+把某只狗配置到共享 Slack 界面，它才会在那里出现；如果 owner 不愿共享，就不需要加入这个 channel。
+在项目规则和回复白名单允许时，团队成员可以直接回复那只狗的 Slack thread，消息会被路由回 owner
+机器上的**准确现有 Codex session**。
+
+GitHub branch、repository permission 与 `AGENTS.md` 可以定义**谁应该被允许做什么**；
+WatchDog 负责的是另一件事：**找到正确的机器/thread，并安全地把消息送过去。**
+Policy 继续留在 transport layer 之外。
 
 ## 支持的部署方式
 

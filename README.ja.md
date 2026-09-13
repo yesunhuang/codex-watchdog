@@ -8,11 +8,26 @@
   <img src="images/parrotDogLogo.png" alt="Codex WatchDog と Parrot Dog のロゴ" width="320">
 </p>
 
-**分散実行、統一された制御。**
+**自分の Agent を持ち込み、慣れたツールのまま、一つの分散チームとして働く。**
 
-Codex WatchDog はローカル PC と Remote-SSH サーバー上の**既存の VS Code Codex 会話**を
-GitHub と Slack につなぎます。更新や作業の完了を監視し、正しい会話を再開し、通知と
-許可された Slack 返信を転送します。各会話のコンテキストと作業場所は維持されます。
+*ワークフロー移行を必要としない、超軽量なマルチユーザー／マルチエージェント、クロスマシン／クロスプラットフォーム協調レイヤー。*
+
+Codex WatchDog は、**既存の** VS Code Codex セッションを対象にした軽量な coordination /
+control fabric です。人、Agent、マシン、通信インターフェースをつなぎますが、チームに
+別の agent platform、runtime、dashboard、DB、scheduler、あるいは必須の中央 manager への
+移行を要求しません。
+
+基本思想は単純です。成熟したツールは、それぞれの役割をすでによく解決しています。
+GitHub は durable な共同状態と audit history、Slack は team communication、SSH は remote
+machine への接続、VS Code は developer workspace、Codex は conversation と execution context
+をすでに所有しています。**WatchDog はそれらの小さな代替品を作り直すのではなく、
+足りない接続だけを補います。**
+
+各メンバーは、自分の machine、credential、native Codex session、管理スタイルをそのまま
+維持できます。共有したい agent だけを既存の GitHub / Slack surface に参加させ、project policy
+と reply allowlist が許す場合には、別の teammate や manager がその正確な既存 agent session に
+指示できます。Manager は human でも AI でもよく、集中型でも分散型でも構いません。
+単一の manager や中央 WatchDog server は必須ではありません。
 
 ## アーキテクチャと設計思想
 
@@ -29,6 +44,22 @@ GitHub と Slack につなぎます。更新や作業の完了を監視し、正
 ![WatchDog workflow: discuss the task, publish a GitHub comment, detect the update, wake Codex, run the task, and notify the user](images/watchdog_workflow_jp.png)
 
 ![Parrot Dog workflow: Codex asks for help, Slack relays the message, the human replies, and Codex continues](images/parrot_workflow_jp.png)
+
+## マルチユーザー協調：Bring Your Own Agents
+
+WatchDog は、team がすべての machine と agent を一つの中央 runtime に登録することを要求しません。
+各メンバーは自分の machine 上で自分の WatchDog を動かし、共有したい agent だけを、team がすでに
+使っている collaboration surface に接続できます。
+
+Slack notification には machine identity が含まれるため、team member はどの locality から来た
+message かを区別できます。owner が shared Slack surface に設定した dog だけがそこに現れます。
+共有したくない agent は、その channel に参加させる必要がありません。project rule と reply allowlist
+が許す場合、teammate はその dog の Slack thread に返信し、owner の machine 上の**正確な既存 Codex
+session** に message を route できます。
+
+GitHub branch、repository permission、`AGENTS.md` は**誰が何をしてよいか**を定義できます。
+WatchDog が提供するのは別の mechanism、つまり**正しい machine / thread を見つけ、安全に message を
+届けること**です。policy は transport layer の外に残します。
 
 ## 対応する構成
 
