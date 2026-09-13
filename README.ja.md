@@ -8,17 +8,26 @@
   <img src="images/parrotDogLogo.png" alt="Codex WatchDog と Parrot Dog のロゴ" width="320">
 </p>
 
-**分散実行、統一コントロール。**
+**自分の Agent を持ち込み、慣れたツールのまま、一つの分散チームとして働く。**
 
-Codex WatchDog は、**既存の** VS Code Codex セッションを対象にした極めて軽量な
-coordination / control fabric です。マシン、ターミナル、通信インターフェースをまたいで、
-正確な既存セッションを監視・wake・route・handoff・relay・notify しますが、
-自分自身が別の AI agent や重量級 orchestration runtime になることはありません。
+*ワークフロー移行を必要としない、超軽量なマルチユーザー／マルチエージェント、クロスマシン／クロスプラットフォーム協調レイヤー。*
 
-このプロジェクトは単純な watchdog から始まりました。しかし現在の本当の価値は、
-その周囲にできたワークフローです。agent はローカル、Remote-SSH、detached host、
-複数の VS Code window に分散していても、人間 / manager は GitHub、Slack、
-progress report、exact-thread routing を通じて一つの control surface を保てます。
+Codex WatchDog は、**既存の** VS Code Codex セッションを対象にした軽量な coordination /
+control fabric です。人、Agent、マシン、通信インターフェースをつなぎますが、チームに
+別の agent platform、runtime、dashboard、DB、scheduler、あるいは必須の中央 manager への
+移行を要求しません。
+
+基本思想は単純です。成熟したツールは、それぞれの役割をすでによく解決しています。
+GitHub は durable な共同状態と audit history、Slack は team communication、SSH は remote
+machine への接続、VS Code は developer workspace、Codex は conversation と execution context
+をすでに所有しています。**WatchDog はそれらの小さな代替品を作り直すのではなく、
+足りない接続だけを補います。**
+
+各メンバーは、自分の machine、credential、native Codex session、管理スタイルをそのまま
+維持できます。共有したい agent だけを既存の GitHub / Slack surface に参加させ、project policy
+と reply allowlist が許す場合には、別の teammate や manager がその正確な既存 agent session に
+指示できます。Manager は human でも AI でもよく、集中型でも分散型でも構いません。
+単一の manager や中央 WatchDog server は必須ではありません。
 
 ## ワークフロー概要
 
@@ -32,47 +41,57 @@ progress report、exact-thread routing を通じて一つの control surface を
 
 ## このプロジェクトが本当に最適化しているもの
 
-- **極めて軽量な coordination。** コアワークフローのために Redis、DB、
-  orchestration cluster、第二の agent runtime、中央 AI scheduler は不要です。
-- **クロスプラットフォーム / クロスマシン。** Windows は packaged reference、
-  Linux Remote-SSH と detached same-thread handoff は実機検証済み、macOS には
-  native developer-preview path があります。
-- **複数ターミナルでも一つのワークフロー。** VS Code、GitHub、Slack、local shell、
-  remote host を組み合わせても、ユーザーが一つの terminal に縛られません。
-- **複数 Codex session を一つの runtime に潰さない。** 各 agent は native session、
-  context、repository、execution environment をそのまま保持し、WatchDog は exact thread
-  にだけ route します。
-- **人間 / manager の interface を集約。** GitHub が durable direction、Slack が quick
-  interrupt / reply、progress report が agent state の圧縮された manager 向け出力です。
+- **ワークフロー移行が不要。** チームがすでに使っている VS Code window、Codex thread、
+  repository、SSH host、GitHub project、Slack channel、作業習慣をそのまま使います。
+- **極めて軽量な coordination。** コアワークフローのために Redis、DB、orchestration cluster、
+  第二の agent runtime、必須の中央 service、中央 AI scheduler は不要です。
+- **構成そのものがマルチユーザー。** 各メンバーは自分の agent と machine を所有したまま、
+  同じ GitHub / Slack collaboration surface に参加できます。agent を共有しても native session や
+  host ownership を手放す必要はありません。
+- **クロスプラットフォーム / クロスマシン。** Windows は packaged reference、Linux Remote-SSH
+  と detached same-thread handoff は実機検証済み、macOS には native developer-preview path があります。
+- **複数 Codex session を一つの runtime に潰さない。** 各 agent は native session、context、
+  repository、execution environment をそのまま保持し、WatchDog は exact thread にだけ route します。
+- **Manager は optional で distributed にできる。** human、ChatGPT、別の Codex、automation の
+  いずれでも manager になれます。単一 manager、複数 manager、direct human-to-agent のいずれでも、
+  transport layer を変える必要はありません。
 - **非同期でも監査可能。** Git history、progress report、queue receipt、notification receipt、
-  exact-thread identity により、人とマシンが同時に online でなくても継続できます。
-- **Mechanism と policy を分離。** WatchDog はチーム階層、session の作業時間、checkpoint
-  ルール、merge 権限を決めません。それらは各 project の `AGENTS.md` contract に置きます。
+  machine identity、exact-thread identity により、人と machine が同時に online でなくても継続できます。
+- **Mechanism と policy を分離。** WatchDog は誰が誰に命令できるか、team hierarchy、session の
+  作業時間、checkpoint rule、merge authority を決めません。それらは GitHub permission、branch、
+  各 project の `AGENTS.md` contract に置きます。
 
 ## 設計思想
 
-- **仕組みは薄く、できるだけ dumb に。** WatchDog は observe / wake / notify / relay /
-  route を行い、その後は邪魔をしません。
-- **native agent ownership を保つ。** orchestration を楽にするためだけに replacement chat
-  を作らず、既存 Codex session を実行上の authority として維持します。
-- **WatchDog observes Git; Codex owns Git.** WatchDog は stage、commit、pull、merge、rebase、
-  reset、checkout、push を行いません。
-- **GitHub は durable management plane。** comment、commit、progress report は terminal、
-  machine、restart を越えて残ります。
-- **Slack は quick interrupt / relay plane。** 通知と短い allowlisted reply のための層で、
-  durable project history の代替ではありません。
-- **Manager-agnostic, Codex-specific。** manager は人間、ChatGPT、別 agent、automation の
-  いずれでも構いません。execution side は現在 Codex の exact-thread queue、hook、state、
-  completion contract に依存します。
-- **observer は複数でも、actor は一つ。** local と detached の WatchDog が共存する場合、
-  side effect を競うのではなく ownership / fencing で調整します。
-- **仕組みを増やす前に削れる仕組みを削る。** file、Git、lock、既存 CLI を優先します。
+- **成熟した infrastructure を再利用し、作り直さない。** GitHub、Slack、SSH、VS Code、Git、
+  Codex、OS はすでに難しい問題を解決しています。WatchDog はそれらをつなぎ、未成熟な複製を
+  新たに作らないことを優先します。
+- **不足している edge だけを実装する。** identity / routing、exact-thread wakeup、handoff、
+  fencing、notification、relay は、周囲の成熟ツールが提供しない場合だけ WatchDog の責務です。
+- **仕組みは薄く、できるだけ dumb に。** WatchDog は observe / wake / notify / relay / route を行い、
+  その後は邪魔をしません。
+- **native agent ownership を保つ。** orchestration を楽にするためだけに replacement chat を作らず、
+  既存 Codex session を実行上の authority として維持します。
+- **WatchDog observes Git; Codex owns Git.** WatchDog は stage、commit、pull、merge、rebase、reset、
+  checkout、push を行いません。
+- **GitHub は durable coordination plane。** comment、commit、branch、progress report は terminal、
+  machine、manager、restart、time zone を越えて残ります。
+- **Slack は shared fast interaction plane。** mature な user、channel、thread、notification、visibility
+  boundary をそのまま利用し、team の短い interaction に使います。durable project history の代替ではありません。
+- **必須の中央ノードを置かない。** 各 machine / locality が自分の WatchDog と native session を持てます。
+  manager も distributed にでき、唯一の authoritative manager session は不要です。
+- **Manager-agnostic, Codex-specific。** manager は human、ChatGPT、別 agent、automation のいずれでも構いません。
+  execution side は現在 Codex の exact-thread queue、hook、state、completion contract に依存します。
+- **observer は複数でも、actor は一つ。** local と detached の WatchDog が共存する場合、side effect を
+  競うのではなく ownership / fencing で調整します。
+- **Reuse before rebuilding. Integrate before inventing.** file、Git、GitHub、Slack、SSH、lock、既存 CLI を
+  優先し、別の platform を作る前に既存のものを組み合わせます。
 
 ## Multi-agent project：policy は `AGENTS.md` に置く
 
-WatchDog 自身は Codex A/B/C を割り当てず、2 時間の作業上限を強制せず、誰が merge
-できるかも決めません。そこまで担うと、薄い control fabric が project-management
-framework に膨らんでしまうからです。
+WatchDog 自身は Codex A/B/C を割り当てず、2 時間の作業上限を強制せず、誰が他人の agent に
+指示できるかも、誰が merge できるかも決めません。そこまで担うと、薄い control fabric が
+project-management framework に膨らんでしまうからです。
 
 その代わり、この repository には任意で使える project-contract template があります：
 
@@ -95,12 +114,41 @@ framework に膨らんでしまうからです。
 これは意図的に template に留めています。**Policy は project に属し、WatchDog は
 transport / control mechanism だけを提供します。**
 
-## 典型的な集約ワークフロー
+## マルチユーザー協調：Bring Your Own Agents
+
+WatchDog は、team がすべての machine と agent を一つの中央 runtime に登録することを要求しません。
+各メンバーは自分の machine 上で自分の WatchDog を動かし、共有したい agent だけを、team がすでに
+使っている collaboration surface に接続できます。
+
+```text
+        Alice の machines                        Bob の machines
+   +----------------------+                 +----------------------+
+   | Windows / Codex A1   |                 | Linux / Codex B1     |
+   | HPC / Codex A2       |                 | macOS / Codex B2     |
+   +----------+-----------+                 +-----------+----------+
+              |                                         |
+          Alice's dogs                              Bob's dogs
+              |                                         |
+              +------------- GitHub + Slack ------------+
+                              shared team surfaces
+```
+
+Slack notification には machine identity が含まれるため、team member はどの locality から来た
+message かを区別できます。owner が shared Slack surface に設定した dog だけがそこに現れます。
+共有したくない agent は、その channel に参加させる必要がありません。project rule と reply allowlist
+が許す場合、teammate はその dog の Slack thread に返信し、owner の machine 上の**正確な既存 Codex
+session** に message を route できます。
+
+GitHub branch、repository permission、`AGENTS.md` は**誰が何をしてよいか**を定義できます。
+WatchDog が提供するのは別の mechanism、つまり**正しい machine / thread を見つけ、安全に message を
+届けること**です。policy は transport layer の外に残します。
+
+## 一つの選択肢：集約型 Manager
 
 ```text
                          Human / Manager
                                |
-                     unified control surface
+                     aggregated control surface
                                |
                  +-------------+-------------+
                  |                           |
@@ -123,13 +171,14 @@ transport / control mechanism だけを提供します。**
                              GitHub
 ```
 
-manager が GitHub に durable な指示を残すと、WatchDog が update を検知し、正確な既存
-thread を wake します。Codex は実作業と Git を所有し、checkpoint progress report に
-状態を圧縮します。WatchDog は結果を通知します。ユーザーが WatchDog の Slack thread に
-返信すると、Parrot Dog は allowlisted text を正確な session に返します。
+manager が GitHub に durable な指示を残すと、WatchDog が update を検知し、正確な既存 thread を
+wake します。Codex は実作業と Git を所有し、checkpoint progress report に状態を圧縮します。
+WatchDog は結果を通知します。ユーザーが WatchDog の Slack thread に返信すると、Parrot Dog は
+allowlisted text を正確な session に返します。
 
-Multi-agent の場合、任意の `AGENTS.md` template が team contract を提供します。
-WatchDog はその policy を理解したり enforcement したりする必要はありません。
+これは一つの topology に過ぎません。manager は AWS 上の persistent Codex session でも、複数の
+分散 manager でも、人間が individual agent に直接介入する形でもよく、それらを混ぜても構いません。
+WatchDog layer 自体は変わりません。
 
 ## プラットフォーム状況
 
@@ -161,6 +210,7 @@ macOS には引き続き解決可能なルーティング情報が必要です�
 - read-only Git remote OID を GitHub update の doorbell として使い、Git mutation は Codex に任せる。
 - Slack notification、Outlook/SMTP fallback、local audit trail。
 - **Parrot Dog** による allowlisted Slack reply の exact-thread relay。
+- Slack routing notification に machine identity を含め、shared channel 内の distributed session を区別可能にする。
 - local と VS Code Remote-SSH workspace を発見し、session identity を混同しない。
 - 古いルーティングログが失われても、現在のウィンドウの native writer を確認して正確な既存 thread を検出。
 - Remote-SSH detach 後の Linux persistent detached owner による same-thread takeover。
