@@ -1,16 +1,32 @@
-# Codex WatchDog
-
 <p align="center">
   <strong>English</strong> | <a href="README.zh-CN.md">中文</a> | <a href="README.ja.md">日本語</a>
 </p>
 
 <p align="center">
-  <img src="images/parrotDogLogo.png" alt="Codex WatchDog and Parrot Dog logo" width="320">
+  <img src="images/parrotDogLogo.png" alt="Codex WatchDog and Parrot Dog logo" width="160">
 </p>
 
-**Bring your own agents. Keep your tools. Work as one distributed team.**
+<h1 align="center">Codex WatchDog</h1>
 
-*Ultra-lightweight, no-migration multi-user and multi-agent collaboration across machines and platforms.*
+<p align="center">
+  <strong>Bring your own agents. Keep your tools. Work as one distributed team.</strong><br>
+  <em>Ultra-lightweight, no-migration multi-user and multi-agent collaboration across machines and platforms.</em>
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2e7d32" alt="MIT license"></a>
+  <a href="docs/PLATFORM_SUPPORT.md#support-matrix"><img src="https://img.shields.io/badge/Windows-x64-44627e" alt="Windows x64 support"></a>
+  <a href="docs/PLATFORM_SUPPORT.md#support-matrix"><img src="https://img.shields.io/badge/Linux-ARM64%20%2F%20x64-44627e" alt="Linux ARM64 and x64 support"></a>
+  <a href="docs/PLATFORM_SUPPORT.md#support-matrix"><img src="https://img.shields.io/badge/macOS-preview-a66b00" alt="macOS preview"></a>
+  <br>
+  <a href="#architecture-and-philosophy"><img src="https://img.shields.io/badge/sessions-native-355c7d" alt="Existing native Codex sessions"></a>
+  <a href="#multi-user-collaboration-bring-your-own-agents"><img src="https://img.shields.io/badge/collaboration-multi--user%20%2F%20multi--agent-355c7d" alt="Multi-user and multi-agent collaboration"></a>
+  <a href="#multi-user-collaboration-bring-your-own-agents"><img src="https://img.shields.io/badge/central%20server-not%20required-355c7d" alt="No required central server"></a>
+</p>
+
+<p align="center">
+  <a href="#quick-start">Quick Start</a> · <a href="#architecture-and-philosophy">Architecture</a> · <a href="docs/SETUP.md">Configuration</a> · <a href="https://github.com/yesunhuang/codex-watchdog/releases">Releases</a>
+</p>
 
 Codex WatchDog is a lightweight coordination and control fabric for **existing**
 VS Code Codex sessions. It connects people, agents, machines, and communication
