@@ -1,6 +1,8 @@
 from pathlib import Path
 import json
+import os
 import sqlite3
+import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -60,6 +62,7 @@ def scenario(tmp_path, monkeypatch, request):
     class Client:
         def __init__(self, executable, codex_home, cwd, event):
             self.process = SimpleNamespace(pid=900 + len(clients), returncode=None)
+            self.process.poll = lambda: self.process.returncode
             self.status = "idle"
             self.calls = []
             self.closed = False
@@ -321,6 +324,7 @@ def test_normal_handback_does_not_create_loss_alert(scenario):
     assert not list((store.directory / "effects").glob("*.json"))
 
 
+@pytest.mark.parametrize("scenario", [False, True], indirect=True)
 def test_idle_parking_retains_host_epoch_and_completion_observation(scenario, monkeypatch):
     store, _, writer, _, clients, _ = scenario
     agent, owner = detached(scenario)
@@ -339,6 +343,68 @@ def test_idle_parking_retains_host_epoch_and_completion_observation(scenario, mo
     writer[0] = 777
     assert agent.step()[0]["state"] == "observing"
     assert len(clients) == 1 and store.read()["epoch"] == epoch
+
+
+def test_host_cycle_reconciles_the_saved_pending_wake(scenario):
+    store, _, _, _, _, _ = scenario
+    agent, _ = detached(scenario)
+    item = agent.controllers[THREAD]
+    with store.guard(item["token"]) as value:
+        value["remote_state"] = dict(pending_instruction_id="git-attention:fixture", retained=True)
+        control_atomic_json(store.path, value)
+    calls = []
+
+    def probe(target, token, **options):
+        calls.append((target, token, options))
+        return dict(status="ok", control=dict(state=store.read()["remote_state"]),
+                    wake=dict(state="started"))
+
+    item["service"].remote_control = SimpleNamespace(probe=probe)
+    item["service"]._run_remote_owned = lambda target, cycle, **options: options
+    result = agent._cycle(item)
+    assert calls[0][2] == dict(pending_instruction_id="git-attention:fixture")
+    assert result["initial_probe"]["wake"]["state"] == "started"
+    assert result["initial_state"]["retained"] is True
+
+
+@pytest.mark.parametrize("scenario", [True], indirect=True)
+def test_history_changed_during_probe_cannot_notify_or_wake(scenario):
+    from codex_watchdog.control_state import ControlBusy
+    store, _, writer, _, _, _ = scenario
+    agent, owner = detached(scenario)
+    owner._idle_since -= 6
+    agent.step(observe=False)
+    assert writer[0] is None
+    item = agent.controllers[THREAD]
+    rollout = store.codex_home / "sessions/thread.jsonl"
+
+    def changed_probe(*args, **kwargs):
+        rollout.write_text('{"foreign":true}\n')
+        return dict(status="ok", control=dict(state={}))
+
+    item["service"].remote_control = SimpleNamespace(probe=changed_probe)
+    item["service"]._run_remote_owned = lambda *a, **k: pytest.fail("external effect after changed history")
+    with item["observation"].guard(rollout_stamp=owner.rollout_stamp) as admitted:
+        assert admitted
+        with pytest.raises(ControlBusy, match="history_changed"):
+            agent._cycle(item)
+
+
+def test_host_git_courier_rechecks_admission_but_preserves_slack_relay(tmp_path):
+    from codex_watchdog.control_state import ControlBusy
+    adapter = linux_auto.HostRemoteAdapter(tmp_path)
+    dispatched = []
+    adapter._dispatch_wake = lambda request, session: dispatched.append(request["instruction_id"])
+
+    def changed():
+        raise ControlBusy("control_node_observation_history_changed")
+
+    adapter.git_admission_check = changed
+    for instruction in ("git:commit", "git-attention:blocker"):
+        with pytest.raises(ControlBusy, match="history_changed"):
+            adapter.namespace["dispatch_wake"](dict(instruction_id=instruction), THREAD)
+    adapter.namespace["dispatch_wake"](dict(instruction_id="slack:reply"), THREAD)
+    assert dispatched == ["slack:reply"]
 
 
 def test_failed_alert_does_not_become_successful_suppression(scenario):
@@ -587,6 +653,44 @@ def test_failed_monitor_does_not_renew_forever_or_close_live_backend(scenario):
     assert store.read()["owner"]["expires"] == expires
     assert not clients[0].closed and len(clients) == 1
     assert json.loads(owner.status_path.read_text())["reason"] == "linux_writer_changed"
+
+
+@pytest.mark.parametrize("exited", [False, True])
+def test_expired_lease_drain_reaps_only_a_proven_exited_real_child(scenario, exited):
+    store, local, writer, clock, clients, make_agent = scenario
+    agent, owner = detached(scenario)
+    script = "pass" if exited else "import sys; sys.stdin.read()"
+    child = subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.PIPE)
+    clients[0].process = child
+    try:
+        if exited:
+            # Confirm native exit without poll()/wait() filling Popen.returncode.
+            if sys.platform == "win32":
+                import ctypes
+                assert ctypes.windll.kernel32.WaitForSingleObject(
+                    ctypes.c_void_p(int(child._handle)), 5000
+                ) == 0
+            elif hasattr(os, "waitid") and hasattr(os, "WNOWAIT"):
+                os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)
+            else:
+                pytest.skip("requires a non-reaping native exit check")
+        assert child.returncode is None
+        writer[0] = None
+        agent.controllers[THREAD]["failed"] = True
+        clock[0] += 121
+        agent.stopping = True
+        before = store.path.read_bytes()
+        result = agent.step(observe=False)[0]
+        assert result["reason"] == "control_lease_expired"
+        assert clients[0].closed is exited
+        assert (THREAD not in agent.controllers) is exited
+        # Retiring in-process resources must not rewrite an expired capability.
+        assert store.path.read_bytes() == before
+    finally:
+        if child.poll() is None:
+            child.terminate()
+        child.wait(timeout=5)
+        child.stdin.close()
 
 
 @pytest.mark.parametrize("matches", [False, True])

@@ -1,5 +1,26 @@
 # Release notes
 
+## v0.2.26
+
+- Git-attention alerts now queue a deduplicated prompt to the exact existing
+  Codex thread even when the read-only Git check cannot obtain an upstream
+  commit ID. Codex handles the blocker; WatchDog performs no Git mutations.
+  Pending and uncertain deliveries survive restart without a blind resend.
+- Linux automatic controllers reconcile the saved wake ID with its original
+  courier receipt, so a delivered wake does not remain pending indefinitely.
+- Cluster node mode retains Git observation after an idle thread parks. A small
+  shared observation receipt retains the verified node, excludes old parked
+  nodes, and requires fresh native ownership for a handoff. Active or pending
+  work blocks that handoff. Changed foreign history and foreign queue items
+  cannot authorize a wake. Existing Slack parent routing is preserved.
+- Linux controller shutdown checks the actual child process status when an
+  expired lease prevented normal polling. Proven exited children are retired;
+  live or uncertain writers remain protected.
+- Existing profiles, hooks, credentials, mappings and completion cursors remain
+  in place. Shared-home upgrades with ambiguous old node records need fresh
+  native attachment before selecting a Git observer. Automatic migration of
+  an active conversation between login nodes remains unsupported.
+
 ## v0.2.25
 
 - Corrects the Slack mapping API mismatch in the unpublished v0.2.24 candidate
