@@ -1,16 +1,32 @@
-# Codex WatchDog
-
 <p align="center">
   <a href="README.md">English</a> | <a href="README.zh-CN.md">中文</a> | <strong>日本語</strong>
 </p>
 
 <p align="center">
-  <img src="images/parrotDogLogo.png" alt="Codex WatchDog と Parrot Dog のロゴ" width="320">
+  <img src="images/parrotDogLogo.png" alt="Codex WatchDog と Parrot Dog のロゴ" width="160">
 </p>
 
-**自分の Agent を持ち込み、慣れたツールのまま、一つの分散チームとして働く。**
+<h1 align="center">Codex WatchDog</h1>
 
-*ワークフロー移行を必要としない、超軽量なマルチユーザー／マルチエージェント、クロスマシン／クロスプラットフォーム協調レイヤー。*
+<p align="center">
+  <strong>自分の Agent を持ち込み、慣れたツールのまま、一つの分散チームとして働く。</strong><br>
+  <em>ワークフロー移行を必要としない、超軽量なマルチユーザー／マルチエージェント、クロスマシン／クロスプラットフォーム協調レイヤー。</em>
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2e7d32" alt="MIT ライセンス"></a>
+  <a href="docs/PLATFORM_SUPPORT.md#support-matrix"><img src="https://img.shields.io/badge/Windows-x64-44627e" alt="Windows x64 対応"></a>
+  <a href="docs/PLATFORM_SUPPORT.md#support-matrix"><img src="https://img.shields.io/badge/Linux-ARM64%20%2F%20x64-44627e" alt="Linux ARM64 と x64 対応"></a>
+  <a href="docs/PLATFORM_SUPPORT.md#support-matrix"><img src="https://img.shields.io/badge/macOS-preview-a66b00" alt="macOS プレビュー"></a>
+  <br>
+  <a href="#アーキテクチャと設計思想"><img src="https://img.shields.io/badge/sessions-native-355c7d" alt="既存のネイティブ Codex セッションを維持"></a>
+  <a href="#マルチユーザー協調bring-your-own-agents"><img src="https://img.shields.io/badge/collaboration-multi--user%20%2F%20multi--agent-355c7d" alt="マルチユーザー・マルチエージェント協調"></a>
+  <a href="#マルチユーザー協調bring-your-own-agents"><img src="https://img.shields.io/badge/central%20server-not%20required-355c7d" alt="中央サーバーは不要"></a>
+</p>
+
+<p align="center">
+  <a href="#quick-start">クイックスタート</a> · <a href="#アーキテクチャと設計思想">アーキテクチャ</a> · <a href="docs/SETUP.md">設定</a> · <a href="https://github.com/yesunhuang/codex-watchdog/releases">リリース</a>
+</p>
 
 Codex WatchDog は、**既存の** VS Code Codex セッションを対象にした軽量な coordination /
 control fabric です。人、Agent、マシン、通信インターフェースをつなぎますが、チームに

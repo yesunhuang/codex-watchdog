@@ -1,16 +1,32 @@
-# Codex WatchDog
-
 <p align="center">
   <a href="README.md">English</a> | <strong>中文</strong> | <a href="README.ja.md">日本語</a>
 </p>
 
 <p align="center">
-  <img src="images/parrotDogLogo.png" alt="Codex WatchDog 与 Parrot Dog 标志" width="320">
+  <img src="images/parrotDogLogo.png" alt="Codex WatchDog 与 Parrot Dog 标志" width="160">
 </p>
 
-**带上自己的 Agent，继续用熟悉的工具，组成一个分布式团队。**
+<h1 align="center">Codex WatchDog</h1>
 
-*一个无需迁移工作流的超轻量多人、多 Agent、跨机器、跨平台协作层。*
+<p align="center">
+  <strong>带上自己的 Agent，继续用熟悉的工具，组成一个分布式团队。</strong><br>
+  <em>一个无需迁移工作流的超轻量多人、多 Agent、跨机器、跨平台协作层。</em>
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2e7d32" alt="MIT 许可证"></a>
+  <a href="docs/PLATFORM_SUPPORT.md#support-matrix"><img src="https://img.shields.io/badge/Windows-x64-44627e" alt="支持 Windows x64"></a>
+  <a href="docs/PLATFORM_SUPPORT.md#support-matrix"><img src="https://img.shields.io/badge/Linux-ARM64%20%2F%20x64-44627e" alt="支持 Linux ARM64 和 x64"></a>
+  <a href="docs/PLATFORM_SUPPORT.md#support-matrix"><img src="https://img.shields.io/badge/macOS-preview-a66b00" alt="macOS 预览版"></a>
+  <br>
+  <a href="#架构与设计理念"><img src="https://img.shields.io/badge/sessions-native-355c7d" alt="保留现有原生 Codex 会话"></a>
+  <a href="#多人协作bring-your-own-agents"><img src="https://img.shields.io/badge/collaboration-multi--user%20%2F%20multi--agent-355c7d" alt="多用户、多 Agent 协作"></a>
+  <a href="#多人协作bring-your-own-agents"><img src="https://img.shields.io/badge/central%20server-not%20required-355c7d" alt="无需中央服务器"></a>
+</p>
+
+<p align="center">
+  <a href="#快速开始">快速开始</a> · <a href="#架构与设计理念">架构</a> · <a href="docs/SETUP.md">配置</a> · <a href="https://github.com/yesunhuang/codex-watchdog/releases">发行版本</a>
+</p>
 
 Codex WatchDog 是一层面向**现有** VS Code Codex 会话的轻量协调与控制层。
 它负责把人、Agent、机器和通信界面连接起来，但不会要求团队迁移到另一套 agent 平台、
