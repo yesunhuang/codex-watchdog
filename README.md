@@ -47,11 +47,62 @@ centralized or distributed. No single manager or WatchDog server is required.
 
 ![Parrot Dog workflow: Codex asks for help, Slack relays the message, the human replies, and Codex continues](images/parrot_workflow_en.png)
 
+### Single-user, multi-agent workflow
+
+One user can coordinate several existing agents through GitHub and Slack,
+with an optional human or AI manager.
+
+```text
+                         Human / Manager
+                               |
+                  aggregated control surface
+                               |
+                 +-------------+-------------+
+                 |                           |
+              GitHub                       Slack
+        durable direction/reports     quick notify/reply
+                 |                           |
+                 +-------------+-------------+
+                               |
+                           WatchDog
+                     observe / wake / route
+                     relay / notify / handoff
+                               |
+           +-------------------+-------------------+
+           |                   |                   |
+     Codex A (local)     Codex B (Remote-SSH)   Codex C (detached)
+     native session       native session          native session
+           |                   |                   |
+           +-------- checkpoint progress reports --+
+                               |
+                             GitHub
+```
+
+Codex owns Git and writes progress reports; WatchDog detects updates, wakes the
+exact thread and sends notifications. Parrot Dog relays allowlisted Slack replies
+back to that thread. This is one possible arrangement; a central manager or
+WatchDog server is not required.
+
 ## Multi-user collaboration: bring your own agents
 
 WatchDog does not require a team to register every machine and agent under one
 central runtime. Each person can run their own WatchDog on their own machines and
 connect selected agents to the collaboration surfaces the team already shares.
+
+### Multi-user, multi-agent workflow
+
+```text
+        Alice's machines                         Bob's machines
+   +----------------------+                 +----------------------+
+   | Windows / Codex A1   |                 | Linux / Codex B1     |
+   | HPC / Codex A2       |                 | macOS / Codex B2     |
+   +----------+-----------+                 +-----------+----------+
+              |                                         |
+          Alice's dogs                              Bob's dogs
+              |                                         |
+              +------------- GitHub + Slack ------------+
+                               shared team surfaces
+```
 
 Slack notifications include the machine identity so teammates can tell which
 locality produced a message. A dog only appears on a shared Slack surface if its

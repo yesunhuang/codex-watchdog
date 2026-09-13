@@ -45,11 +45,61 @@ machine への接続、VS Code は developer workspace、Codex は conversation 
 
 ![Parrot Dog workflow: Codex asks for help, Slack relays the message, the human replies, and Codex continues](images/parrot_workflow_jp.png)
 
+### シングルユーザー・マルチエージェントのワークフロー
+
+一人のユーザーが GitHub と Slack を通じて複数の既存エージェントを連携させられます。
+必要に応じて、人間や AI を manager にすることもできます。
+
+```text
+                         Human / Manager
+                               |
+                     aggregated control surface
+                               |
+                 +-------------+-------------+
+                 |                           |
+              GitHub                       Slack
+       durable direction / reports    quick notify / reply
+                 |                           |
+                 +-------------+-------------+
+                               |
+                           WatchDog
+                    observe / wake / route
+                    relay / notify / handoff
+                               |
+           +-------------------+-------------------+
+           |                   |                   |
+      Codex A (local)    Codex B (Remote-SSH)  Codex C (detached)
+       native session       native session        native session
+           |                   |                   |
+           +---------- checkpoint reports ---------+
+                               |
+                             GitHub
+```
+
+Codex が Git 操作と進捗報告を担い、WatchDog が更新を検出して正確なスレッドを起動し、
+通知を送ります。Parrot Dog は許可ユーザーの Slack 返信を同じスレッドへ戻します。
+これは構成の一例であり、中央 manager や WatchDog サーバーは必須ではありません。
+
 ## マルチユーザー協調：Bring Your Own Agents
 
 WatchDog は、team がすべての machine と agent を一つの中央 runtime に登録することを要求しません。
 各メンバーは自分の machine 上で自分の WatchDog を動かし、共有したい agent だけを、team がすでに
 使っている collaboration surface に接続できます。
+
+### マルチユーザー・マルチエージェントのワークフロー
+
+```text
+        Alice の machines                        Bob の machines
+   +----------------------+                 +----------------------+
+   | Windows / Codex A1   |                 | Linux / Codex B1     |
+   | HPC / Codex A2       |                 | macOS / Codex B2     |
+   +----------+-----------+                 +-----------+----------+
+              |                                         |
+          Alice's dogs                              Bob's dogs
+              |                                         |
+              +------------- GitHub + Slack ------------+
+                              shared team surfaces
+```
 
 Slack notification には machine identity が含まれるため、team member はどの locality から来た
 message かを区別できます。owner が shared Slack surface に設定した dog だけがそこに現れます。
