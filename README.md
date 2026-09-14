@@ -154,6 +154,12 @@ acceptance limits. VS Code may require Retry or a window reload after handback.
 **Ultra-easy setup:** ask your local Codex to scan this repository and guide you
 through installation and startup step by step.
 
+On a pristine interactive first launch, choose **Slack**, **Feishu/Lark**, **Both**,
+or **Skip**. Send the displayed confirmation phrase to pair your conversation and
+account; no chat/user ID lookup is needed. Existing settings and upgrades suppress
+the prompt. For manual setup, run `codex-watchdog setup-messaging`; see
+[messaging setup](docs/MESSAGING_SETUP.md) for services and recovery.
+
 ### Windows x64
 
 1. Download the latest `codex-watchdog-vX.Y.Z-windows-x64.zip` and

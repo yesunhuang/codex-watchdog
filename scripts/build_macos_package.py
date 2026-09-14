@@ -76,6 +76,8 @@ def main() -> None:
     shutil.copy2(ROOT / "LICENSE", package / "LICENSE")
     shutil.copy2(ROOT / "docs/MACOS_PACKAGE.md", package / "MACOS_PACKAGE.md")
     shutil.copy2(ROOT / "docs/FEISHU_LARK.md", package / "FEISHU_LARK.md")
+    shutil.copy2(ROOT / "docs/MESSAGING_SETUP.md", package / "MESSAGING_SETUP.md")
+    shutil.copy2(ROOT / "docs/SETUP.md", package / "SETUP.md")
     shutil.copy2(ROOT / "THIRD_PARTY_NOTICES.md", package / "THIRD_PARTY_NOTICES.md")
     subprocess.run([
         sys.executable, str(ROOT / "tools/generate_dependency_licenses.py"),

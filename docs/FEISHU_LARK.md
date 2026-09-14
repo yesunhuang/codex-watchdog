@@ -16,14 +16,23 @@ choose the domain that owns your application.
 3. Configure long-connection event delivery and subscribe to
    `im.message.receive_v1`. Publish the application and permission changes to
    your tenant, and open the bot conversation or add it to the chosen group.
-4. Obtain the app's `cli_...` ID, app secret, target conversation's `oc_...` chat
-   ID and permitted people's app-scoped `ou_...` open IDs from the developer
-   console/API explorer. All identifiers must belong to the same app and tenant.
+4. Obtain the app's `cli_...` ID and secret. The setup flow learns the conversation
+   and permitted sender from your confirmation message; no Open ID lookup is needed.
 
 WatchDog uses an authenticated outbound WebSocket. It does not require a public
 callback server. An incoming-webhook bot alone cannot receive these replies.
 
-## Configure the process that runs WatchDog
+## Pair on first use
+
+A pristine interactive launch offers messaging setup automatically. Choose
+Feishu/Lark or Both, enter the app ID/secret and region, then send the displayed
+one-time phrase to the intended bot conversation. Confirm the detected account
+and conversation in the terminal. You can also run `codex-watchdog setup-messaging`.
+See [common setup](MESSAGING_SETUP.md) for credential storage, Skip, services,
+and recovery. Existing or partial provider settings suppress automatic setup;
+upgrades preserve saved pairings and credentials.
+
+## Advanced process configuration
 
 | Variable | Value |
 | --- | --- |

@@ -31,6 +31,7 @@ if [[ -x $packaged_executable ]]; then
     runtime_path=""
 fi
 slack_only=0
+shared_slack_app=0
 dry_run=0
 relay_workspace=""
 
@@ -46,7 +47,7 @@ while (($#)); do
             shift
             ;;
         --shared-slack-app)
-            export CODEX_WATCHDOG_SLACK_REPLY_MODE=poll
+            shared_slack_app=1
             shift
             ;;
         --dry-run)
@@ -94,6 +95,20 @@ else
 fi
 [[ -x $packaged_executable || ( -n ${python_bin:-} && -x $python_bin ) ]] || die "Python 3 is unavailable."
 
+# Use the shared first-use implementation before the saved provider loader.
+# Explicit checks, relay tests, and headless launches never wait for input.
+if ((dry_run == 0)) && [[ -z $relay_workspace && -t 0 && -t 1 ]]; then
+    if [[ -x $packaged_executable ]]; then
+        "$packaged_executable" --runtime "$runtime_path" setup-messaging --auto || exit $?
+    else
+        "$python_bin" "${script_dir}/tools/codex_watchdog.py" --runtime "$runtime_path" setup-messaging --auto || exit $?
+    fi
+fi
+
+if ((shared_slack_app == 1)); then
+    export CODEX_WATCHDOG_SLACK_REPLY_MODE=poll
+fi
+
 security_bin=${CODEX_WATCHDOG_MACOS_SECURITY_BIN:-/usr/bin/security}
 [[ -x $security_bin ]] || die "macOS security executable is unavailable."
 config_dir=${CODEX_WATCHDOG_MACOS_CONFIG_DIR:-"${HOME}/Library/Application Support/CodexWatchdog"}
@@ -110,6 +125,9 @@ initially_set=0
 for name in "${relay_names[@]}"; do
     [[ -n ${!name:-} ]] && ((initially_set += 1))
 done
+if ((initially_set > 0 && initially_set < ${#relay_names[@]})); then
+    die "Slack reply relay configuration is incomplete. Run codex-watchdog setup-messaging --check; saved credentials were not mixed with the explicit environment."
+fi
 
 if [[ -z ${CODEX_WATCHDOG_SLACK_CHANNEL_ID:-} || -z ${CODEX_WATCHDOG_SLACK_ALLOWED_USER_IDS:-} ]]; then
     if [[ -f $config_path ]]; then
@@ -265,8 +283,7 @@ PY
     exit 0
 fi
 
-((configured_count == ${#relay_names[@]})) ||
-    die "Slack reply relay is not configured. Run setup-slack-relay-macos.sh first."
+# The shared CLI also loads Feishu-only profiles and respects a saved Skip.
 
 if [[ -x $packaged_executable ]]; then
     launcher_command=("$packaged_executable")

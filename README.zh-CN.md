@@ -138,6 +138,11 @@ Linux 包覆盖 ARM64 Ubuntu 和 x64 Ubuntu/RHEL 8；准确要求和验收边界
 
 **超简单安装运行：** 让你的本地 Codex 扫描本仓库，并一步步引导你完成安装和启动。
 
+首次交互启动且没有任何消息配置时，可选择 **Slack**、**飞书/Lark**、**两者**或**跳过**。
+向目标机器人会话发送显示的确认短语，即可配对会话和账户，无需查询聊天或用户 ID。
+已有配置及升级不会自动弹出配置向导。也可运行 `codex-watchdog setup-messaging`；
+服务启动和恢复方法见[消息配置指南](docs/MESSAGING_SETUP.md)。
+
 ### Windows x64
 
 1. 从 [GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases) 下载最新

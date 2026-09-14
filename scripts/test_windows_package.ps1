@@ -245,6 +245,15 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Packaged no-argument one-click startup failed."
     }
+    $messagingCheck = (& $executable setup-messaging --check | Out-String) | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0 -or $messagingCheck.state -ne "CONFIGURED") {
+        throw "Previous public profile was not recognized as configured by onboarding detection."
+    }
+    $autoSetupText = (& $executable setup-messaging --auto | Out-String)
+    if ($LASTEXITCODE -ne 0 -or $autoSetupText -notmatch "Messaging is configured" -or
+        (Test-Path -LiteralPath (Join-Path $savedConfigRoot "messaging-setup.json"))) {
+        throw "Upgrade must reuse existing messaging without onboarding or a new marker."
+    }
     if (-not (Test-Path -LiteralPath $profilePath -PathType Leaf)) {
         throw "One-click startup removed the previous release launcher profile."
     }
@@ -297,6 +306,7 @@ try {
         upgrade_profile_source = "previous_public_executable"
         protected_files_unchanged = $true
         one_click_saved_configuration = "reused_without_secret_output"
+        messaging_onboarding = "suppressed_for_actual_previous_public_profile"
     } | ConvertTo-Json -Compress
 } finally {
     foreach ($name in $environmentNames) {

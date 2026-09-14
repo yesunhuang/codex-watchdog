@@ -111,8 +111,11 @@ existing repository and thread first using `workspace-add`; see
 Omit `--manual-only` only when you intend to include automatically discovered
 workspaces as well.
 
-Fresh users can use the included `setup-slack-relay-macos.sh --help` for the
-normal attended Keychain setup. Existing users do not repeat setup.
+Fresh interactive launches offer `setup-messaging` for Slack, Feishu/Lark,
+Both, or Skip, using confirmation messages to learn routing IDs. See
+[messaging setup](MESSAGING_SETUP.md). Existing users keep their working Desktop
+launcher and saved Keychain settings; upgrades do not repeat pairing. The
+included `setup-slack-relay-macos.sh` remains an advanced manual-ID fallback.
 
 The packaged executable also accepts the ordinary CLI commands, including
 `doctor`, `run`, and `hook`. When `--runtime` is absent it reuses the saved

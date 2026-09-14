@@ -145,6 +145,13 @@ WatchDog が提供するのは別の mechanism、つまり**正しい machine / 
 **最も簡単な方法：** local Codex にこの repository を scan させ、installation と startup を
 step-by-step で案内してもらってください。
 
+メッセージ設定が一切ない状態で初めて対話起動すると、**Slack**、**Feishu/Lark**、
+**両方**、**スキップ**を選べます。表示された確認フレーズを目的のボット会話へ送ると、
+会話とアカウントを登録できます。チャットやユーザー ID の検索は不要です。
+既存設定がある場合や更新時には自動で設定を開始しません。手動では
+`codex-watchdog setup-messaging` を実行します。サービスと復旧手順は
+[メッセージ設定ガイド](docs/MESSAGING_SETUP.md)を参照してください。
+
 ### Windows x64
 
 1. [GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases) から最新の

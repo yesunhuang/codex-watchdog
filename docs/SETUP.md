@@ -608,7 +608,14 @@ messages, unknown threads, unauthorized users, and duplicate events are
 ignored. Durable relay receipts contain hashes and routing identifiers, never
 Slack tokens or reply text.
 
-Use one Slack app and one running WatchDog Socket Mode listener:
+First-use interactive launch offers [messaging setup](MESSAGING_SETUP.md).
+Choose Slack or Both, enter the two tokens, and send the displayed confirmation
+phrase to your intended channel. Confirm the detected conversation/account in
+the terminal; no manual channel/member ID lookup is needed. The same flow is
+available with `codex-watchdog setup-messaging`. Existing settings suppress the
+automatic prompt and remain unchanged.
+
+Prepare one Slack app:
 
 1. Enable **Socket Mode** and create an app-level token with
    `connections:write`.
@@ -616,7 +623,7 @@ Use one Slack app and one running WatchDog Socket Mode listener:
    `channels:history` and subscribe to the `message.channels` bot event. For a
    private channel, use `groups:history` and `message.groups` instead.
 3. Reinstall the app after changing scopes, invite the bot to the selected
-   channel, then copy that channel ID and the operator's Slack member ID. Use a
+   channel. The confirmation message discovers that channel and operator. Use a
    channel ID beginning with `C` or `G`; one-to-one `D` identifiers are not
    supported by this relay.
 
@@ -633,7 +640,12 @@ Socket Mode connection is opened. Saved tokens/channel settings are reused.
 Use a new notification after switching transports; historical Socket Mode
 mappings and receipts are retained separately to avoid replaying old replies.
 
-Install the relay dependency. The direct form also works with older pip
+### Advanced manual Slack configuration
+
+For explicitly managed or partial existing configurations, the manual helpers
+below remain available. They require the channel and permitted member IDs.
+Packages already include the dependency. For a source checkout, install the relay
+dependency. The direct form also works with older pip
 versions that cannot perform a PEP 517 editable install:
 
 ```powershell

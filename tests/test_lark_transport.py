@@ -140,6 +140,33 @@ def provider():
         instance.close()
 
 
+def test_setup_pairs_through_real_sdk_without_posting_or_codex_mapping(provider, tmp_path, monkeypatch):
+    from codex_watchdog import messaging_pairing
+    from codex_watchdog.messaging_profile import PREFIX
+    from codex_watchdog.storage import FileLock
+    def connection(config, callback):
+        return LarkConnection(config, callback, timeout=2, channel=provider.channel())
+    monkeypatch.setattr(messaging_pairing, "LarkConnection", connection)
+    output = []
+    def emit_confirmation(text):
+        output.append(text)
+        if text.startswith("WATCHDOG-PAIR-"):
+            socket = provider.connections.get(timeout=5)
+            payload = provider.event(text)
+            payload["event"]["message"].pop("root_id")
+            payload["event"]["message"].pop("parent_id")
+            payload["event"]["message"]["create_time"] = str(int(time.time() * 1000))
+            provider.emit(socket, payload)
+    values = {PREFIX + "LARK_" + k: v for k, v in dict(APP_ID=provider.config.app_id,
+        APP_SECRET=provider.config.app_secret, DOMAIN="feishu").items()}
+    paired = messaging_pairing.pair_provider("lark", values, tmp_path, read=lambda _: "yes", output=emit_confirmation)
+    assert paired["chat_id"] == CHAT and paired["allowed_user_ids"] == [USER]
+    assert not any("/im/v1/messages" in path for path, _, _ in provider.posts)
+    assert not (tmp_path / "lark").exists() and not (tmp_path / "inbox").exists()
+    with FileLock(tmp_path / "locks" / ("lark-listener-" + provider.config.scope + ".lock")):
+        pass  # Pairing releases the normal listener lock.
+
+
 def test_real_sdk_auth_create_reply_and_stable_idempotency_uuid(provider):
     api = provider.api()
     assert api.send("  literal \u2603\n", "operation") == {"chat_id": CHAT, "message_id": ROOT_MESSAGE}

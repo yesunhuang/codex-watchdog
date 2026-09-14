@@ -93,6 +93,8 @@ def main() -> None:
     shutil.copy2(executable, package / "codex-watchdog")
     for source, target in (("LICENSE", "LICENSE"), ("docs/LINUX_PACKAGE.md", "LINUX_PACKAGE.md"),
                            ("docs/FEISHU_LARK.md", "FEISHU_LARK.md"),
+                           ("docs/MESSAGING_SETUP.md", "MESSAGING_SETUP.md"),
+                           ("docs/SETUP.md", "SETUP.md"),
                            ("THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md")):
         shutil.copy2(ROOT / source, package / target)
     subprocess.run([
