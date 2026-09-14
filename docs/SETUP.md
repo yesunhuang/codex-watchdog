@@ -2,6 +2,9 @@
 
 [Back to the project README](../README.md)
 
+For Feishu (mainland China) or international Lark, use the
+[Feishu/Lark notification and reply guide](FEISHU_LARK.md).
+
 <p align="center">
   <img src="../images/parrotDogLogo.png" alt="Codex WatchDog and Parrot Dog logo" width="320">
 </p>

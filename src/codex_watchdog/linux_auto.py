@@ -160,7 +160,7 @@ class LinuxAutoWatchdog:
             relay = getattr(service, "slack_reply_relay", None)
             if relay is not None:
                 relay.thread_store.cache_mappings(
-                    store.slack_mappings(),
+                    store.relay_mappings(),
                     SlackRelayTarget(canonical_id, store.thread_id, "process_local"),
                 )
                 relay.start()

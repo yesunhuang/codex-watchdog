@@ -79,6 +79,7 @@ def main() -> None:
         "--add-data", str(metadata) + os.pathsep + metadata_name,
         "--collect-submodules", "msal_extensions",
         "--collect-submodules", "slack_bolt", "--collect-submodules", "slack_sdk",
+        "--collect-submodules", "lark_channel",
         "--collect-data", "certifi", "--exclude-module", "tkinter",
         str(ROOT / "packaging/linux_entry.py"),
     ], cwd=ROOT, env=build_env, check=True)
@@ -91,6 +92,7 @@ def main() -> None:
     package.mkdir()
     shutil.copy2(executable, package / "codex-watchdog")
     for source, target in (("LICENSE", "LICENSE"), ("docs/LINUX_PACKAGE.md", "LINUX_PACKAGE.md"),
+                           ("docs/FEISHU_LARK.md", "FEISHU_LARK.md"),
                            ("THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md")):
         shutil.copy2(ROOT / source, package / target)
     subprocess.run([
@@ -109,6 +111,8 @@ def main() -> None:
     minimum_glibc = verify_glibc_requirements(
         [executable, *(Path(original) for _, original, _ in binaries)], architecture)
     add_native_inventory(package / "THIRD_PARTY_LICENSES", binaries, native_runtime=native_runtime)
+    subprocess.run([sys.executable, str(ROOT / "scripts/test_lark_package.py"),
+                    "--package", str(package), "--expected-version", version], check=True)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     files = {path.relative_to(package).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
              for path in package.rglob("*") if path.is_file()}

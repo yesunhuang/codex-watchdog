@@ -526,13 +526,52 @@ class ControlStore:
     def slack_mappings(self):
         return [control_read_json(path) for path in sorted((self.directory / "slack-threads").glob("*.json"))]
 
+    @staticmethod
+    def _lark_mapping(entry, event_id=None):
+        if (not isinstance(entry, dict) or entry.get("provider") != "lark"
+                or re.fullmatch(r"[0-9a-f]{64}", str(entry.get("scope", ""))) is None
+                or re.fullmatch(r"oc_[A-Za-z0-9_-]{8,128}", str(entry.get("chat_id", ""))) is None
+                or re.fullmatch(r"om_[A-Za-z0-9_-]{8,128}", str(entry.get("message_id", ""))) is None
+                or re.fullmatch(r"[0-9a-f]{64}", str(entry.get("event_fingerprint", ""))) is None
+                or event_id is not None and entry.get("event_fingerprint") != event_id):
+            raise ControlError("control_lark_mapping_invalid")
+        value = dict(schema_version=1, **{name: entry[name] for name in (
+            "provider", "scope", "chat_id", "message_id", "event_fingerprint")})
+        key = hashlib.sha256((value["scope"] + "\0" + value["chat_id"] + "\0" + value["message_id"]).encode()).hexdigest()
+        return key, value
+
+    def merge_relay_mappings(self, value, entries, event_id=None):
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("provider") == "lark":
+                key, mapping = self._lark_mapping(entry, event_id)
+                path = self.directory / "lark-threads" / (key + ".json")
+                if path.exists():
+                    if control_read_json(path) != mapping:
+                        raise ControlError("control_lark_mapping_collision")
+                else:
+                    control_atomic_json(path, mapping)
+            elif isinstance(entry, dict) and entry.get("provider") in (None, "slack"):
+                self.merge_slack_mappings(value, [entry], event_id)
+            else:
+                raise ControlError("control_relay_provider_invalid")
+
+    def relay_mappings(self):
+        mappings = self.slack_mappings()
+        for path in sorted((self.directory / "lark-threads").glob("*.json")):
+            stored = control_read_json(path)
+            key, mapping = self._lark_mapping(stored)
+            if stored != mapping or path.stem != key:
+                raise ControlError("control_lark_mapping_invalid")
+            mappings.append(mapping)
+        return mappings
+
     def finish_notification(self, token, event_id, operation_id, result, relay_mappings=()):
         path = self.effect_path("notification", event_id)
         with self.guard(token, external_id=operation_id) as value:
             receipt = control_read_json(path)
             if receipt.get("operation_id") != operation_id:
                 raise ControlError("control_external_effect_mismatch")
-            self.merge_slack_mappings(value, relay_mappings, event_id)
+            self.merge_relay_mappings(value, relay_mappings, event_id)
             # Retain routing before clearing the external-send barrier. A crash
             # cannot publish a completed send while losing its reply address.
             control_atomic_json(self.path, value)

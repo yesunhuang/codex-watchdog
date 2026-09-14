@@ -50,6 +50,12 @@ the acceptance script. A fresh install does not replace the profile/runtime
 upgrade test. Test the x64 Linux package on the oldest supported glibc platform.
 Do not stop production processes to run package tests; use disposable profiles.
 
+Each build recipe also runs `scripts/test_lark_package.py` against the frozen
+executable. This checks both Feishu/Lark domains, pinned SDK/protobuf imports and
+required SDK license notices without provider credentials, installed profiles,
+source Python or a provider connection. It complements the normal platform
+acceptance scripts and real-account relay testing.
+
 Before publishing, verify archive hashes, version and source revision, embedded
 Windows icon, preserved upgrade state, and the absence of runtime data,
 credentials, private paths and development history. Use

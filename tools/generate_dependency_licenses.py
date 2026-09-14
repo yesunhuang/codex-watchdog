@@ -17,7 +17,7 @@ from packaging.utils import canonicalize_name
 
 
 ROOT_DISTRIBUTION = "codex-watchdog"
-LICENSE_PREFIXES = ("LICENSE", "LICENCE", "COPYING", "NOTICE")
+LICENSE_PREFIXES = ("LICENSE", "LICENCE", "COPYING", "NOTICE", "THIRD_PARTY_NOTICES")
 
 
 def _active_requirements(distribution: metadata.Distribution) -> Iterable[str]:

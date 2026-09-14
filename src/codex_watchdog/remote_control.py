@@ -151,7 +151,7 @@ def run_control(request):
                         value["remote_state"] = dict(initial, session_id=thread)
                     else:
                         value["remote_state"] = None
-                store.merge_slack_mappings(value, [entry for entry in control.get("relay_mappings", ())
+                store.merge_relay_mappings(value, [entry for entry in control.get("relay_mappings", ())
                                                    if isinstance(entry, dict) and entry.get("thread_id") == thread])
                 control_atomic_json(store.path, value)
     elif action == "detach":
@@ -178,7 +178,7 @@ def run_control(request):
               "control": {"token": token, "owner_state": value["state"], "epoch": value["epoch"],
                           "state": value.get("remote_state"), "target": value.get("remote_target"),
                           "runtime_path": value.get("runtime_path"),
-                          "relay_mappings": store.slack_mappings(),
+                          "relay_mappings": store.relay_mappings(),
                           "external_effect_pending": value["external_effect"] is not None}}
     if action in ("save", "detach", "observe") or token is None:
         return result
@@ -277,7 +277,7 @@ def _notify_with_receipt(event, notifier, prepare, finish):
             return dict(result, status=status, duplicate=True)
         raise ControlError("control_notification_outcome_uncertain")
     result = notifier.notify(event).to_dict()
-    mappings = getattr(notifier, "slack_thread_store", None)
+    mappings = getattr(notifier, "relay_thread_store", getattr(notifier, "slack_thread_store", None))
     mappings = mappings.notification_mappings(fingerprint) if mappings is not None else ()
     finish(fingerprint, prepared["operation_id"], result, mappings)
     return result

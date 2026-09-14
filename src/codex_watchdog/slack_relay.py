@@ -17,37 +17,19 @@ from .slack_mapping import (
     valid_slack_user_id,
 )
 from .storage import FileLock
-from .control_state import ControlError, control_read_json, control_root
+from .control_state import ControlError, control_read_json
 from .remote_control import RemoteControlClient
 from .notifications import NotificationEvent
 from .slack_presentation import slack_message_with_host
+from .relay import ExactThreadRelay, ReplyResult as SlackReplyResult
 
 
 _DELIVERED_STATES = frozenset({"enqueued", "consumed_or_started", "started"})
 
 
-@dataclass(frozen=True)
-class SlackReplyResult:
-    status: str
-    workspace_id: Optional[str] = None
-    instruction_id: Optional[str] = None
-    delivery_status: Optional[str] = None
-    duplicate: bool = False
-    error_sha256: Optional[str] = None
-    control: Optional[tuple] = field(default=None, repr=False, compare=False)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "status": self.status,
-            "workspace_id": self.workspace_id,
-            "instruction_id": self.instruction_id,
-            "delivery_status": self.delivery_status,
-            "duplicate": self.duplicate,
-            "error_sha256": self.error_sha256,
-        }
 
 
-class SlackReplyRelay:
+class SlackReplyRelay(ExactThreadRelay):
     """Relay allowlisted replies from mapped Slack threads to exact Codex threads."""
 
     def __init__(
@@ -282,72 +264,7 @@ class SlackReplyRelay:
             delivery_status=delivery_status,
         )
 
-    def _controlled_reply(self, mapping, event_key, instruction_id, text):
-        target = mapping.target
-        if target.execution_locality == "remote_ssh":
-            adapter = self.remote_ssh_adapter
-            if not getattr(adapter, "supports_control", False):
-                return None
-            remote = RemoteSshTarget(target.remote_authority, target.remote_repo_path,
-                                     target.remote_storage_key, (target.thread_id,))
-        else:
-            codex_home = getattr(self.queue_dispatcher, "codex_home", None)
-            if codex_home is None:
-                return None
-            path = control_root(codex_home) / target.thread_id / "owner.json"
-            if not path.exists():
-                return None
-            value = control_read_json(path)
-            from .linux_auto import HostRemoteAdapter
-            adapter = HostRemoteAdapter(codex_home)
-            remote = RemoteSshTarget("ssh-remote+localhost", value["repo_path"], "0" * 32, (target.thread_id,))
-        # Preserve an old runtime's terminal/uncertain reply receipt. The new
-        # authoritative relay journal must not resurrect a pre-upgrade request.
-        old = self.thread_store.lookup_reply(event_key)
-        if old is not None:
-            return SlackReplyResult("duplicate", target.workspace_id, instruction_id,
-                                     old.get("delivery_status"), duplicate=True)
-        probe = adapter.probe(remote, control=dict(action="relay", thread_id=target.thread_id),
-                              wake=dict(instruction_id=instruction_id, prompt=text))
-        if probe.get("legacy") is True:
-            return None
-        if probe.get("status") != "ok":
-            return SlackReplyResult("deferred", target.workspace_id, instruction_id,
-                                     probe.get("reason", "control_transport_unavailable"))
-        delivery = probe.get("wake", {}).get("state", "uncertain")
-        control = RemoteControlClient(adapter, self.runtime)
-        return SlackReplyResult(
-            "duplicate" if probe.get("duplicate") else "queued" if delivery in _DELIVERED_STATES else "uncertain",
-            target.workspace_id, instruction_id, delivery, duplicate=bool(probe.get("duplicate")),
-            control=(control, remote, probe["control"]["token"]),
-        )
 
-    def _dispatch(
-        self, mapping: SlackThreadMapping, instruction_id: str, text: str
-    ) -> str:
-        target = mapping.target
-        if target.execution_locality == "process_local":
-            return self.queue_dispatcher.dispatch(
-                target.thread_id, instruction_id, text, "slack_reply",
-            ).status
-        assert target.remote_authority is not None
-        assert target.remote_repo_path is not None
-        assert target.remote_storage_key is not None
-        remote_target = RemoteSshTarget(
-            target.remote_authority,
-            target.remote_repo_path,
-            target.remote_storage_key,
-            expected_session_ids=(target.thread_id,),
-        )
-        probe = self.remote_ssh_adapter.probe(
-            remote_target, wake={"instruction_id": instruction_id, "prompt": text},
-        )
-        if probe.get("status") != "ok":
-            return str(probe.get("reason", "remote_adapter_unavailable"))
-        wake = probe.get("wake")
-        if not isinstance(wake, dict):
-            return "remote_wake_missing"
-        return str(wake.get("state", "uncertain"))
 
     @staticmethod
     def _event_key(event: Dict[str, Any], event_id: Optional[str]) -> str:
@@ -368,14 +285,3 @@ class SlackReplyRelay:
                 "blindly resend this reply."
             )
         return None
-
-    @staticmethod
-    def _error_digest(error: Exception) -> str:
-        error_type = f"{type(error).__module__}.{type(error).__qualname__}"
-        try:
-            detail = str(error)
-        except Exception:
-            detail = ""
-        return sha256_text(
-            json.dumps(["slack_reply_dispatch_failed", error_type, detail])
-        )

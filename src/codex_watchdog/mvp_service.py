@@ -31,6 +31,7 @@ from .service import (
 )
 from .slack_mapping import SlackRelayTarget
 from .slack_relay import SlackReplyRelay
+from .relay import reply_relay_from_config
 from .storage import InstructionStore, StoreBusyError, snapshot_state
 from .workspace_discovery import EffectiveWorkspaceCatalog
 from .workspace_registry import TrackedWorkspace, WorkspaceRegistry
@@ -196,7 +197,7 @@ class MvpWatchdogService:
         self.slack_reply_relay = (
             slack_reply_relay
             if slack_reply_relay is not None
-            else SlackReplyRelay.from_notification_config(
+            else reply_relay_from_config(
                 runtime,
                 notifier_config,
                 queue_dispatcher=self.queue_dispatcher,

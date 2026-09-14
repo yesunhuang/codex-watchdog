@@ -23,6 +23,8 @@ from .slack_mapping import (
     valid_slack_timestamp,
     valid_slack_user_id,
 )
+from .lark_transport import LarkApi, LarkConfig
+from .lark_mapping import LarkThreadStore
 from .storage import FileLock, InstructionStore
 from .control_context import current_effect
 
@@ -187,10 +189,14 @@ class NotificationConfig:
     windows_message_enabled: bool = field(default=False, repr=False)
     windows_message_target: Optional[str] = field(default=None, repr=False)
     timeout_seconds: float = field(default=10.0, repr=False)
+    lark: LarkConfig = field(default_factory=LarkConfig, repr=False)
+    interactive_transport: Optional[str] = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.slack_reply_mode not in ("socket", "poll"):
             raise ValueError("Slack reply mode must be socket or poll")
+        if self.interactive_transport not in (None, "slack", "lark"):
+            raise ValueError("interactive transport must be slack or lark")
         if not 1 <= self.smtp_port <= 65535:
             raise ValueError("SMTP port must be from 1 to 65535")
         if self.smtp_security not in _SMTP_SECURITY_VALUES:
@@ -223,6 +229,8 @@ class NotificationConfig:
         if windows_target is None and windows_enabled:
             windows_target = _optional_environment_value(source, "USERNAME")
         return cls(
+            lark=LarkConfig.from_environment(source),
+            interactive_transport=_optional_environment_value(source, "CODEX_WATCHDOG_INTERACTIVE_TRANSPORT"),
             slack_webhook_url=_optional_environment_value(source, SLACK_WEBHOOK_ENV),
             slack_bot_token=_optional_environment_value(source, SLACK_BOT_TOKEN_ENV),
             slack_app_token=_optional_environment_value(source, SLACK_APP_TOKEN_ENV),
@@ -255,6 +263,16 @@ class NotificationConfig:
                 name=NOTIFICATION_TIMEOUT_ENV,
             ),
         )
+
+    @property
+    def selected_interactive_transport(self) -> str:
+        if self.interactive_transport is not None:
+            return self.interactive_transport
+        return "lark" if self.lark.present and not self.slack_configured else "slack"
+
+    @property
+    def interactive_relay_configured(self) -> bool:
+        return self.lark.relay_configured if self.selected_interactive_transport == "lark" else self.slack_relay_configured
 
     @property
     def slack_configured(self) -> bool:
@@ -316,6 +334,8 @@ class NotificationConfig:
     @property
     def configuration_issues(self) -> Tuple[str, ...]:
         issues = []
+        if (self.lark.present or self.interactive_transport == "lark") and not self.lark.configured:
+            issues.append("lark_configuration_incomplete")
         relay_values_present = any(
             (
                 self.slack_bot_token,
@@ -348,6 +368,8 @@ class NotificationConfig:
             "NotificationConfig("
             f"slack_configured={self.slack_configured!r}, "
             f"slack_relay_configured={self.slack_relay_configured!r}, "
+            f"interactive_transport={self.selected_interactive_transport!r}, "
+            f"lark_configured={self.lark.configured!r}, "
             f"smtp_configured={self.smtp_configured!r}, "
             f"windows_message_configured={self.windows_message_configured!r}, "
             f"timeout_seconds={self.timeout_seconds!r})"
@@ -518,6 +540,8 @@ class EnvironmentNotifier:
         message_runner: Optional[MessageRunner] = None,
         atomic_writer: Optional[AtomicWriter] = None,
         slack_thread_store: Optional[SlackThreadStore] = None,
+        lark_api: Any = None,
+        lark_thread_store: Any = None,
     ) -> None:
         if config is not None and environment is not None:
             raise ValueError("provide notification config or environment, not both")
@@ -557,6 +581,13 @@ class EnvironmentNotifier:
         if slack_thread_store is None and self.config.slack_reply_mode == "poll":
             from .slack_poll import SlackPollingThreadStore
             self.slack_thread_store = SlackPollingThreadStore(runtime)
+        self.lark_api = lark_api
+        self.lark_thread_store = lark_thread_store or (
+            LarkThreadStore(runtime, self.config.lark.scope) if self.config.lark.configured else None)
+
+    @property
+    def relay_thread_store(self):
+        return self.lark_thread_store if self.config.selected_interactive_transport == "lark" else self.slack_thread_store
 
     def notify(self, event: NotificationEvent) -> NotificationResult:
         with current_effect("notification"):
@@ -649,7 +680,16 @@ class EnvironmentNotifier:
         attempts = []
         failures = []
 
-        if self.config.slack_configured:
+        if self.config.selected_interactive_transport == "lark" and self.config.lark.configured:
+            attempts.append("lark")
+            try:
+                self._send_lark(event)
+            except Exception as exc:
+                failures.append(self._error_digest("lark_failed", exc))
+            else:
+                return _DeliveryResult("sent", "lark", tuple(attempts), None)
+
+        if self.config.selected_interactive_transport == "slack" and self.config.slack_configured:
             attempts.append("slack")
             try:
                 self._send_slack(event)
@@ -758,6 +798,24 @@ class EnvironmentNotifier:
             return
         assert self.config.slack_webhook_url is not None
         self._send_slack_webhook(text)
+
+    def _send_lark(self, event: NotificationEvent) -> None:
+        target = event.relay_target if self.config.lark.relay_configured else None
+        text = f"{event.subject.strip()}\n{event.message}"
+        if target is not None:
+            text += "\n\nReply to this message to send text to this exact existing Codex thread."
+        fingerprint = event.event_fingerprint()
+        payload_digest = sha256_text(json.dumps(
+            [text, self.config.lark.chat_id, target.to_dict() if target else None],
+            ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+        store = self.lark_thread_store
+        if store.prepare_notification(fingerprint, payload_digest) is not None:
+            return
+        api = self.lark_api or LarkApi(self.config.lark, self.config.timeout_seconds)
+        result = api.send(text, fingerprint)
+        if result.get("chat_id") != self.config.lark.chat_id:
+            raise RuntimeError("lark_response_destination_mismatch")
+        store.finish_notification(fingerprint, result["chat_id"], result["message_id"], target)
 
     def _send_slack_webhook(self, text: str) -> None:
         assert self.config.slack_webhook_url is not None
