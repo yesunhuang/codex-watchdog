@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 from pathlib import Path
 import re
@@ -16,6 +16,13 @@ _DELIVERED_STATES = frozenset({"enqueued", "consumed_or_started", "started"})
 
 
 def reply_relay_from_config(runtime, config, *, queue_dispatcher, remote_ssh_adapter):
+    if getattr(config, "selected_interactive_transport", "slack") == "both":
+        relays = [reply_relay_from_config(
+            runtime, replace(config, interactive_transport=provider),
+            queue_dispatcher=queue_dispatcher, remote_ssh_adapter=remote_ssh_adapter)
+            for provider in ("slack", "lark")]
+        relays = [relay for relay in relays if relay is not None]
+        return CombinedReplyRelays(relays) if relays else None
     if getattr(config, "selected_interactive_transport", "slack") == "lark":
         from .lark_relay import LarkReplyRelay
         if not config.lark.relay_configured:
@@ -25,6 +32,53 @@ def reply_relay_from_config(runtime, config, *, queue_dispatcher, remote_ssh_ada
     from .slack_relay import SlackReplyRelay
     return SlackReplyRelay.from_notification_config(
         runtime, config, queue_dispatcher=queue_dispatcher, remote_ssh_adapter=remote_ssh_adapter)
+
+
+class CombinedThreadStores:
+    """Expose both providers' existing mapping envelopes to the ownership fence."""
+
+    def __init__(self, *stores):
+        self.stores = tuple(store for store in stores if store is not None)
+
+    def notification_mappings(self, fingerprint):
+        return [entry for store in self.stores for entry in store.notification_mappings(fingerprint)]
+
+    def has_notification_mapping(self, fingerprint):
+        return bool(self.notification_mappings(fingerprint))
+
+    def mappings_for_threads(self, thread_ids):
+        return [entry for store in self.stores for entry in store.mappings_for_threads(thread_ids)]
+
+    def cache_mappings(self, entries, target):
+        entries = tuple(entries)
+        for store in self.stores:
+            store.cache_mappings(entries, target)
+
+
+class CombinedReplyRelays:
+    """Two existing provider listeners, sharing one monitor and Codex dispatcher."""
+
+    def __init__(self, relays):
+        self.relays = tuple(relays)
+        self.thread_store = CombinedThreadStores(*(relay.thread_store for relay in self.relays))
+
+    def start(self):
+        try:
+            for relay in self.relays:
+                relay.start()
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self):
+        failure = None
+        for relay in reversed(self.relays):
+            try:
+                relay.close()
+            except Exception as error:
+                failure = error
+        if failure is not None:
+            raise failure
 
 _REMOTE_AUTHORITY = re.compile(
     r"^ssh-remote\+[A-Za-z0-9](?:[A-Za-z0-9._-]{0,251}[A-Za-z0-9])?$"

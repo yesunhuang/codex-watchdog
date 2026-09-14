@@ -372,6 +372,78 @@ if ($slackRelayConfigured) {
 }
 Remove-Variable slackAllowedUsers
 
+$larkSource = "not_configured"
+$larkCoreNames = @("CODEX_WATCHDOG_LARK_APP_ID", "CODEX_WATCHDOG_LARK_APP_SECRET", "CODEX_WATCHDOG_LARK_CHAT_ID")
+$larkCoreCount = @($larkCoreNames | Where-Object {
+    -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_, "Process"))
+}).Count
+if ($larkCoreCount -gt 0 -and $larkCoreCount -ne 3) {
+    throw "Feishu/Lark environment configuration is incomplete; saved credentials were not mixed into it."
+}
+if ($larkCoreCount -eq 3) {
+    $larkSource = "environment"
+} elseif (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+    $larkDirectory = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "CodexWatchdog"))
+    $larkProfile = Join-Path $larkDirectory "lark-relay.json"
+    if (Test-Path -LiteralPath $larkProfile -PathType Leaf) {
+        $storedLark = Get-Content -LiteralPath $larkProfile -Raw | ConvertFrom-Json
+        if ($storedLark.schema_version -isnot [int] -or $storedLark.schema_version -ne 1 -or
+            $storedLark.domain -cnotin @("feishu", "lark") -or
+            $storedLark.app_id -cnotmatch '^cli_[A-Za-z0-9_-]{8,128}$' -or
+            $storedLark.chat_id -cnotmatch '^oc_[A-Za-z0-9_-]{8,128}$' -or
+            $storedLark.allowed_user_ids -isnot [array] -or
+            @($storedLark.allowed_user_ids | Where-Object { $_ -cnotmatch '^ou_[A-Za-z0-9_-]{8,128}$' }).Count -gt 0 -or
+            $storedLark.interactive_transport -cnotin @("slack", "lark", "both") -or
+            [string]::IsNullOrWhiteSpace([string]$storedLark.credential_path) -or
+            [IO.Path]::IsPathRooted([string]$storedLark.credential_path)) {
+            throw "The saved Feishu/Lark launch configuration is invalid; it has been preserved."
+        }
+        $larkCredentialPath = [IO.Path]::GetFullPath((Join-Path $larkDirectory $storedLark.credential_path))
+        if (-not $larkCredentialPath.StartsWith($larkDirectory + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "The saved Feishu/Lark credential path is outside the current-user store."
+        }
+        if (-not [string]::IsNullOrWhiteSpace($env:CODEX_WATCHDOG_LARK_DOMAIN) -and
+            $env:CODEX_WATCHDOG_LARK_DOMAIN -cne $storedLark.domain) {
+            throw "The Feishu/Lark domain override does not match the saved app."
+        }
+        if (-not [string]::IsNullOrWhiteSpace($env:CODEX_WATCHDOG_LARK_ALLOWED_USER_IDS)) {
+            throw "Use a complete environment configuration to override the saved Feishu/Lark allowlist."
+        }
+        $env:CODEX_WATCHDOG_LARK_APP_SECRET = Import-DpapiSecret -Path $larkCredentialPath `
+            -ExpectedUserName $storedLark.app_id -Description "Feishu/Lark app"
+        $env:CODEX_WATCHDOG_LARK_APP_ID = $storedLark.app_id
+        $env:CODEX_WATCHDOG_LARK_DOMAIN = $storedLark.domain
+        $env:CODEX_WATCHDOG_LARK_CHAT_ID = $storedLark.chat_id
+        $env:CODEX_WATCHDOG_LARK_ALLOWED_USER_IDS = @($storedLark.allowed_user_ids) -join ","
+        if ([string]::IsNullOrWhiteSpace($env:CODEX_WATCHDOG_INTERACTIVE_TRANSPORT)) {
+            $env:CODEX_WATCHDOG_INTERACTIVE_TRANSPORT = $storedLark.interactive_transport
+        }
+        $larkSource = "encrypted_store"
+        Remove-Variable storedLark,larkCredentialPath
+    }
+}
+if ($larkSource -ne "not_configured") {
+    if ([string]::IsNullOrWhiteSpace($env:CODEX_WATCHDOG_LARK_DOMAIN)) {
+        $env:CODEX_WATCHDOG_LARK_DOMAIN = "feishu"
+    }
+    if ($env:CODEX_WATCHDOG_LARK_DOMAIN -cnotin @("feishu", "lark") -or
+        $env:CODEX_WATCHDOG_LARK_APP_ID -cnotmatch '^cli_[A-Za-z0-9_-]{8,128}$' -or
+        $env:CODEX_WATCHDOG_LARK_CHAT_ID -cnotmatch '^oc_[A-Za-z0-9_-]{8,128}$' -or
+        [string]::IsNullOrWhiteSpace($env:CODEX_WATCHDOG_LARK_APP_SECRET) -or
+        @(([string]$env:CODEX_WATCHDOG_LARK_ALLOWED_USER_IDS -split '[,;\s]+' |
+            Where-Object { $_ -and $_ -cnotmatch '^ou_[A-Za-z0-9_-]{8,128}$' })).Count -gt 0) {
+        throw "Feishu/Lark configuration is invalid."
+    }
+}
+if (-not [string]::IsNullOrWhiteSpace($env:CODEX_WATCHDOG_INTERACTIVE_TRANSPORT) -and
+    $env:CODEX_WATCHDOG_INTERACTIVE_TRANSPORT -cnotin @("slack", "lark", "both")) {
+    throw "Interactive transport must be slack, lark or both."
+}
+if ($env:CODEX_WATCHDOG_INTERACTIVE_TRANSPORT -ceq "both" -and
+    ($larkSource -eq "not_configured" -or ($slackSource -eq "not_configured" -and -not $slackRelayConfigured))) {
+    throw "Both messaging providers must be configured for dual delivery."
+}
+
 $smtpConfigured = (
     -not [string]::IsNullOrWhiteSpace($env:CODEX_WATCHDOG_SMTP_HOST) -and
     -not [string]::IsNullOrWhiteSpace($env:CODEX_WATCHDOG_SMTP_FROM) -and
@@ -411,6 +483,11 @@ $summary = [pscustomobject][ordered]@{
     smtp_configured = $smtpConfigured
     duo_fallback = $duoSource
     runner = $watchdogRunnerSource
+}
+if ($larkSource -ne "not_configured") {
+    $summary | Add-Member -NotePropertyName lark -NotePropertyValue $larkSource
+    $summary | Add-Member -NotePropertyName lark_domain -NotePropertyValue $env:CODEX_WATCHDOG_LARK_DOMAIN
+    $summary | Add-Member -NotePropertyName interactive_transport -NotePropertyValue $env:CODEX_WATCHDOG_INTERACTIVE_TRANSPORT
 }
 
 if ($DryRun) {

@@ -208,6 +208,7 @@ Linux 的 Slack 回复使用 `CODEX_WATCHDOG_SLACK_REPLY_MODE=poll`，并配置�
 自动迁移。持久启动、原生运行时隔离和已有安装的限制见[节点设置](docs/LINUX_NODE_SETUP.md)。
 
 飞书和国际版 Lark 也支持发送通知，并将纯文本回复转发到原有 Codex 会话。
+设置 `CODEX_WATCHDOG_INTERACTIVE_TRANSPORT=both` 可与 Slack 同时使用。
 请按照[飞书/Lark 配置指南](docs/FEISHU_LARK.md)选择正确的区域并设置获准用户。
 安装包已包含 SDK；切换通知渠道时保留原有 Slack 设置。
 

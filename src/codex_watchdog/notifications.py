@@ -195,8 +195,8 @@ class NotificationConfig:
     def __post_init__(self) -> None:
         if self.slack_reply_mode not in ("socket", "poll"):
             raise ValueError("Slack reply mode must be socket or poll")
-        if self.interactive_transport not in (None, "slack", "lark"):
-            raise ValueError("interactive transport must be slack or lark")
+        if self.interactive_transport not in (None, "slack", "lark", "both"):
+            raise ValueError("interactive transport must be slack, lark or both")
         if not 1 <= self.smtp_port <= 65535:
             raise ValueError("SMTP port must be from 1 to 65535")
         if self.smtp_security not in _SMTP_SECURITY_VALUES:
@@ -272,6 +272,8 @@ class NotificationConfig:
 
     @property
     def interactive_relay_configured(self) -> bool:
+        if self.selected_interactive_transport == "both":
+            return self.lark.relay_configured and self.slack_relay_configured
         return self.lark.relay_configured if self.selected_interactive_transport == "lark" else self.slack_relay_configured
 
     @property
@@ -334,8 +336,10 @@ class NotificationConfig:
     @property
     def configuration_issues(self) -> Tuple[str, ...]:
         issues = []
-        if (self.lark.present or self.interactive_transport == "lark") and not self.lark.configured:
+        if (self.lark.present or self.interactive_transport in ("lark", "both")) and not self.lark.configured:
             issues.append("lark_configuration_incomplete")
+        if self.interactive_transport == "both" and not self.slack_configured:
+            issues.append("slack_configuration_incomplete")
         relay_values_present = any(
             (
                 self.slack_bot_token,
@@ -587,6 +591,9 @@ class EnvironmentNotifier:
 
     @property
     def relay_thread_store(self):
+        if self.config.selected_interactive_transport == "both":
+            from .relay import CombinedThreadStores
+            return CombinedThreadStores(self.slack_thread_store, self.lark_thread_store)
         return self.lark_thread_store if self.config.selected_interactive_transport == "lark" else self.slack_thread_store
 
     def notify(self, event: NotificationEvent) -> NotificationResult:
@@ -680,6 +687,16 @@ class EnvironmentNotifier:
         attempts = []
         failures = []
 
+        if self.config.selected_interactive_transport == "both":
+            delivery = self._deliver_both(event)
+            # Preserve SMTP/desktop fallback when neither messaging provider
+            # delivered. A partial send remains visibly failed, not all-sent.
+            if delivery.channel != "local_audit":
+                return delivery
+            attempts.extend(delivery.attempted_channels)
+            if delivery.error_sha256:
+                failures.append(delivery.error_sha256)
+
         if self.config.selected_interactive_transport == "lark" and self.config.lark.configured:
             attempts.append("lark")
             try:
@@ -736,6 +753,53 @@ class EnvironmentNotifier:
             tuple(attempts),
             self._combine_error_digests(tuple(failures)),
         )
+
+    def _deliver_both(self, event: NotificationEvent) -> _DeliveryResult:
+        path = self.runtime / "notifications" / "dual-deliveries.json"
+        if path.exists():
+            state = json.loads(path.read_text(encoding="utf-8"))
+        else:
+            state = {"schema_version": 1, "events": {}}
+        if (not isinstance(state, dict) or set(state) != {"schema_version", "events"}
+                or type(state["schema_version"]) is not int or state["schema_version"] != 1
+                or not isinstance(state["events"], dict)):
+            raise ValueError("dual notification state is malformed")
+        for key, entry in state["events"].items():
+            if (re.fullmatch(r"[0-9a-f]{64}", key) is None or not isinstance(entry, dict)
+                    or not set(entry) <= {"slack", "lark"}
+                    or any(value not in ("uncertain", "sent") for value in entry.values())):
+                raise ValueError("dual notification receipt is malformed")
+        receipt = state["events"].setdefault(event.event_fingerprint(), {})
+        delivered, failures, attempts = [], [], []
+        for provider, configured in (("slack", self.config.slack_configured),
+                                     ("lark", self.config.lark.configured)):
+            if receipt.get(provider) == "sent":
+                delivered.append(provider)
+                continue
+            if receipt.get(provider) == "uncertain":
+                failures.append(sha256_text(provider + "_delivery_unconfirmed"))
+                continue
+            if not configured:
+                failures.append(sha256_text(provider + "_configuration_incomplete"))
+                continue
+            # Claim before sending. A timeout, crash or failed receipt write
+            # never causes an automatic replay at either provider. This
+            # additive schema-1 journal leaves legacy/rollback state intact.
+            receipt[provider] = "uncertain"
+            self.atomic_writer(path, state)
+            attempts.append(provider)
+            try:
+                (self._send_slack if provider == "slack" else self._send_lark)(event)
+            except Exception as error:
+                failures.append(self._error_digest(provider + "_failed", error))
+                continue
+            receipt[provider] = "sent"
+            self.atomic_writer(path, state)
+            delivered.append(provider)
+        return _DeliveryResult(
+            "sent" if len(delivered) == 2 else "delivery_failed",
+            "+".join(delivered) or "local_audit", tuple(attempts),
+            self._combine_error_digests(tuple(failures)))
 
     def _send_slack(self, event: NotificationEvent) -> None:
         try:
@@ -801,7 +865,15 @@ class EnvironmentNotifier:
 
     def _send_lark(self, event: NotificationEvent) -> None:
         target = event.relay_target if self.config.lark.relay_configured else None
-        text = f"{event.subject.strip()}\n{event.message}"
+        try:
+            machine = _notification_label_component(socket.gethostname()) or "unknown"
+        except OSError:
+            machine = "unknown"
+        context = f"Machine: {machine}"
+        if target is not None and target.execution_locality == "remote_ssh":
+            remote = (target.remote_authority or "unknown").removeprefix("ssh-remote+")
+            context = f"Thread location (SSH): {remote}\nWatchDog machine: {machine}"
+        text = f"{event.subject.strip()}\n{context}\n{event.message}"
         if target is not None:
             text += "\n\nReply to this message to send text to this exact existing Codex thread."
         fingerprint = event.event_fingerprint()
