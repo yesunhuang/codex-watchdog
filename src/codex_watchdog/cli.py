@@ -547,7 +547,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         configured = (notifier.config.slack_relay_configured if provider == "slack"
                       else notifier.config.lark.relay_configured)
         if (not configured
-                or getattr(notifier.config, "selected_interactive_transport", "slack") != provider):
+                or getattr(notifier.config, "selected_interactive_transport", "slack") not in (provider, "both")):
             print(
                 json.dumps(
                     {
@@ -561,6 +561,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 )
             )
             return 1
+        # An explicit provider test sends only to its named provider, even
+        # when normal monitoring sends each event to both.
+        if getattr(notifier.config, "selected_interactive_transport", "slack") == "both":
+            from dataclasses import replace
+            notifier = EnvironmentNotifier(args.runtime, replace(notifier.config, interactive_transport=provider))
         catalog = EffectiveWorkspaceCatalog(args.runtime, codex_home=args.codex_home)
         workspaces = catalog.list_workspaces()
         selector = args.workspace.casefold() if args.workspace else None
