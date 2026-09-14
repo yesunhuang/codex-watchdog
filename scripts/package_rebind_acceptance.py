@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 
 def verify_manual_rebind(executable: Path, root: Path, environment: dict) -> None:
@@ -12,6 +13,16 @@ def verify_manual_rebind(executable: Path, root: Path, environment: dict) -> Non
     runtime, repo = root / "retained runtime", root / "same repository"
     repo.mkdir()
     env = {k: v for k, v in environment.items() if not k.startswith("CODEX_WATCHDOG_")}
+    # Registration acceptance has no messaging provider. Keep it independent
+    # of the parent installer test's deliberately partial legacy profile.
+    env.update(LOCALAPPDATA=str(root / "messaging"),
+               CODEX_WATCHDOG_LINUX_CONFIG_DIR=str(root / "messaging"),
+               CODEX_WATCHDOG_MACOS_CONFIG_DIR=str(root / "messaging"))
+    if sys.platform == "darwin":
+        security = root / "empty-keychain-fixture"
+        security.write_text("#!/bin/sh\nexit 44\n")
+        security.chmod(0o700)
+        env["CODEX_WATCHDOG_MACOS_SECURITY_BIN"] = str(security)
     git = shutil.which("git", path=env["PATH"])
     assert git
     def run(args):

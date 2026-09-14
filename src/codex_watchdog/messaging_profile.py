@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-import ctypes
 import json
 import os
 from pathlib import Path
@@ -153,9 +152,9 @@ class SecretStore:
         self.platform = sys.platform if platform is None else platform
         self.environment = dict(os.environ if environment is None else environment)
 
-    def _security(self, *args):
+    def _security(self, *args, input=None):
         return subprocess.run([self.environment.get("CODEX_WATCHDOG_MACOS_SECURITY_BIN", "/usr/bin/security"), *args],
-                              capture_output=True, timeout=15, env=self.environment)
+                              input=input, capture_output=True, timeout=15, env=self.environment)
 
     def has(self, service, account):
         if self.platform == "win32":
@@ -204,15 +203,22 @@ class SecretStore:
             return
         if self.platform != "darwin":
             raise MessagingError("messaging_secret_backend_unavailable")
-        # Security.framework takes bytes in memory; `security -w SECRET` would
-        # expose the secret in argv. Never update an existing Keychain item.
-        library = ctypes.CDLL("/System/Library/Frameworks/Security.framework/Security")
-        add = library.SecKeychainAddGenericPassword
-        add.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_char_p, ctypes.c_uint32,
-                        ctypes.c_char_p, ctypes.c_uint32, ctypes.c_char_p, ctypes.c_void_p]
-        add.restype = ctypes.c_int32
-        svc, acc, secret = service.encode(), account.encode(), value.encode()
-        if add(None, len(svc), svc, len(acc), acc, len(secret), secret, None) != 0:
+        # Use the same creator/reader identity as existing Mac launchers.
+        # A Python-created item has a different default ACL and can require
+        # consent when /usr/bin/security reads it later. The tool's bounded
+        # stdin mode avoids secrets in argv without granting other apps access.
+        # Its parser supports escaped double quotes/backslashes, not shell
+        # concatenation. Refuse controls and its 4096-byte line limit; send one
+        # command and EOF so a later command cannot mask a storage failure.
+        if any(ord(c) < 32 or ord(c) == 127 for text in (service, account, value) for c in text):
+            raise MessagingError("messaging_credential_invalid")
+        quote = lambda text: json.dumps(text, ensure_ascii=False)
+        line = ("add-generic-password -a " + quote(account) + " -s " + quote(service) +
+                " -w " + quote(value) + "\n").encode("utf-8")
+        if len(line) >= 4096:
+            raise MessagingError("messaging_credential_invalid")
+        result = self._security("-q", "-i", input=line)
+        if result.returncode != 0 or self.get(service, account) != value:
             raise MessagingError("messaging_keychain_store_failed")
 
 

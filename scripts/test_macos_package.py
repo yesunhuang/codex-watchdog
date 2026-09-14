@@ -101,6 +101,10 @@ def main() -> None:
         codex = home / ".codex"
         environment.update(HOME=str(home), PATH=str(tools), CODEX_HOME=str(codex),
                            CODEX_WATCHDOG_MACOS_CONFIG_DIR=str(config))
+        empty_security = root / "empty-keychain-fixture"
+        empty_security.write_text("#!/bin/sh\nexit 44\n")
+        empty_security.chmod(0o700)
+        environment["CODEX_WATCHDOG_MACOS_SECURITY_BIN"] = str(empty_security)
         assert shutil.which("python", path=str(tools)) is None and shutil.which("python3", path=str(tools)) is None
         extracted = root / "download with spaces"
         subprocess.run(["/usr/bin/ditto", "-x", "-k", str(archive), str(extracted)], check=True)
@@ -205,8 +209,9 @@ def main() -> None:
             run([security, "delete-keychain", keychain])
 
         # Normal foreground CLI lifetime and busy-owner upgrade refusal; no provider configured.
-        process = subprocess.Popen([str(installed), "run", "--manual-only", "--interval", "1"],
-                                   cwd=work, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        foreground_env = {**environment, "CODEX_WATCHDOG_MACOS_CONFIG_DIR": str(root / "foreground messaging")}
+        process = subprocess.Popen([str(installed), "--runtime", str(runtime), "run", "--manual-only", "--interval", "1"],
+                                   cwd=work, env=foreground_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    text=True, start_new_session=True)
         try:
             with selectors.DefaultSelector() as selector:
