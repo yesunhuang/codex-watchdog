@@ -22,6 +22,11 @@
   <a href="#architecture-and-philosophy"><img src="https://img.shields.io/badge/sessions-native-355c7d" alt="Existing native Codex sessions"></a>
   <a href="#multi-user-collaboration-bring-your-own-agents"><img src="https://img.shields.io/badge/collaboration-multi--user%20%2F%20multi--agent-355c7d" alt="Multi-user and multi-agent collaboration"></a>
   <a href="#multi-user-collaboration-bring-your-own-agents"><img src="https://img.shields.io/badge/central%20server-not%20required-355c7d" alt="No required central server"></a>
+  <br>
+  <a href="docs/SETUP.md"><img src="https://img.shields.io/badge/supports-Slack-4A154B" alt="Slack support"></a>
+  <a href="docs/FEISHU_LARK.md"><img src="https://img.shields.io/badge/supports-Feishu-3370FF" alt="Feishu support"></a>
+  <a href="docs/FEISHU_LARK.md"><img src="https://img.shields.io/badge/supports-Lark-00B96B" alt="Lark support"></a>
+  <a href="docs/SETUP.md"><img src="https://img.shields.io/badge/supports-SMTP-6c757d" alt="SMTP support"></a>
 </p>
 
 <p align="center">
