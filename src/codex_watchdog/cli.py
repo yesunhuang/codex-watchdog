@@ -231,6 +231,7 @@ def build_parser() -> argparse.ArgumentParser:
     notify_test.add_argument("--workspace", type=_safe_id, default="notification-test")
     relay_test = commands.add_parser(
         "slack-relay-test",
+        aliases=["lark-relay-test"],
         help="post one reply-enabled test for an auto-discovered local workspace",
     )
     relay_test.add_argument("--id", required=True, type=_safe_id)
@@ -238,6 +239,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--workspace",
         help="exact workspace id, repository name, or canonical local path",
     )
+    commands.add_parser("lark-check", help="audit Feishu/Lark configuration and SDK without sending messages")
     commands.add_parser(
         "outlook-login",
         help="authorize personal Outlook SMTP using a one-time Microsoft device code",
@@ -526,9 +528,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         print(json.dumps(result.to_dict(), ensure_ascii=False, sort_keys=True))
         return 0 if result.status in ("sent", "sent_fallback") else 1
-    if args.command == "slack-relay-test":
+    if args.command == "lark-check":
+        from .lark_transport import LarkConfig, LarkTransportError, SDK_VERSION, load_sdk
+        config = LarkConfig.from_environment()
+        sdk_error = None
+        try:
+            load_sdk()
+        except LarkTransportError as exc:
+            sdk_error = str(exc)
+        output = {"schema_version": 1, "domain": config.domain, "sdk_version": SDK_VERSION,
+                  "sdk_available": sdk_error is None, "notification_configured": config.configured,
+                  "relay_configured": config.relay_configured, "sdk_error": sdk_error}
+        print(json.dumps(output, sort_keys=True))
+        return 0 if config.configured and sdk_error is None else 1
+    if args.command in ("slack-relay-test", "lark-relay-test"):
         notifier = EnvironmentNotifier(args.runtime)
-        if not notifier.config.slack_relay_configured:
+        provider = "lark" if args.command == "lark-relay-test" else "slack"
+        configured = (notifier.config.slack_relay_configured if provider == "slack"
+                      else notifier.config.lark.relay_configured)
+        if (not configured
+                or getattr(notifier.config, "selected_interactive_transport", "slack") != provider):
             print(
                 json.dumps(
                     {
@@ -536,7 +555,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         "configuration_issues": list(
                             notifier.config.configuration_issues
                         )
-                        or ["slack_relay_not_configured"],
+                        or [provider + "_relay_not_configured"],
                     },
                     sort_keys=True,
                 )
@@ -559,10 +578,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if len(matches) != 1:
             print(
                 json.dumps(
-                    {
-                        "status": "workspace_ambiguous",
-                        "match_count": len(matches),
-                    },
+                    {"status": "workspace_ambiguous", "match_count": len(matches),},
                     sort_keys=True,
                 )
             )
@@ -570,11 +586,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         workspace = matches[0]
         relay_event = NotificationEvent(
             workspace_id=workspace.workspace_id,
-            event_type="slack_relay_test",
-            transition_fingerprint=sha256_text(f"slack_relay_test\0{args.id}"),
+            event_type=provider + "_relay_test",
+            transition_fingerprint=sha256_text(f"{provider}_relay_test\0{args.id}"),
             subject=f"[Codex Watchdog RELAY TEST] {args.id}",
             message=(
-                "Reply in this Slack thread. WatchDog will relay your text "
+                ("Reply in this Slack thread. WatchDog will relay your text " if provider == "slack" else
+                 "Reply to this Feishu/Lark message. WatchDog will relay your text ") +
                 "without interpreting it to the exact existing VS Code Codex "
                 "thread shown by this workspace."
             ),
@@ -585,7 +602,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             ),
         )
         result = notifier.notify(relay_event)
-        mapping_created = notifier.slack_thread_store.has_notification_mapping(
+        thread_store = notifier.slack_thread_store if provider == "slack" else notifier.lark_thread_store
+        mapping_created = thread_store.has_notification_mapping(
             relay_event.event_fingerprint()
         )
         output = result.to_dict()
@@ -593,7 +611,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(json.dumps(output, ensure_ascii=False, sort_keys=True))
         return (
             0
-            if result.status == "sent" and result.channel == "slack" and mapping_created
+            if result.status == "sent" and result.channel == provider and mapping_created
             else 1
         )
     if args.command == "outlook-login":

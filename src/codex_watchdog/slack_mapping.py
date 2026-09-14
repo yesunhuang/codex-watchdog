@@ -9,6 +9,7 @@ import uuid
 
 from .models import sha256_text, utc_now
 from .storage import FileLock, InstructionStore
+from .relay import RelayTarget as SlackRelayTarget
 
 
 SLACK_RELAY_STATE_SCHEMA_VERSION = 1
@@ -16,10 +17,6 @@ SLACK_RELAY_STATE_SCHEMA_VERSION = 1
 _SLACK_CHANNEL_ID = re.compile(r"^[CG][A-Z0-9]{8,}$")
 _SLACK_USER_ID = re.compile(r"^[UW][A-Z0-9]{8,}$")
 _SLACK_TIMESTAMP = re.compile(r"^[0-9]{10,}\.[0-9]+$")
-_REMOTE_AUTHORITY = re.compile(
-    r"^ssh-remote\+[A-Za-z0-9](?:[A-Za-z0-9._-]{0,251}[A-Za-z0-9])?$"
-)
-_STORAGE_KEY = re.compile(r"^[0-9a-f]{32}$")
 
 
 def valid_slack_channel_id(value: Any) -> bool:
@@ -34,75 +31,8 @@ def valid_slack_timestamp(value: Any) -> bool:
     return isinstance(value, str) and _SLACK_TIMESTAMP.fullmatch(value) is not None
 
 
-def _canonical_uuid(value: Any) -> Optional[str]:
-    if not isinstance(value, str):
-        return None
-    try:
-        parsed = str(uuid.UUID(value))
-    except ValueError:
-        return None
-    return parsed if parsed == value.lower() else None
 
 
-@dataclass(frozen=True)
-class SlackRelayTarget:
-    workspace_id: str
-    thread_id: str
-    execution_locality: str
-    remote_authority: Optional[str] = None
-    remote_repo_path: Optional[str] = None
-    remote_storage_key: Optional[str] = None
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.workspace_id, str) or not self.workspace_id.strip():
-            raise ValueError("relay workspace id must be a non-empty string")
-        if _canonical_uuid(self.thread_id) is None:
-            raise ValueError("relay thread id must be a canonical UUID")
-        if self.execution_locality not in ("process_local", "remote_ssh"):
-            raise ValueError("relay execution locality is invalid")
-        remote_values = (
-            self.remote_authority,
-            self.remote_repo_path,
-            self.remote_storage_key,
-        )
-        if self.execution_locality == "process_local":
-            if any(value is not None for value in remote_values):
-                raise ValueError("local relay target cannot contain remote routing")
-            return
-        if (
-            not isinstance(self.remote_authority, str)
-            or _REMOTE_AUTHORITY.fullmatch(self.remote_authority) is None
-            or not isinstance(self.remote_repo_path, str)
-            or not self.remote_repo_path.startswith("/")
-            or not isinstance(self.remote_storage_key, str)
-            or _STORAGE_KEY.fullmatch(self.remote_storage_key) is None
-        ):
-            raise ValueError("remote relay target routing is invalid")
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "workspace_id": self.workspace_id,
-            "thread_id": self.thread_id,
-            "execution_locality": self.execution_locality,
-            "remote_authority": self.remote_authority,
-            "remote_repo_path": self.remote_repo_path,
-            "remote_storage_key": self.remote_storage_key,
-        }
-
-    @classmethod
-    def from_dict(cls, value: Any) -> "SlackRelayTarget":
-        if not isinstance(value, dict) or frozenset(value) != frozenset(
-            {
-                "workspace_id",
-                "thread_id",
-                "execution_locality",
-                "remote_authority",
-                "remote_repo_path",
-                "remote_storage_key",
-            }
-        ):
-            raise ValueError("Slack relay target is malformed")
-        return cls(**value)
 
 
 @dataclass(frozen=True)
@@ -196,6 +126,8 @@ class SlackThreadStore:
     def cache_mappings(self, entries, target):
         """Cache immutable observed routing; delivery still requires the remote fence."""
         for entry in entries:
+            if isinstance(entry, dict) and entry.get("provider") == "lark":
+                continue
             existing = self.lookup_thread(entry["channel_id"], entry["thread_ts"])
             if existing is not None:
                 if existing.target.thread_id != target.thread_id:

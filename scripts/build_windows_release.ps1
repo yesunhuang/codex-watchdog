@@ -107,6 +107,7 @@ try {
         "--collect-submodules", "msal_extensions",
         "--collect-submodules", "slack_bolt",
         "--collect-submodules", "slack_sdk",
+        "--collect-submodules", "lark_channel",
         "--collect-data", "certifi",
         "--exclude-module", "tkinter",
         (Join-Path $repoRoot "packaging\windows_entry.py")
@@ -156,7 +157,7 @@ try {
     }
     $packageDocs = Join-Path $packageDirectory "docs"
     New-Item -ItemType Directory -Path $packageDocs -Force | Out-Null
-    foreach ($name in @("PLATFORM_SUPPORT.md", "AUTOMATIC_REMOTE_HANDOFF.md")) {
+    foreach ($name in @("PLATFORM_SUPPORT.md", "AUTOMATIC_REMOTE_HANDOFF.md", "FEISHU_LARK.md")) {
         Copy-Item -LiteralPath (Join-Path $repoRoot "docs\$name") -Destination $packageDocs
     }
     $packageImages = Join-Path $packageDirectory "images"
@@ -182,6 +183,12 @@ try {
         --include-distribution zipp
     if ($LASTEXITCODE -ne 0) {
         throw "Dependency-license generation failed."
+    }
+
+    & $Python (Join-Path $repoRoot "scripts\test_lark_package.py") `
+        --package $packageDirectory --expected-version $version
+    if ($LASTEXITCODE -ne 0) {
+        throw "The frozen Feishu/Lark SDK or its license notices are incomplete."
     }
 
     $packageChecksums = Get-ChildItem -LiteralPath $packageDirectory -File -Recurse |

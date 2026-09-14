@@ -54,6 +54,7 @@ def main() -> None:
         "--add-data", str(metadata) + os.pathsep + metadata_name,
         "--collect-submodules", "msal_extensions",
         "--collect-submodules", "slack_bolt", "--collect-submodules", "slack_sdk",
+        "--collect-submodules", "lark_channel",
         "--collect-data", "certifi", "--exclude-module", "tkinter",
         str(ROOT / "packaging/macos_entry.py"),
     ], cwd=ROOT, check=True)
@@ -74,6 +75,7 @@ def main() -> None:
         (package / filename).chmod(0o755)
     shutil.copy2(ROOT / "LICENSE", package / "LICENSE")
     shutil.copy2(ROOT / "docs/MACOS_PACKAGE.md", package / "MACOS_PACKAGE.md")
+    shutil.copy2(ROOT / "docs/FEISHU_LARK.md", package / "FEISHU_LARK.md")
     shutil.copy2(ROOT / "THIRD_PARTY_NOTICES.md", package / "THIRD_PARTY_NOTICES.md")
     subprocess.run([
         sys.executable, str(ROOT / "tools/generate_dependency_licenses.py"),
@@ -82,6 +84,8 @@ def main() -> None:
         "--include-distribution", "importlib-metadata", "--include-distribution", "packaging",
         "--include-distribution", "setuptools", "--include-distribution", "zipp",
     ], check=True)
+    subprocess.run([sys.executable, str(ROOT / "scripts/test_lark_package.py"),
+                    "--package", str(package), "--expected-version", version], check=True)
     files = {p.relative_to(package).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
              for p in package.rglob("*") if p.is_file()}
     (package / "package-manifest.json").write_text(json.dumps({

@@ -7,7 +7,9 @@ The Python project directly depends on:
 - Microsoft Authentication Library for Python (`msal`) — MIT License;
 - Microsoft Authentication Extensions for Python (`msal-extensions`) — MIT
   License; and
-- Slack Bolt for Python (`slack-bolt`) — MIT License.
+- Slack Bolt for Python (`slack-bolt`) — MIT License; and
+- Feishu/Lark Channel SDK (`lark-channel-sdk`) — MIT and BSD-3-Clause licenses,
+  including the SDK's vendored protobuf notice.
 
 Those packages bring transitive dependencies. A packaged executable must be
 built from a locked, isolated environment and include a generated dependency

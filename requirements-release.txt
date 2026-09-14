@@ -32,3 +32,13 @@ typing-extensions==4.16.0
 urllib3==2.6.3
 wheel==0.48.0
 zipp==3.23.1
+
+# Feishu/Lark messaging SDK and its resolved dependencies.
+anyio==4.12.1
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+lark-channel-sdk==1.4.0
+pycryptodome==3.23.0
+requests-toolbelt==1.0.0
+websockets==15.0.1

@@ -220,6 +220,10 @@ Linux の Slack 返信には `CODEX_WATCHDOG_SLACK_REPLY_MODE=poll` と既存の
 永続起動、ネイティブランタイムの分離、既存環境の制限は[ノード設定](docs/LINUX_NODE_SETUP.md)
 を参照してください。
 
+Feishu と国際版 Lark でも通知を送信し、テキスト返信を既存の Codex 会話に転送できます。
+[Feishu/Lark 設定ガイド](docs/FEISHU_LARK.md)に従ってリージョンと許可ユーザーを設定してください。
+パッケージには SDK が含まれており、通知先を切り替えても既存の Slack 設定は保持されます。
+
 ## ドキュメント
 
 - 設定：[Windows](WINDOWS_PACKAGE.md)、[macOS](docs/MACOS_PACKAGE.md)、

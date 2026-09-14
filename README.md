@@ -227,6 +227,11 @@ Finish or pause work before switching nodes; conversations do not migrate
 automatically. See [node setup](docs/LINUX_NODE_SETUP.md) for persistent startup,
 native runtime isolation and existing-installation limits.
 
+Feishu and international Lark can also send notifications and relay plain-text
+replies to the existing Codex conversation. Configure the correct region and
+allowed users in the [Feishu/Lark setup guide](docs/FEISHU_LARK.md). Packages include
+the SDK; existing Slack settings are retained when switching providers.
+
 ## Documentation
 
 - Setup: [Windows](WINDOWS_PACKAGE.md), [macOS](docs/MACOS_PACKAGE.md),
