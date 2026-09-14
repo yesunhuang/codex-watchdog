@@ -314,14 +314,20 @@ def load_saved(environment, root, store=None, *, secrets=True):
             if SELECTOR not in env and route.get("interactive_transport") in ("slack", "lark", "both"):
                 env[SELECTOR] = route["interactive_transport"]
         env.update(values)
-    if store.platform.startswith("linux") and (root / "linux-notifications.env").exists():
+    marker = root / MARKER
+    managed_environment = marker.exists() and read_object(marker).get("status") == "configured"
+    explicit_provider = bool(identity_keys(environment, "slack") or identity_keys(environment, "lark"))
+    if (store.platform.startswith("linux") and (root / "linux-notifications.env").exists()
+            and (managed_environment or not explicit_provider)):
+        # Existing systemd/shell launchers already interpreted their own legacy
+        # environment file. Do not reparse it with a narrower grammar when a
+        # complete explicit provider was supplied by that launcher.
         saved = linux_environment(root / "linux-notifications.env")
         for provider in ("slack", "lark"):
             if not identity_keys(environment, provider):
                 env.update({k: v for k, v in saved.items() if k.startswith(PREFIX + provider.upper() + "_")})
         if SELECTOR not in env and SELECTOR in saved:
             env[SELECTOR] = saved[SELECTOR]
-    marker = root / MARKER
     if SELECTOR not in env and marker.exists():
         value = read_object(marker)
         if value.get("schema_version") == 1 and value.get("status") == "configured" and value.get("transport") in ("slack", "lark", "both"):

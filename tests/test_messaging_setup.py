@@ -332,6 +332,19 @@ def test_native_linux_saved_environment_permissions_and_reuse(tmp_path):
     with pytest.raises(MessagingError): linux_environment(path)
 
 
+def test_existing_linux_service_environment_is_not_reparsed_or_rewritten(tmp_path):
+    store = FixtureStore(tmp_path)
+    store.platform = "linux"
+    legacy = tmp_path / "linux-notifications.env"
+    legacy.write_bytes(b"# legacy file already interpreted by the service\nexport CODEX_WATCHDOG_SLACK_BOT_TOKEN='opaque'\n")
+    before = snapshot(tmp_path)
+    env = {PREFIX + "SLACK_" + k: v for k, v in dict(BOT_TOKEN="xoxb-service", CHANNEL_ID="C12345678",
+        ALLOWED_USER_IDS="U12345678", REPLY_MODE="poll").items()}
+    assert load_saved(env, tmp_path, store) == env
+    assert detect(env, tmp_path, store).state == State.CONFIGURED
+    assert snapshot(tmp_path) == before
+
+
 def test_cli_setup_check_never_reads_input(tmp_path):
     env = {k: v for k, v in os.environ.items() if not k.startswith((PREFIX, "LARK_", "SLACK_"))}
     env.update(LOCALAPPDATA=str(tmp_path), HOME=str(tmp_path), CODEX_WATCHDOG_LINUX_CONFIG_DIR=str(tmp_path / "config"),
