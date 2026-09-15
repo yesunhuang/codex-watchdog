@@ -620,11 +620,13 @@ def test_exited_backend_releases_stale_claim_and_recovers_same_thread(scenario):
     writer[0] = None
     result = agent.step(observe=False)[0]
     assert result["reason"] == "app_server_exited"
-    assert json.loads(owner.status_path.read_text())["owner_state"] == "blocked"
+    assert json.loads(owner.status_path.read_text())["owner_state"] == "recovering"
     assert not agent.controllers and exited.closed
     assert store.read()["owner"] is None and store.read()["writer_pid"] is None
     desktop = store.attach("returning-desktop", "desktop-host", "absent")
     assert desktop is not None  # A dead controller cannot block its workspace.
+    assert agent.step(observe=False)[0]["state"] == "recovering"
+    agent.retry_after[THREAD] = 0
     assert agent.step(observe=False)[0]["state"] == "owned"
     assert len(clients) == 2
     assert all(params["threadId"] == THREAD for client in clients for _, params in client.calls)
@@ -653,6 +655,51 @@ def test_failed_monitor_does_not_renew_forever_or_close_live_backend(scenario):
     assert store.read()["owner"]["expires"] == expires
     assert not clients[0].closed and len(clients) == 1
     assert json.loads(owner.status_path.read_text())["reason"] == "linux_writer_changed"
+
+
+def test_recovering_observer_renews_verified_owner_and_resumes_without_second_writer(scenario, monkeypatch):
+    store, local, writer, clock, clients, make_agent = scenario
+    agent, owner = detached(scenario)
+    client = clients[0]
+    original = client.pump
+    def interrupted(**kw):raise AppServerError("app_server_read_error")
+    client.pump = interrupted
+    assert agent.step(observe=False)[0]["state"] == "recovering"
+    expires = store.read()["owner"]["expires"]
+    clock[0] += 60
+    assert agent.step(observe=False)[0]["state"] == "recovering"
+    assert store.read()["owner"]["expires"] > expires
+    assert json.loads(owner.health.path.read_text())["health"] == "recovering"
+    client.pump = original
+    monkeypatch.setattr(agent, "_cycle", lambda item: SimpleNamespace(status="completed"))
+    assert agent.step()[0]["state"] == "owned"
+    assert json.loads(owner.health.path.read_text())["health"] == "healthy"
+    assert len(clients) == 1 and not client.closed and writer[0] == client.process.pid
+
+
+@pytest.mark.parametrize("exited", [False, True])
+def test_readonly_initialization_failure_rebuilds_with_backoff(scenario, monkeypatch, exited):
+    store, local, writer, clock, clients, make_agent = scenario
+    store.detach(local);writer[0] = None;agent = make_agent()
+    original = LinuxThreadOwner._resume
+    def fail(owner, workspace):
+        owner.resume_requested = False
+        owner.client = owner.client_factory(owner.executable, owner.binding.codex_home, workspace.repo_root, owner._event)
+        owner.client.process.returncode = 1 if exited else None
+        original_close = owner.client.close
+        def close_once():
+            assert not owner.client.closed
+            original_close()
+        owner.client.close = close_once
+        raise AppServerError("app_server_exited")
+    monkeypatch.setattr(LinuxThreadOwner, "_resume", fail)
+    assert agent.step(observe=False)[0]["state"] == "recovering"
+    assert not agent.controllers and THREAD not in agent.failed_resumes
+    assert agent.step(observe=False)[0]["reason"] == "app_server_retry_backoff"
+    monkeypatch.setattr(LinuxThreadOwner, "_resume", original);agent.retry_after[THREAD] = 0
+    assert agent.step(observe=False)[0]["state"] == "owned"
+    assert len(clients) == 2 and clients[0].closed
+    assert all(params["threadId"] == THREAD for c in clients for _, params in c.calls)
 
 
 @pytest.mark.parametrize("exited", [False, True])
@@ -739,6 +786,7 @@ def test_initial_resume_exit_is_not_retried_until_native_attachment(scenario, mo
     original = LinuxThreadOwner._resume
 
     def fail(owner, workspace):
+        owner.resume_requested = True  # The request crossed the side-effect boundary.
         owner.client = owner.client_factory(owner.executable, owner.binding.codex_home, workspace.repo_root, owner._event)
         owner.client.process.returncode = 1
         raise AppServerError("app_server_exited")
@@ -772,6 +820,8 @@ def test_exited_backend_preserves_uncertain_notification_barrier(scenario):
 
 def test_auto_cli_passes_repository_scope(scenario, monkeypatch):
     from codex_watchdog import cli
+    from codex_watchdog import messaging_setup
+    monkeypatch.setattr(messaging_setup, "prepare_launch", lambda *a, **kw: {})
     store, local, writer, clock, clients, make_agent = scenario
     calls = []
     class Agent:
@@ -784,3 +834,79 @@ def test_auto_cli_passes_repository_scope(scenario, monkeypatch):
                      "linux-auto-run", "--repo", store.repo_path]) == 0
     assert calls[0]["repos"] == [Path(store.repo_path)]
     assert calls[0]["threads"] == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="host helper requires an absolute POSIX repository path")
+def test_large_frame_recovers_exact_owner_and_notifies_completion_once(scenario, monkeypatch, tmp_path):
+    from codex_watchdog.app_server import StdioAppServer
+    from codex_watchdog.mvp_service import MvpWatchdogService
+    from codex_watchdog.control_state import ControlError
+    store, local, writer, clock, clients, make_agent = scenario
+    events, sent, requests = [], [], []
+    script = tmp_path / "server.py"
+    script.write_text('''
+import json,sys,os
+resumed=False
+for line in sys.stdin:
+    r=json.loads(line)
+    if "id" not in r: continue
+    method=r["method"]
+    if method=="initialize": result={}
+    else:
+        thread=r["params"]["threadId"]
+        if method=="thread/read" and resumed:
+            resumed=False
+            print(json.dumps({"method":"codex/event/item_completed","params":{"private":"x"*(3*1024*1024)}}),flush=True)
+            print(json.dumps({"method":"turn/completed","params":{"threadId":thread,"turn":{"id":"large-frame-turn"}}}),flush=True)
+        result={"thread":{"id":thread,"cwd":os.getcwd(),"status":{"type":"idle"}}}
+        if method=="thread/resume": resumed=True
+    print(json.dumps({"id":r["id"],"result":result}),flush=True)
+''')
+    original_popen = subprocess.Popen
+    def launch(argv, **kwargs):
+        if argv[0] == "fixture-codex":
+            argv = [sys.executable, "-u", str(script)]
+        return original_popen(argv, **kwargs)
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    class Client(StdioAppServer):
+        def __init__(self, executable, home, cwd, event):
+            super().__init__(executable, home, cwd, lambda e: (events.append(e), event(e)))
+            clients.append(self)
+        def request(self, method, params, **kwargs):
+            requests.append((method, params))
+            result = super().request(method, params, **kwargs)
+            if method == "thread/resume": writer[0] = self.process.pid
+            return result
+        def close(self):
+            super().close()
+            if writer[0] == self.process.pid: writer[0] = None
+    agent = make_agent()
+    agent.owner_factory = lambda binding, **kw: LinuxThreadOwner(binding, client_factory=Client, **kw)
+    def factory(runtime, **kwargs):
+        ns = kwargs["remote_ssh_adapter"].namespace
+        ns["ControlStore"] = lambda *a: store
+        ns["ControlError"] = ControlError
+        ns["control_exact_thread"] = lambda repo, thread: repo == store.repo_path and thread == THREAD
+        ns["git_observation"] = lambda repo: dict(status="observed", topology="equal", blockers=[], head_oid="a"*40, upstream_oid="a"*40)
+        ns["rollout_completion"] = lambda thread: (dict(turn_id="large-frame-turn", completed_at="2026-01-01T00:00:00Z", final_output="yes",
+            final_output_sha256="8a798890fe93817163b10b5f7bd2ca4d25d84c52739a645a889c173eee7d9d3d", final_output_chars=3)
+            if any(e.get("method") == "turn/completed" for e in events) else None)
+        notifier = EnvironmentNotifier(runtime, config=NotificationConfig(slack_webhook_url="https://hooks.slack.invalid/host"),
+            http_post=lambda url, payload, timeout: sent.append(json.loads(payload)["text"]) or 200)
+        return MvpWatchdogService(runtime, notifier=notifier, **kwargs)
+    agent.service_factory = factory
+    store.detach(local); writer[0] = None
+    assert agent.step(observe=False)[0]["state"] == "owned"
+    client = clients[0]
+    client.request("thread/read", {"threadId": THREAD, "includeTurns": False})
+    assert client.recovery_snapshot()[1] == "app_server_frame_discarded"
+    assert agent.step()[0]["state"] == "owned"
+    assert client.recovery_snapshot()[1] is None
+    assert store.read()["remote_state"]["last_completion_turn"] == "large-frame-turn"
+    assert len([s for s in sent if s.rstrip().endswith("yes")]) == 1
+    assert agent.step()[0]["state"] == "owned"
+    assert len([s for s in sent if s.rstrip().endswith("yes")]) == 1
+    assert len(clients) == 1 and writer[0] == client.process.pid
+    assert [m for m, p in requests].count("thread/resume") == 1
+    assert all(p.get("threadId") == THREAD for m, p in requests if m != "initialize")
+    assert json.loads(agent.controllers[THREAD]["owner"].health.path.read_text())["health"] == "healthy"

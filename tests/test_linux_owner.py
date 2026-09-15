@@ -547,7 +547,7 @@ def test_lost_writer_does_not_respawn_or_send(owner):
     assert len(client.requests) == 2 and cycles == []
 
 
-def test_foreground_owner_reports_app_server_exit_before_stopping(owner):
+def test_foreground_owner_recovers_observation_without_closing_live_writer(owner):
     from codex_watchdog.app_server import AppServerError
     from codex_watchdog.notifications import EnvironmentNotifier, NotificationConfig
     instance, client, cycles, pid = owner
@@ -556,16 +556,31 @@ def test_foreground_owner_reports_app_server_exit_before_stopping(owner):
         config=NotificationConfig(slack_webhook_url="https://hooks.slack.invalid/fixture"),
         http_post=lambda *args: messages.append(args) or 200)
 
+    failures = [True]
     def exited(**kwargs):
-        raise AppServerError("app_server_exited")
+        if failures[0]:
+            failures[0] = False
+            raise AppServerError("app_server_read_error")
+        assert not client.closed
+        instance.release_requested = True
 
     client.pump = exited
     results = []
-    assert instance.run(emit=results.append) == 1
-    assert results[-1]["reason"] == "app_server_exited"
-    assert results[-1]["notification"]["status"] == "sent"
+    assert instance.run(emit=results.append) == 0
+    recovering = next(r for r in results if r.get("reason") == "app_server_read_error")
+    assert recovering["owner_state"] == "recovering"
+    assert recovering["notification"]["status"] == "sent"
     assert len(messages) == 1 and client.closed
-    assert len(client.requests) == 2
+    assert len(client.requests) >= 2
+
+
+def test_foreground_initial_foreign_writer_rejects_admission_without_starting(owner):
+    instance, client, cycles, pid = owner
+    pid[0] = 999
+    results = []
+    assert instance.run(emit=results.append) == 1
+    assert results[-1]["reason"] == "linux_conflicting_writer"
+    assert client.requests == [] and not client.closed and cycles == []
 
 
 def test_uncoordinated_owner_does_not_replay_an_uncertain_health_notification(owner):
@@ -660,6 +675,42 @@ def test_control_contention_after_writer_admission_is_not_retried(owner):
     with pytest.raises(ControlBusy):
         instance.step(observe=True)
     assert calls == ["entered"] and client.requests == [] and cycles == []
+
+
+@pytest.mark.parametrize("mismatch", [False, True])
+def test_reader_recovery_requires_correlated_thread_identity_and_native_writer(owner, mismatch):
+    instance, client, cycles, pid = owner
+    instance.step(observe=False)
+    state = [7, "app_server_frame_discarded"]
+    client.recovery_snapshot = lambda: tuple(state)
+    verified = []
+    def accept(generation):
+        verified.append(generation)
+        state[1] = None
+        return True
+    client.observation_verified = accept
+    client.mismatch = mismatch
+    before = len(client.requests)
+    if mismatch:
+        with pytest.raises(LinuxBindingError, match="thread_mismatch"):
+            instance.step(observe=True)
+        assert not verified and not cycles
+        assert json.loads(instance.status_path.read_text())["owner_state"] == "recovering"
+    else:
+        assert instance.step(observe=True)["owner_state"] == "owned"
+        assert verified == [7] and cycles == ["read-only-service"]
+        assert json.loads(instance.health.path.read_text())["health"] == "healthy"
+    assert client.requests[before:] == [("thread/read", {"threadId": THREAD, "includeTurns": False})]
+    assert pid[0] == client.process.pid and not client.closed
+
+
+def test_observation_success_cannot_hide_a_new_reader_failure(owner):
+    instance, client, cycles, pid = owner
+    instance.step(observe=False)
+    client.recovery_snapshot = lambda: (9, "app_server_read_error")
+    instance.report_observation_health()
+    assert json.loads(instance.health.path.read_text())["health"] == "recovering"
+    assert json.loads(instance.status_path.read_text())["reason"] == "app_server_read_error"
 
 
 @pytest.mark.parametrize("already_lost", [False, True])

@@ -110,6 +110,8 @@ class LinuxThreadOwner:
         self.client_factory = client_factory
         self.client: Optional[StdioAppServer] = None
         self.resumed = False
+        self.resume_requested = False
+        self._resume_blocked = False
         self.thread: Optional[str] = None
         self.thread_status = "unknown"
         self.approval_required = False
@@ -117,6 +119,7 @@ class LinuxThreadOwner:
         self.yield_requested = False
         self.status_path = binding.runtime / "linux" / "status.json"
         self._last_status: Optional[dict] = None
+        self._recovery_notice = None
         self.continuation = None
         self.continuation_status = None
         self._next_continuation_check = 0.0
@@ -176,6 +179,7 @@ class LinuxThreadOwner:
 
     def _resume(self, workspace) -> None:
         self.resumed = False
+        self.resume_requested = False
         self._parked_rollout = None
         self._idle_since = None
         self.client = self.client_factory(
@@ -186,8 +190,10 @@ class LinuxThreadOwner:
         self._check_thread(before, workspace)
         if writer_pid(self.binding.codex_home, self.thread) is not None:
             raise LinuxBindingError("linux_writer_changed_before_resume")
+        self._recover_observation(workspace, expected_writer=None)
         record_writer_pid(self.client.process.pid)
         # No thread/start, fork, history/path, cwd, model, or permission override.
+        self.resume_requested = True
         resumed = self.client.request("thread/resume", {"threadId": self.thread, "excludeTurns": True})
         self._check_thread(resumed, workspace)
         if writer_pid(self.binding.codex_home, self.thread) != self.client.process.pid:
@@ -201,6 +207,32 @@ class LinuxThreadOwner:
         if (not isinstance(thread, dict) or thread.get("id") != self.thread
                 or thread.get("cwd") != str(workspace.repo_root)):
             raise LinuxBindingError("linux_app_server_thread_mismatch")
+
+    def report_observation_health(self):
+        snapshot = getattr(self.client, "recovery_snapshot", None)
+        reason = snapshot()[1] if snapshot is not None else None
+        if reason is not None:
+            self._status("recovering", reason)
+        return self.health.report(reason, recovering=reason is not None)
+
+    def _recover_observation(self, workspace, expected_writer):
+        snapshot = getattr(self.client, "recovery_snapshot", None)
+        if snapshot is None:
+            return
+        generation, reason = snapshot()
+        if reason is None:
+            return
+        self._status("recovering", reason)
+        self._recovery_notice = reason
+        response = self.client.request("thread/read", {"threadId": self.thread, "includeTurns": False})
+        self._check_thread(response, workspace)
+        if writer_pid(self.binding.codex_home, self.thread) != expected_writer:
+            raise LinuxBindingError("linux_writer_changed_during_recovery")
+        if not self.client.observation_verified(generation):
+            raise AppServerError("app_server_observation_unstable")
+        status = response["thread"].get("status", {})
+        self._thread_status(status.get("type", "unknown") if isinstance(status, dict) else "unknown")
+        # Health becomes healthy only after the regular observer succeeds too.
 
     def step(self, *, observe: bool) -> Dict[str, Any]:
         self.just_parked = False
@@ -230,6 +262,9 @@ class LinuxThreadOwner:
                 self._next_continuation_check = time.monotonic() + 5
                 continuation_checked = True
                 result = self._status("owned")
+        if self._recovery_notice is not None:
+            self.health.report(self._recovery_notice, recovering=True)
+            self._recovery_notice = None
         if continuation_checked:
             try:
                 self.continuation_status = self.continuation.notify_pending(self, workspace)
@@ -254,7 +289,7 @@ class LinuxThreadOwner:
                     if self.release_requested or self.binding.load()["state"] != "armed":
                         return result  # An idle release can race the catalog read.
                     raise LinuxBindingError("linux_observation_failed")
-                self.health.report()
+                self.report_observation_health()
         if result["owner_state"] == "owned":
             result = self._park_idle(workspace, result)
         return result
@@ -335,11 +370,14 @@ class LinuxThreadOwner:
                 # The exact native writer remains untouched. Observation and
                 # completion delivery do not require owning its process.
                 self._parked_rollout = None
+                self._resume_blocked = False
                 self._thread_status("unknown")
                 return self._status("observing")
             if self.yield_requested:
                 self._thread_status("unknown")
                 return self._status("waiting_for_attach")
+            if self._resume_blocked:
+                raise LinuxBindingError("linux_resume_outcome_uncertain")
             store = self._node_store()
             if store is not None and store.read().get("node_parked") is True:
                 # A shared transcript or another node's queue entry is not
@@ -358,6 +396,7 @@ class LinuxThreadOwner:
             self.client.pump(timeout=0.01)
             if pid != self.client.process.pid:
                 raise LinuxBindingError("linux_writer_changed")
+            self._recover_observation(workspace, expected_writer=pid)
         if releasing or self.yield_requested:
             if self._close_if_idle(workspace):
                 if releasing:
@@ -379,6 +418,7 @@ class LinuxThreadOwner:
         previous_handlers = {}
         next_observation = 0.0
         last = None
+        retry_delay = 0.5
         locks = ExitStack()
         try:
             locks.enter_context(FileLock(self.binding.runtime / "locks" / "foreground-run.lock"))
@@ -390,19 +430,47 @@ class LinuxThreadOwner:
             for signum in (signal.SIGTERM, signal.SIGINT):
                 previous_handlers[signum] = signal.signal(signum, self._signal_release)
             while True:
-                now = time.monotonic()
-                result = self.step(observe=now >= next_observation)
-                if now >= next_observation:
-                    next_observation = now + interval_seconds
-                if emit is not None and result != last:
-                    emit(result)
-                    last = result
-                if result["owner_state"] == "released":
-                    return 0
-                if self.client is not None:
-                    self.client.pump(timeout=1)
-                else:
-                    time.sleep(0.5)
+                try:
+                    now = time.monotonic()
+                    result = self.step(observe=now >= next_observation)
+                    if now >= next_observation:
+                        next_observation = now + interval_seconds
+                    if emit is not None and result != last:
+                        emit(result)
+                        last = result
+                    if result["owner_state"] == "released":
+                        return 0
+                    if self.client is not None:
+                        self.client.pump(timeout=1)
+                    else:
+                        time.sleep(0.5)
+                    retry_delay = 0.5
+                except (LinuxBindingError, AppServerError, ControlError, OSError, ValueError) as exc:
+                    if self.client is None and isinstance(exc, LinuxBindingError):
+                        # Initial binding/foreign-writer rejection is a failed
+                        # admission, not an interrupted observation transport.
+                        raise
+                    reason = owner_failure_reason(exc)
+                    recovering = isinstance(exc, (AppServerError, OSError))
+                    result = self._status("recovering" if recovering else "blocked", reason)
+                    result["notification"] = self.report_failure(reason, recovering=recovering)
+                    if emit is not None and result != last:
+                        emit(result)
+                        last = result
+                    client = self.client
+                    if client is not None:
+                        poll = getattr(client.process, "poll", lambda: getattr(client.process, "returncode", None))
+                        dead = poll() is not None
+                        readonly = not self.resume_requested and writer_pid(self.binding.codex_home, self.thread) is None
+                        if dead or readonly:
+                            self._resume_blocked = self.resume_requested and not self.resumed
+                            client.close()
+                            self.client = None
+                    # Preserve an uncertain/live writer. Recheck observation,
+                    # exact identity and ownership with bounded backoff instead
+                    # of tearing down its conversation on an observation error.
+                    time.sleep(retry_delay)
+                    retry_delay = min(30.0, retry_delay * 2)
         except (LinuxBindingError, AppServerError, ControlError, OSError) as exc:
             reason = owner_failure_reason(exc)
             # No retry after an uncertain resume. Journals and reservation survive.
@@ -420,9 +488,9 @@ class LinuxThreadOwner:
             for signum, handler in previous_handlers.items():
                 signal.signal(signum, handler)
 
-    def report_failure(self, reason):
+    def report_failure(self, reason, *, recovering=False):
         try:
-            return self.health.report(reason)
+            return self.health.report(reason, recovering=recovering)
         except (ControlError, OSError, ValueError, RuntimeError) as exc:
             return {"status": "blocked", "reason": owner_failure_reason(exc)}
 

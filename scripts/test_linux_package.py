@@ -458,19 +458,21 @@ def main() -> None:
                     fixture_pid = int((codex / "fixture-writer.pid").read_text())
                     assert os.getpgid(fixture_pid) == process.pid
                     os.kill(fixture_pid, signal.SIGKILL)
-                    stdout, stderr = process.communicate(timeout=20)
-                    assert process.returncode == 1, (stdout, stderr)
-                    failure = json.loads(stdout.splitlines()[-1])
-                    assert failure["owner_state"] == "blocked"
-                    assert failure["notification"]["status"] == "sent"
-                    assert len(alerts) == 1 and "can no longer watch or control" in alerts[0]["text"]
-                    (runtime / "linux/status.json").unlink()
-                    process = start_owner(alert_env)
-                    wait_state(runtime, "owned", process)
-                    deadline = time.monotonic() + 10
-                    while len(alerts) < 2 and time.monotonic() < deadline:
+                    # An observation failure no longer terminates the monitor.
+                    # It reports degradation, rebuilds the exited child, then
+                    # proves the same exact thread healthy without operator help.
+                    deadline = time.monotonic() + 25
+                    while time.monotonic() < deadline:
+                        assert process.poll() is None
+                        replacement = int((codex / "fixture-writer.pid").read_text())
+                        if replacement != fixture_pid and len(alerts) >= 2:
+                            break
                         time.sleep(0.1)
+                    assert replacement != fixture_pid
+                    assert "retrying observation automatically" in alerts[0]["text"]
                     assert len(alerts) == 2 and "again" in alerts[1]["text"]
+                    assert os.getpgid(replacement) == process.pid
+                    wait_state(runtime, "owned", process)
                     run([installed, "linux-release"])
                     wait_state(runtime, "released")
                     process.communicate(timeout=15)

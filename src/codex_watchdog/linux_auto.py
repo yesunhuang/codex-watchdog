@@ -116,6 +116,8 @@ class LinuxAutoWatchdog:
         self.service_factory = service_factory
         self.controllers = {}
         self.failed_resumes = {}
+        self.retry_after = {}
+        self.retry_delay = {}
         self.stopping = False
         self._discovery_stop = threading.Event()
         self._discovery_thread = None
@@ -207,13 +209,19 @@ class LinuxAutoWatchdog:
         # A failed lease guard can prevent the normal app-server pump from
         # polling this child. Refresh its native status instead of trusting the
         # cached returncode, which otherwise leaves an exited child unretired.
-        if client is None or client.process.poll() is None:
+        if client is None:
             return
-        if not owner.resumed:
+        if client.process.poll() is None:
+            # An initialized read-only helper that has never attempted resume
+            # owns no conversation. It can be rebuilt without touching a writer.
+            if (getattr(owner, "resume_requested", True)
+                    or writer_pid(self.codex_home, store.thread_id) is not None):
+                return
+        if not owner.resumed and getattr(owner, "resume_requested", True):
             # A failed initial resume has no verified ownership receipt. Wait
             # for native attachment or an explicit service restart, not a retry.
             self.failed_resumes[store.thread_id] = reason
-        client.close()  # This exact child has already exited; no live PID is killed.
+        client.close()  # Proven exited, or a helper that never acquired a writer.
         owner.client = None
         try:
             with store.guard(token) as value:
@@ -227,6 +235,9 @@ class LinuxAutoWatchdog:
             # ControlStore. They must not keep dead in-process resources alive.
             item["locks"].close()
             self.controllers.pop(store.thread_id, None)
+            delay = min(30.0, self.retry_delay.get(store.thread_id, 0.5) * 2)
+            self.retry_delay[store.thread_id] = delay
+            self.retry_after[store.thread_id] = time.monotonic() + delay
 
     def step(self, *, observe=True):
         results = []
@@ -257,6 +268,13 @@ class LinuxAutoWatchdog:
                                                 reason=self.failed_resumes[thread]))
                             continue
                         self.failed_resumes.pop(thread)
+                    if value.get("external_effect") is not None:
+                        raise ControlError("control_external_effect_unresolved")
+                    if (self._writer_kind(thread) != "vscode"
+                            and time.monotonic() < self.retry_after.get(thread, 0)):
+                        results.append(dict(thread_sha256=sha256_text(thread), state="recovering",
+                                            reason="app_server_retry_backoff"))
+                        continue
                     token = store.claim_remote(self.instance, self.locality,
                                                self._writer_kind(thread), ttl=120, host_observer=True)
                     if token is None:
@@ -271,7 +289,8 @@ class LinuxAutoWatchdog:
                             store.release_remote(token, kind)
                         raise
                 token, owner = item["token"], item["owner"]
-                if not item.get("failed"):
+                if (not item.get("failed") or not self.stopping
+                        and self._writer_kind(thread, owner) in ("remote", "vscode")):
                     store.renew(token, ttl=120)
                 value = store.read()
                 if self.stopping or value.get("auto_paused") is True:
@@ -301,10 +320,12 @@ class LinuxAutoWatchdog:
                                 cycle = self._cycle(item)
                                 if cycle.status != "completed":
                                     raise ControlError("control_observation_failed")
-                                owner.health.report()
+                                owner.report_observation_health()
                 if item.get("failed"):
                     store.renew(token, ttl=120)
                     item.pop("failed", None)
+                self.retry_after.pop(thread, None)
+                self.retry_delay.pop(thread, None)
                 if result["owner_state"] == "released":
                     kind = self._writer_kind(thread)
                     if kind not in ("absent", "vscode"):
@@ -323,7 +344,8 @@ class LinuxAutoWatchdog:
                 results.append(summary)
             except (ControlError, AppServerError, StoreBusyError, ValueError, OSError) as exc:
                 reason = owner_failure_reason(exc)
-                blocked = dict(thread_sha256=sha256_text(thread), state="blocked", reason=reason)
+                blocked = dict(thread_sha256=sha256_text(thread),
+                               state="recovering" if isinstance(exc, AppServerError) else "blocked", reason=reason)
                 if (item is not None and item["owner"].client is None
                         and reason in ("control_stale_epoch", "control_lease_expired")):
                     # A delayed observer may lose its lease to desktop fallback.
@@ -338,8 +360,9 @@ class LinuxAutoWatchdog:
                     try:
                         with acting_as(item["store"], item["token"]):
                             with item["store"].guard(item["token"]):
-                                item["owner"]._status("blocked", reason)
-                            blocked["notification"] = item["owner"].report_failure(reason)
+                                item["owner"]._status("recovering" if isinstance(exc, AppServerError) else "blocked", reason)
+                            blocked["notification"] = item["owner"].report_failure(
+                                reason, recovering=isinstance(exc, AppServerError))
                     except (ControlError, OSError, ValueError) as error:
                         blocked["notification"] = dict(status="blocked", reason=owner_failure_reason(error))
                     try:
