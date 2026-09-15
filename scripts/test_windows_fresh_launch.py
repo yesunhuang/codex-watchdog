@@ -52,10 +52,23 @@ class Console:
             self.output += part
 
     def interrupt(self):
-        self.process.sendcontrol("c")
+        # pywinpty versions whose sendcontrol passes bytes can type the literal
+        # repr b'\\x03'. Write the Unicode control character to the console.
+        self.process.write("\x03")
         deadline = time.monotonic() + 20
+        dismissed = False
         while self.process.isalive() and time.monotonic() < deadline:
-            time.sleep(0.1)
+            try:
+                part = self.pending.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if part is not None:
+                self.output += part
+            # The foreground launcher deliberately leaves startup/cancellation
+            # diagnostics open for the operator to read before closing.
+            if "Press Enter to close" in ANSI.sub("", self.output) and not dismissed:
+                self.process.write("\r\n")
+                dismissed = True
         assert not self.process.isalive(), "Own fixture did not exit after Ctrl-C"
 
     def close(self):
