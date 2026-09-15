@@ -104,12 +104,20 @@ def route_environment(provider, route):
         raise MessagingError("messaging_saved_profile_incomplete")
     if provider == "slack":
         values = dict(CHANNEL_ID=route.get("channel_id"), ALLOWED_USER_IDS=",".join(users))
+        if "reply_mode" in route:
+            if route["reply_mode"] not in ("poll", "socket"):
+                raise MessagingError("messaging_saved_profile_invalid")
+            values["REPLY_MODE"] = route["reply_mode"]
         probe = dict(BOT_TOKEN="xoxb-probe", APP_TOKEN="xapp-probe", **values)
         if not slack_complete({PREFIX + "SLACK_" + k: v for k, v in probe.items()}):
             raise MessagingError("messaging_saved_profile_invalid")
     else:
         values = dict(DOMAIN=route.get("domain"), APP_ID=route.get("app_id"),
                       CHAT_ID=route.get("chat_id"), ALLOWED_USER_IDS=",".join(users))
+        if "reply_mode" in route:
+            if route["reply_mode"] not in ("poll", "socket"):
+                raise MessagingError("messaging_saved_profile_invalid")
+            values["REPLY_MODE"] = route["reply_mode"]
         probe = {PREFIX + "LARK_" + k: v for k, v in dict(APP_SECRET="probe", **values).items()}
         if not lark_complete(probe):
             raise MessagingError("messaging_saved_profile_invalid")
@@ -303,6 +311,9 @@ def load_saved(environment, root, store=None, *, secrets=True):
             for account, key, placeholder in (("slack-bot-token", "BOT_TOKEN", "xoxb-probe"),
                                                ("slack-app-token", "APP_TOKEN", "xapp-probe")):
                 if not store.has(SLACK_SERVICE, account):
+                    mode = env.get(PREFIX + "SLACK_REPLY_MODE", values.get(PREFIX + "SLACK_REPLY_MODE", "socket"))
+                    if key == "APP_TOKEN" and mode == "poll":
+                        continue
                     raise MessagingError("messaging_saved_profile_incomplete")
                 values[PREFIX + "SLACK_" + key] = store.get(SLACK_SERVICE, account) if secrets else placeholder
         else:
@@ -319,6 +330,9 @@ def load_saved(environment, root, store=None, *, secrets=True):
                                                          username=route.get("app_id")) if secrets else "probe")
             if SELECTOR not in env and route.get("interactive_transport") in ("slack", "lark", "both"):
                 env[SELECTOR] = route["interactive_transport"]
+        mode_key = PREFIX + provider.upper() + "_REPLY_MODE"
+        if mode_key in env:
+            values.pop(mode_key, None)  # Preserve an explicit operational choice.
         env.update(values)
     marker = root / MARKER
     managed_environment = marker.exists() and read_object(marker).get("status") == "configured"
@@ -331,7 +345,9 @@ def load_saved(environment, root, store=None, *, secrets=True):
         saved = linux_environment(root / "linux-notifications.env")
         for provider in ("slack", "lark"):
             if not identity_keys(environment, provider):
-                env.update({k: v for k, v in saved.items() if k.startswith(PREFIX + provider.upper() + "_")})
+                for key, value in saved.items():
+                    if key.startswith(PREFIX + provider.upper() + "_"):
+                        env.setdefault(key, value)
         if SELECTOR not in env and SELECTOR in saved:
             env[SELECTOR] = saved[SELECTOR]
     if SELECTOR not in env and marker.exists():

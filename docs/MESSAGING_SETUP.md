@@ -15,34 +15,43 @@ on `PATH`. Run setup on the machine that will send notifications.
 
 Create/install your bot first using the [Slack prerequisites](SETUP.md#slack-quick-reply-relay)
 or [Feishu/Lark prerequisites](FEISHU_LARK.md#prepare-the-application). Setup does
-not change app permissions. Stop that app's other listeners during pairing;
-the same runtime's active listener locks also prevent competing setup.
+not change app permissions. Existing monitors on other devices can keep running
+throughout pairing. New setups automatically use polling for both providers.
 
-1. Choose the provider(s). Enter Slack's bot and app tokens, or Feishu/Lark's
+1. Choose the provider(s). Enter Slack's bot token, or Feishu/Lark's
    app ID, secret, and region. Secret prompts are hidden.
-2. Send the displayed `WATCHDOG-PAIR-...` phrase as a new plain-text message in
-   the intended bot conversation within three minutes. For Slack, use a public
-   or private channel containing the bot; the existing relay does not support
-   direct-message channel IDs.
+2. Select the intended channel/group from the bot's conversation list. Send the
+   displayed `WATCHDOG-PAIR-...` phrase there as a new plain-text message within
+   three minutes. Slack supports public/private channels containing the bot.
 3. Check the detected conversation and account in the terminal, then confirm.
-   No channel ID or user/Open ID lookup is needed. Both-provider setup pairs
-   both apps before saving credentials.
+   Group setup needs no channel ID or user/Open ID lookup. Feishu's group-list
+   API cannot discover direct conversations; the advanced direct-chat option
+   asks for that chat ID only. Both-provider setup pairs both apps before saving
+   credentials.
+   If an older app lacks conversation-list permission, setup asks only for the
+   channel/chat ID instead; existing permissions can remain unchanged.
 4. Start the foreground monitor or restart your existing service when its work
    permits. Reply using the chat app's **Reply** action on a new WatchDog
    notification. Pairing alone does not route arbitrary top-level messages to
    Codex; existing notification-to-thread mappings are still required.
 
-The bounded listeners use the providers' authenticated connections and exact
-message context. Slack's authenticated `hello` supplies the app identity and
-connection count, and message authorizations must match the bot's `auth.test`
-identity. Feishu/Lark events must match the selected app and region. Expired,
-edited, bot, unrelated, or ambiguous confirmations are rejected. See the official
-[Slack Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode/),
-[Slack event authorization](https://docs.slack.dev/apis/events-api/), and
-[Feishu receive-message event](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive)
-references. Pairing needs no public callback server. Normal Feishu/Lark replies
-use history polling and require the history access listed in the prerequisites;
-several machines can share the same app without competing for reply events.
+Each runtime creates a persistent random seed and hashes it with the machine
+name. The first 12 hexadecimal characters label the device in pairing prompts
+and polling health records. No MAC address or raw machine name is stored in this
+identity file. The label is for identification; a fresh 128-bit random code
+authorizes each pairing attempt. A short label alone never grants access.
+
+Pairing reads only the selected conversation through the authenticated provider
+API. Reads do not consume events, so simultaneous devices cannot steal each
+other's code. Expired, bot, unrelated, ambiguous, known-edited or changed
+confirmations are rejected. The confirmation is re-read before saving. Feishu's
+general `updated` flag also changes on new messages; validation uses creation
+time, exact text, sender and observed content changes instead of treating that
+flag alone as a text edit. No callback server or temporary socket is needed.
+See [Slack bot conversations](https://docs.slack.dev/reference/methods/users.conversations/),
+[Slack thread history](https://docs.slack.dev/reference/methods/conversations.replies/),
+[Feishu group discovery](https://open.feishu.cn/document/server-docs/group/chat/list)
+and [Feishu history](https://open.feishu.cn/document/server-docs/im-v1/message/list).
 
 ## Existing settings and upgrades
 
@@ -52,6 +61,13 @@ transport selection, or setup marker suppresses it. **CONFIGURED** reuses the
 current settings; **EXISTING_OR_PARTIAL** preserves them and reports a manual
 diagnostic. Partial explicit provider variables are never combined with a saved
 app's credentials. Unknown configuration fields are retained.
+
+Fresh Slack profiles save `reply_mode=poll` on every platform. Existing explicit
+transport choices remain intact; legacy Slack profiles without a mode retain
+their existing Socket Mode behavior and mappings. Converting those managed
+profiles is a separate deliberate change, not an upgrade-time state rewrite.
+Feishu/Lark's default reply mode is polling. Provider permissions and rate limits
+still apply; setup checks history access before declaring pairing complete.
 
 ```text
 codex-watchdog setup-messaging --check

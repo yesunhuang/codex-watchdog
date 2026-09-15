@@ -205,6 +205,20 @@ def main() -> None:
                                          "org.localcodexwatchdog.slack", "-w", str(keychain)], env=environment,
                                         capture_output=True, text=True, timeout=10, check=True)
                 assert result.stdout.strip() == expected
+            # A new profile has only a bot token. Prove the packaged launcher
+            # loads its saved poll mode without requiring --shared-slack-app.
+            poll_config = root / "fresh poll config"
+            poll_config.mkdir()
+            (poll_config / "slack-relay.json").write_text(json.dumps(dict(schema_version=1,
+                channel_id="G12345678", allowed_user_ids=["U12345678"], reply_mode="poll")))
+            poll_security = root / "poll security fixture"
+            poll_security.write_text('#!/bin/bash\nfor arg in "$@"; do [[ $arg == slack-app-token ]] && exit 44; done\nexec /usr/bin/security "$@" "$PACKAGE_TEST_KEYCHAIN"\n')
+            poll_security.chmod(0o700)
+            poll_env = {**keychain_env, "CODEX_WATCHDOG_MACOS_CONFIG_DIR": str(poll_config),
+                        "CODEX_WATCHDOG_MACOS_SECURITY_BIN": str(poll_security)}
+            poll_summary = json.loads(run([launcher, "--slack-only", "--dry-run"], env=poll_env).stdout)
+            assert poll_summary["status"] == "ready" and poll_summary["slack_reply_mode"] == "poll"
+            assert not (poll_config / "messaging-setup.json").exists()
         finally:
             run([security, "delete-keychain", keychain])
 

@@ -35,6 +35,7 @@ class FakeProvider:
         self.responses = Queue()
         self.token = "loopback-bearer-token"
         self.history = []
+        self.chats = [dict(chat_id=CHAT, name="Pairing group")]
         self.gets = []
         provider = self
 
@@ -44,6 +45,10 @@ class FakeProvider:
 
             def do_GET(self):
                 provider.gets.append(self.path)
+                if self.path.startswith("/open-apis/im/v1/chats?"):
+                    assert self.headers.get("Authorization") == "Bearer " + provider.token
+                    self.respond({"code": 0, "data": {"items": provider.chats, "has_more": False}})
+                    return
                 if self.path.startswith("/open-apis/im/v1/messages?"):
                     assert self.headers.get("Authorization") == "Bearer " + provider.token
                     if provider.failure:
@@ -151,31 +156,30 @@ def provider():
         instance.close()
 
 
-def test_setup_pairs_through_real_sdk_without_posting_or_codex_mapping(provider, tmp_path, monkeypatch):
+def test_setup_pairs_through_real_sdk_without_posting_or_codex_mapping(provider, tmp_path):
     from codex_watchdog import messaging_pairing
+    from codex_watchdog.pairing_api import PairingApi
     from codex_watchdog.messaging_profile import PREFIX
     from codex_watchdog.storage import FileLock
-    def connection(config, callback):
-        return LarkConnection(config, callback, timeout=2, channel=provider.channel())
-    monkeypatch.setattr(messaging_pairing, "LarkConnection", connection)
     output = []
     def emit_confirmation(text):
         output.append(text)
         if text.startswith("WATCHDOG-PAIR-"):
-            socket = provider.connections.get(timeout=5)
-            payload = provider.event(text)
-            payload["event"]["message"].pop("root_id")
-            payload["event"]["message"].pop("parent_id")
-            payload["event"]["message"]["create_time"] = str(int(time.time() * 1000))
-            provider.emit(socket, payload)
+            provider.history = [dict(chat_id=CHAT, message_id="om_pairing000001", msg_type="text", deleted=False,
+                create_time=str(int(time.time() * 1000) + 1), updated=True,
+                sender=dict(sender_type="user", id_type="open_id", id=USER),
+                body=dict(content=json.dumps(dict(text=text))))]
     values = {PREFIX + "LARK_" + k: v for k, v in dict(APP_ID=provider.config.app_id,
         APP_SECRET=provider.config.app_secret, DOMAIN="feishu").items()}
-    paired = messaging_pairing.pair_provider("lark", values, tmp_path, read=lambda _: "yes", output=emit_confirmation)
-    assert paired["chat_id"] == CHAT and paired["allowed_user_ids"] == [USER]
-    assert not any("/im/v1/messages" in path for path, _, _ in provider.posts)
-    assert not (tmp_path / "lark").exists() and not (tmp_path / "inbox").exists()
+    answers = iter(["1", "yes"])
     with FileLock(tmp_path / "locks" / ("lark-listener-" + provider.config.scope + ".lock")):
-        pass  # Pairing releases the normal listener lock.
+        paired = messaging_pairing.pair_provider("lark", values, tmp_path, read=lambda _: next(answers),
+            output=emit_confirmation, api_factory=lambda *a: PairingApi(*a, client=provider.api().client))
+    assert paired["chat_id"] == CHAT and paired["allowed_user_ids"] == [USER]
+    assert paired["reply_mode"] == "poll"
+    assert not any("/im/v1/messages" in path for path, _, _ in provider.posts)
+    assert provider.connections.empty()
+    assert not (tmp_path / "lark").exists() and not (tmp_path / "inbox").exists()
 
 
 def test_real_sdk_auth_create_reply_and_stable_idempotency_uuid(provider):
@@ -333,3 +337,16 @@ def test_lark_credentials_are_not_inherited_by_codex(monkeypatch, tmp_path):
     assert child["UNRELATED_USER_SETTING"] == "retained"
     import os
     assert os.environ["CODEX_WATCHDOG_LARK_APP_SECRET"] == "provider-private"
+
+
+def test_real_sdk_pairing_chat_discovery_and_history_without_socket(provider):
+    from codex_watchdog.pairing_api import PairingApi
+    from codex_watchdog.messaging_profile import PREFIX
+    values = {PREFIX + "LARK_" + k: v for k, v in dict(APP_ID=provider.config.app_id,
+        APP_SECRET=provider.config.app_secret, DOMAIN=provider.config.domain).items()}
+    api = PairingApi("lark", values, client=provider.api().client)
+    assert api.conversations() == [(CHAT, "Pairing group")]
+    assert api.history(CHAT, 1700000000, 1700000001) == ([], None)
+    assert any("/im/v1/chats?" in path for path in provider.gets)
+    assert any("container_id=" + CHAT in path for path in provider.gets)
+    assert not any(path == "/callback/ws/endpoint" for path, *_ in provider.posts)

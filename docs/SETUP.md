@@ -609,28 +609,31 @@ ignored. Durable relay receipts contain hashes and routing identifiers, never
 Slack tokens or reply text.
 
 First-use interactive launch offers [messaging setup](MESSAGING_SETUP.md).
-Choose Slack or Both, enter the two tokens, and send the displayed confirmation
-phrase to your intended channel. Confirm the detected conversation/account in
+Choose Slack or Both, enter the bot token, select the channel, and send the displayed confirmation
+phrase there. Confirm the detected conversation/account in
 the terminal; no manual channel/member ID lookup is needed. The same flow is
 available with `codex-watchdog setup-messaging`. Existing settings suppress the
 automatic prompt and remain unchanged.
 
 Prepare one Slack app:
 
-1. Enable **Socket Mode** and create an app-level token with
-   `connections:write`.
-2. Add the bot scope `chat:write`. For a public channel, also add
-   `channels:history` and subscribe to the `message.channels` bot event. For a
-   private channel, use `groups:history` and `message.groups` instead.
+1. Add the bot scope `chat:write`. For a public channel, also add
+   `channels:history` and `channels:read`; for a private channel use
+   `groups:history` and `groups:read`. Read scopes let setup list the bot's
+   channels; message-history scopes allow independent pairing and reply reads.
+2. New setup automatically selects polling on Windows, Linux and macOS. It
+   needs no app-level token, Socket Mode connection, or event subscription.
 3. Reinstall the app after changing scopes, invite the bot to the selected
    channel. The confirmation message discovers that channel and operator. Use a
    channel ID beginning with `C` or `G`; one-to-one `D` identifiers are not
    supported by this relay.
 
-These are the standard [Slack Bolt Socket Mode][slack-bolt-socket-mode] and
-[`chat.postMessage`][slack-chat-post-message] paths. No public callback URL is
-required. Stop any older WatchDog process before starting the configured one;
-running two Socket Mode clients for the same Slack app can split deliveries.
+Notifications use [`chat.postMessage`][slack-chat-post-message]; replies use
+[`conversations.replies`](https://docs.slack.dev/reference/methods/conversations.replies/).
+Setup checks both selected-channel history and thread-history access. Existing
+monitors on other machines can stay running; polling does not consume their
+events. No public callback URL is required. Apps lacking list access can supply
+the channel ID during pairing without changing their existing permissions.
 
 When a Windows listener already uses the same app, the Mac launcher supports
 `--shared-slack-app` (from 0.2.23). It uses the existing polling transport:
@@ -644,6 +647,10 @@ mappings and receipts are retained separately to avoid replaying old replies.
 
 For explicitly managed or partial existing configurations, the manual helpers
 below remain available. They require the channel and permitted member IDs.
+Legacy Socket Mode profiles keep their transport and existing mappings. For
+that mode, enable Socket Mode with an app-level `connections:write` token and
+subscribe to `message.channels` or `message.groups`. Sharing a socket app among
+several listeners can split deliveries; the new setup flow avoids this.
 Packages already include the dependency. For a source checkout, install the relay
 dependency. The direct form also works with older pip
 versions that cannot perform a PEP 517 editable install:

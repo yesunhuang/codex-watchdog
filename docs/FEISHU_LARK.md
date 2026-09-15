@@ -16,16 +16,18 @@ choose the domain that owns your application.
    Grant the [message-history API](https://open.feishu.cn/document/server-docs/im-v1/message/list)
    permission (`im:message` or the applicable read-only message permission).
    Reading a group also requires access to that group's messages.
-3. Configure long-connection event delivery and subscribe to
-   `im.message.receive_v1`. Publish the application and permission changes to
-   your tenant, and open the bot conversation or add it to the chosen group.
+3. Grant [group-list access](https://open.feishu.cn/document/server-docs/group/chat/list)
+   (`im:chat:readonly` or its applicable group-list permission) for automatic
+   conversation selection. Publish the application and permission changes to
+   your tenant, and add the bot to the chosen group. Long-connection event
+   subscriptions are needed only for the advanced `socket` mode.
 4. Obtain the app's `cli_...` ID and secret. The setup flow learns the conversation
    and permitted sender from your confirmation message; no Open ID lookup is needed.
 
 Normal replies use authenticated history polling every 10 seconds. Each runtime
 accepts only replies to its recorded notifications, so several machines may
 share the app and conversation without competing for events. First-use pairing
-uses a temporary WebSocket. Neither path needs a public callback server. An
+also polls independently, using a device label and a fresh code. Neither path needs a public callback server. An
 incoming-webhook bot alone cannot receive these replies.
 
 Feishu's long connections deliver each event to one client, not all clients

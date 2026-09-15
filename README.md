@@ -155,8 +155,9 @@ acceptance limits. VS Code may require Retry or a window reload after handback.
 through installation and startup step by step.
 
 On a pristine interactive first launch, choose **Slack**, **Feishu/Lark**, **Both**,
-or **Skip**. Send the displayed confirmation phrase to pair your conversation and
-account; no chat/user ID lookup is needed. Existing settings and upgrades suppress
+or **Skip**. Select the bot's group/channel and send the displayed device-specific
+confirmation phrase to pair your account. New setups use independent polling for
+both providers; other devices can stay running. Existing settings and upgrades suppress
 the prompt. For manual setup, run `codex-watchdog setup-messaging`; see
 [messaging setup](docs/MESSAGING_SETUP.md) for services and recovery.
 

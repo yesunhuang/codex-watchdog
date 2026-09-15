@@ -10,12 +10,14 @@ import time
 
 from .lark_transport import LarkApi, LarkTransportError, valid_id
 from .models import sha256_text, utc_now
+from .messaging_device import device_label
 from .storage import InstructionStore
 
 
 class LarkReplyPoller:
     def __init__(self, relay, *, api=None, clock=time.time):
         self.relay = relay
+        self.device_label = device_label(relay.runtime)
         self.api = api or relay.api or LarkApi(relay.config, relay.timeout)
         self.clock = clock
         self.started_ms = int(clock() * 1000)
@@ -49,7 +51,7 @@ class LarkReplyPoller:
 
     def _health(self, status, **fields):
         InstructionStore._atomic_json(self.health_path,
-            dict(schema_version=1, checked_at=utc_now(), status=status, **fields))
+            dict(schema_version=1, checked_at=utc_now(), status=status, device_label=self.device_label, **fields))
 
     def poll_once(self):
         """One page per tick; the relay owns the runtime's listener lock."""

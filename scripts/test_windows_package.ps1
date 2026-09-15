@@ -291,6 +291,20 @@ try {
             throw "One-click upgrade exposed a saved Slack secret."
         }
     }
+    # Fresh polling setup has only a bot credential. The packaged desktop
+    # launcher must reuse it without demanding an obsolete Socket Mode token.
+    $pollLocal = Join-Path $testRoot "poll-profile"
+    $pollConfig = Join-Path $pollLocal "CodexWatchdog"
+    New-Item -ItemType Directory -Path $pollConfig -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $savedConfigRoot "slack-bot-token.clixml") -Destination $pollConfig
+    @{ schema_version = 1; channel_id = "C12345678"; allowed_user_ids = @("U12345678"); reply_mode = "poll" } |
+        ConvertTo-Json | Set-Content -LiteralPath (Join-Path $pollConfig "slack-relay.json") -Encoding UTF8
+    $env:LOCALAPPDATA = $pollLocal
+    $pollOutput = & $powershell -NoProfile -File $launcher -DryRun -NoDuo -Runtime $runtime
+    if ($LASTEXITCODE -ne 0 -or ($pollOutput | Out-String) -notmatch "slack_reply\s*:\s*encrypted_store") {
+        throw "Fresh polling profile failed in the packaged desktop launcher."
+    }
+    $env:LOCALAPPDATA = Split-Path -Parent $savedConfigRoot
     [pscustomobject][ordered]@{
         status = "passed"
         version = $ExpectedVersion
@@ -307,6 +321,7 @@ try {
         protected_files_unchanged = $true
         one_click_saved_configuration = "reused_without_secret_output"
         messaging_onboarding = "suppressed_for_actual_previous_public_profile"
+        fresh_polling_launcher = "ready_without_app_token"
     } | ConvertTo-Json -Compress
 } finally {
     foreach ($name in $environmentNames) {

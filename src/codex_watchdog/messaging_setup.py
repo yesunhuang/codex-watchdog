@@ -70,6 +70,7 @@ def _retryable(root, detection, environment):
 def _save(root, store, selection, pairings, credentials):
     # Pair ALL requested providers before writing ANY credentials. Pairing
     # failure/cancellation leaves only the explicit nonsecret setup marker.
+    pairings = {provider: dict(route, reply_mode="poll") for provider, route in pairings.items()}
     if store.platform.startswith("linux"):
         values = {SELECTOR: selection, PREFIX + "SLACK_REPLY_MODE": "poll"} if "slack" in pairings else {SELECTOR: selection}
         for provider, route in pairings.items():
@@ -87,7 +88,8 @@ def _save(root, store, selection, pairings, credentials):
         for provider, route in pairings.items():
             if provider == "slack":
                 for account, key in (("slack-bot-token", "BOT_TOKEN"), ("slack-app-token", "APP_TOKEN")):
-                    store.put(SLACK_SERVICE, account, credentials[provider][PREFIX + "SLACK_" + key])
+                    if PREFIX + "SLACK_" + key in credentials[provider]:
+                        store.put(SLACK_SERVICE, account, credentials[provider][PREFIX + "SLACK_" + key])
             else:
                 store.put(LARK_SERVICE, "lark-app-secret", credentials[provider][PREFIX + "LARK_APP_SECRET"],
                           username=route["app_id"])
@@ -134,17 +136,14 @@ def setup(*, environment=None, root=None, runtime=None, store=None, auto=False, 
                     _marker(root, "skipped")
                     output("Messaging setup skipped. " + MANUAL)
                     return 0
-                output("Use an app whose WatchDog listeners are stopped on other machines during this short pairing step.")
-                if read("No other listener is using the selected app(s). Type yes to continue: ").strip().lower() != "yes":
-                    raise MessagingError("messaging_pairing_cancelled")
+                output("Other devices can keep running. Pairing and replies use independent polling automatically.")
                 credentials, pairings = {}, {}
                 for provider in (("slack", "lark") if selection == "both" else (selection,)):
                     if provider == "slack":
                         bot = secret("Slack bot token (xoxb-, hidden): ").strip()
-                        app = secret("Slack app token (xapp-, hidden): ").strip()
-                        if not bot.startswith("xoxb-") or not app.startswith("xapp-"):
+                        if not bot.startswith("xoxb-"):
                             raise MessagingError("messaging_slack_tokens_invalid")
-                        values = {PREFIX + "SLACK_BOT_TOKEN": bot, PREFIX + "SLACK_APP_TOKEN": app}
+                        values = {PREFIX + "SLACK_BOT_TOKEN": bot}
                     else:
                         domain = read("Domain (feishu or lark) [feishu]: ").strip().lower() or "feishu"
                         app_id = read("App ID (cli_...): ").strip()

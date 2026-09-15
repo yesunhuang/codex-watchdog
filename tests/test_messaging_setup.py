@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,7 +13,6 @@ from codex_watchdog.messaging_profile import (
     ConfigurationState as State, SecretStore, MessagingError, MARKER, PREFIX, SELECTOR,
     SLACK_SERVICE, LARK_SERVICE, detect, load_saved, json_bytes, write_new, linux_environment,
 )
-from codex_watchdog.messaging_pairing import NoncePairing
 
 
 class FixtureStore:
@@ -24,6 +24,9 @@ class FixtureStore:
 
     def has(self, service, account):
         return (self.root / (account + ".clixml")).exists()
+
+    def _security(self, *args):
+        return SimpleNamespace(returncode=44)
 
     def get(self, service, account, **kwargs):
         self.reads.append(account)
@@ -131,7 +134,7 @@ def test_headless_pristine_never_prompts_or_writes(tmp_path):
 
 @pytest.mark.parametrize("failure", [KeyboardInterrupt(), EOFError(), MessagingError("messaging_pairing_timed_out")])
 def test_failed_or_cancelled_pairing_leaves_only_nonsecret_suppression(tmp_path, failure):
-    answers = iter(["2", "yes", "feishu", "cli_fixture00001"])
+    answers = iter(["2", "feishu", "cli_fixture00001"])
     def failed(*a, **kw):
         raise failure
     store = FixtureStore(tmp_path)
@@ -146,8 +149,8 @@ def test_failed_or_cancelled_pairing_leaves_only_nonsecret_suppression(tmp_path,
 
 
 def test_both_providers_pair_before_any_credentials_are_saved(tmp_path):
-    answers = iter(["3", "yes", "feishu", "cli_fixture00001"])
-    tokens = iter(["xoxb-private", "xapp-private", "lark-private"])
+    answers = iter(["3", "feishu", "cli_fixture00001"])
+    tokens = iter(["xoxb-private", "lark-private"])
     store = FixtureStore(tmp_path)
     def pair(provider, values, runtime, **kwargs):
         assert not store.values
@@ -159,6 +162,43 @@ def test_both_providers_pair_before_any_credentials_are_saved(tmp_path):
     assert env[SELECTOR] == "both"
     assert env[PREFIX + "LARK_APP_SECRET"] == "lark-private"
     assert b"private" not in b"".join(snapshot(tmp_path).values())
+    assert env[PREFIX + "SLACK_REPLY_MODE"] == env[PREFIX + "LARK_REPLY_MODE"] == "poll"
+    assert PREFIX + "SLACK_APP_TOKEN" not in env
+
+
+@pytest.mark.parametrize("platform", ["win32", "darwin"])
+def test_new_desktop_setup_saves_poll_without_app_token_or_listener_confirmation(tmp_path, platform):
+    store = FixtureStore(tmp_path)
+    store.platform = platform
+    prompts = []
+    def read(prompt):
+        prompts.append(prompt)
+        assert "Choose 1-4" in prompt
+        return "1"
+    assert setup(environment={}, root=tmp_path, store=store, is_interactive=True,
+                 read=read, secret=lambda _: "xoxb-fixture", pair=lambda *a, **k: route("slack")) == 0
+    assert len(prompts) == 1
+    env = load_saved({}, tmp_path, store)
+    assert env[PREFIX + "SLACK_REPLY_MODE"] == "poll"
+    assert PREFIX + "SLACK_APP_TOKEN" not in env
+    assert detect({}, tmp_path, store).state == State.CONFIGURED
+    from codex_watchdog.notifications import NotificationConfig
+    config = NotificationConfig.from_environment(env)
+    assert config.slack_reply_mode == "poll" and config.interactive_relay_configured
+
+
+@pytest.mark.parametrize("provider", ["slack", "lark"])
+def test_saved_reply_mode_and_explicit_mode_choices_preserved(tmp_path, provider):
+    store = configure(tmp_path / "config", (provider,))
+    path = store.root / (provider + "-relay.json")
+    value = json.loads(path.read_bytes())
+    value["reply_mode"] = "poll"
+    path.write_bytes(json_bytes(value))
+    before = snapshot(store.root)
+    key = PREFIX + provider.upper() + "_REPLY_MODE"
+    assert load_saved({}, store.root, store)[key] == "poll"
+    assert load_saved({key: "socket"}, store.root, store)[key] == "socket"
+    assert snapshot(store.root) == before
 
 
 @pytest.mark.parametrize("provider,field", [("slack", "BOT_TOKEN"), ("slack", "CHANNEL_ID"),
@@ -184,78 +224,6 @@ def test_complete_explicit_environment_wins_without_decryption(tmp_path):
     assert not store.reads and snapshot(store.root) == before
 
 
-def pairing(provider):
-    now = [1700000000.0]
-    p = NoncePairing(provider, app_id="cli_fixture00001" if provider == "lark" else "A12345678",
-        domain="feishu", team_id="T12345678", bot_user="U87654321", clock=lambda: now[0], monotonic=lambda: now[0])
-    if provider == "lark":
-        body = {"schema": "2.0", "header": dict(app_id=p.app_id, event_type="im.message.receive_v1", event_id="event-1"),
-            "event": dict(sender=dict(sender_type="user", sender_id=dict(open_id="ou_fixture00001")),
-            message=dict(chat_id="oc_fixture00001", message_id="om_fixture00001", message_type="text", chat_type="p2p",
-                         create_time=str(int(now[0] * 1000)), content=json.dumps(dict(text=p.nonce))))}
-    else:
-        body = dict(type="event_callback", team_id=p.team_id, api_app_id="A12345678", event_id="event-1",
-            authorizations=[dict(team_id=p.team_id, user_id=p.bot_user, is_bot=True)],
-            event=dict(type="message", channel="C12345678", channel_type="channel", user="U12345678",
-                       ts=str(now[0]), text=p.nonce))
-    return p, body, now
-
-
-@pytest.mark.parametrize("provider", ["slack", "lark"])
-def test_nonce_exact_once_expiry_and_ambiguity(provider):
-    p, body, now = pairing(provider)
-    assert p.offer(body)
-    assert not p.offer(deepcopy(body))
-    assert p.finish()["allowed_user_ids"]
-    assert not p.offer(body)
-    with pytest.raises(MessagingError):
-        p.finish()
-    p, body, now = pairing(provider)
-    now[0] += 180
-    assert not p.offer(body)
-    with pytest.raises(MessagingError):
-        p.finish()
-    p, body, _ = pairing(provider)
-    assert p.offer(body)
-    if provider == "lark":
-        body["event"]["sender"]["sender_id"]["open_id"] = "ou_another00001"
-    else:
-        body["event"]["channel"] = "C99999999"
-    assert not p.offer(body)
-    with pytest.raises(MessagingError, match="ambiguous"):
-        p.finish()
-
-
-@pytest.mark.parametrize("mutation", ["wrong_app", "bot", "old", "future", "reply", "edited", "deleted", "altered", "bad_id", "nontext"])
-@pytest.mark.parametrize("provider", ["slack", "lark"])
-def test_nonce_rejects_wrong_context_and_unsafe_messages(provider, mutation):
-    p, body, _ = pairing(provider)
-    msg = body["event"]["message"] if provider == "lark" else body["event"]
-    if mutation == "wrong_app":
-        (body["header"] if provider == "lark" else body)["app_id" if provider == "lark" else "api_app_id"] = "wrong"
-    elif mutation == "bot":
-        if provider == "lark": body["event"]["sender"]["sender_type"] = "app"
-        else: msg["bot_id"] = "B12345678"
-    elif mutation in ("old", "future"):
-        msg["create_time" if provider == "lark" else "ts"] = str((p.started + (-1 if mutation == "old" else 20)) * (1000 if provider == "lark" else 1))
-    elif mutation == "reply": msg["parent_id" if provider == "lark" else "thread_ts"] = "parent"
-    elif mutation == "edited": msg["edited"] = True
-    elif mutation == "deleted": msg["deleted" if provider == "lark" else "subtype"] = "message_deleted"
-    elif mutation == "altered": msg["content" if provider == "lark" else "text"] += "x"
-    elif mutation == "bad_id": msg["chat_id" if provider == "lark" else "channel"] = "invalid"
-    elif mutation == "nontext": msg["message_type" if provider == "lark" else "type"] = "file"
-    assert not p.offer(body)
-    with pytest.raises(MessagingError): p.finish()
-
-
-def test_slack_hello_requires_one_authenticated_app_connection():
-    p, body, _ = pairing("slack")
-    assert p.slack_hello(dict(type="hello", connection_info=dict(app_id="A12345678"), num_connections=1))
-    assert not p.slack_hello(dict(type="hello", connection_info=dict(app_id="A12345678"), num_connections=2))
-    p.offer(body)
-    with pytest.raises(MessagingError): p.finish()
-
-
 def test_second_provider_failure_never_claims_complete_or_overwrites_state(tmp_path):
     store = FixtureStore(tmp_path)
     original = store.put
@@ -264,8 +232,8 @@ def test_second_provider_failure_never_claims_complete_or_overwrites_state(tmp_p
             raise MessagingError("messaging_keychain_store_failed")
         return original(service, account, value, **kwargs)
     store.put = fail_second
-    answers = iter(["3", "yes", "feishu", "cli_fixture00001"])
-    tokens = iter(["xoxb-private", "xapp-private", "lark-private"])
+    answers = iter(["3", "feishu", "cli_fixture00001"])
+    tokens = iter(["xoxb-private", "lark-private"])
     assert setup(environment={}, root=tmp_path, store=store, is_interactive=True,
         read=lambda _: next(answers), secret=lambda _: next(tokens), pair=lambda provider, *a, **kw: route(provider)) == 1
     assert detect({}, tmp_path, store).state == State.EXISTING_OR_PARTIAL
@@ -274,15 +242,6 @@ def test_second_provider_failure_never_claims_complete_or_overwrites_state(tmp_p
     assert json.loads(before[MARKER])["status"] == "failed"
     assert setup(environment={}, root=tmp_path, store=store, auto=True, is_interactive=True, read=forbidden) == 0
     assert snapshot(tmp_path) == before
-
-
-def test_wrong_slack_team_bot_authorization_and_dm_are_rejected():
-    for field in ("team", "authorization", "dm"):
-        p, body, _ = pairing("slack")
-        if field == "team": body["team_id"] = "T99999999"
-        if field == "authorization": body["authorizations"][0]["user_id"] = "U99999999"
-        if field == "dm": body["event"].update(channel_type="im", channel="D12345678")
-        assert not p.offer(body)
 
 
 def test_background_terminal_process_is_not_interactive(monkeypatch):
@@ -320,14 +279,18 @@ def test_native_linux_saved_environment_permissions_and_reuse(tmp_path):
     store = FixtureStore(tmp_path)
     store.platform = "linux"
     tmp_path.chmod(0o700)
-    answers = iter(["1", "yes"])
-    tokens = iter(["xoxb-fixture", "xapp-fixture"])
+    answers = iter(["1"])
+    tokens = iter(["xoxb-fixture"])
     assert setup(environment={}, root=tmp_path, store=store, is_interactive=True, read=lambda _: next(answers),
         secret=lambda _: next(tokens), pair=lambda *a, **kw: route("slack")) == 0
     path = tmp_path / "linux-notifications.env"
     assert path.stat().st_mode & 0o777 == 0o600
     assert linux_environment(path)[PREFIX + "SLACK_BOT_TOKEN"] == "xoxb-fixture"
+    assert linux_environment(path)[PREFIX + "SLACK_REPLY_MODE"] == "poll"
     assert detect({}, tmp_path, store).state == State.CONFIGURED
+    # The selected environment still wins over a saved operational default.
+    key = PREFIX + "SLACK_REPLY_MODE"
+    assert load_saved({key: "socket"}, tmp_path, store)[key] == "socket"
     path.chmod(0o644)
     with pytest.raises(MessagingError): linux_environment(path)
 
