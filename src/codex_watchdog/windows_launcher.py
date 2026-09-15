@@ -241,6 +241,10 @@ def prepare_one_click_launch(
                 runtime = root / "runtime"
                 source = "new_current_user_runtime"
 
+    # The child can exit at the setup prompt, before a service/storage object
+    # creates any directories. Never persist an unusable first-run pointer.
+    # Existing profiles still go through _read_profile's fail-closed check.
+    runtime.mkdir(parents=True, exist_ok=True)
     _write_profile(profile_path, runtime, source)
     return LauncherResolution(runtime, profile_path, source)
 
@@ -255,6 +259,10 @@ def packaged_cli_arguments(
     if any(value == "--runtime" or value.startswith("--runtime=") for value in values):
         return values
     if any(value in ("--help", "-h", "--version") for value in values):
+        return values
+    if "setup-messaging" in values and "--check" in values:
+        # This diagnostic only inspects provider configuration. Creating a
+        # launcher profile here changes state before the first real launch.
         return values
     resolution = prepare_one_click_launch(executable, environment)
     return ("--runtime", str(resolution.runtime), *values)

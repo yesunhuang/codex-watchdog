@@ -245,6 +245,15 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Packaged no-argument one-click startup failed."
     }
+    $messagingCheck = (& $executable setup-messaging --check | Out-String) | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0 -or $messagingCheck.state -ne "CONFIGURED") {
+        throw "Previous public profile was not recognized as configured by onboarding detection."
+    }
+    $autoSetupText = (& $executable setup-messaging --auto | Out-String)
+    if ($LASTEXITCODE -ne 0 -or $autoSetupText -notmatch "Messaging is configured" -or
+        (Test-Path -LiteralPath (Join-Path $savedConfigRoot "messaging-setup.json"))) {
+        throw "Upgrade must reuse existing messaging without onboarding or a new marker."
+    }
     if (-not (Test-Path -LiteralPath $profilePath -PathType Leaf)) {
         throw "One-click startup removed the previous release launcher profile."
     }
@@ -282,6 +291,24 @@ try {
             throw "One-click upgrade exposed a saved Slack secret."
         }
     }
+    # Fresh polling setup has only a bot credential. The packaged desktop
+    # launcher must reuse it without demanding an obsolete Socket Mode token.
+    $pollLocal = Join-Path $testRoot "poll-profile"
+    $pollConfig = Join-Path $pollLocal "CodexWatchdog"
+    New-Item -ItemType Directory -Path $pollConfig -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $savedConfigRoot "slack-bot-token.clixml") -Destination $pollConfig
+    @{ schema_version = 1; channel_id = "C12345678"; allowed_user_ids = @("U12345678"); reply_mode = "poll" } |
+        ConvertTo-Json | Set-Content -LiteralPath (Join-Path $pollConfig "slack-relay.json") -Encoding UTF8
+    $env:LOCALAPPDATA = $pollLocal
+    $pollOutput = & $powershell -NoProfile -File $launcher -DryRun -NoDuo -Runtime $runtime
+    if ($LASTEXITCODE -ne 0) {
+        throw "Fresh polling profile failed in the packaged desktop launcher."
+    }
+    $pollSummary = $pollOutput | ConvertFrom-Json
+    if ($pollSummary.status -ne "ready" -or $pollSummary.slack_reply -ne "encrypted_store") {
+        throw "Fresh polling profile failed in the packaged desktop launcher."
+    }
+    $env:LOCALAPPDATA = Split-Path -Parent $savedConfigRoot
     [pscustomobject][ordered]@{
         status = "passed"
         version = $ExpectedVersion
@@ -297,6 +324,8 @@ try {
         upgrade_profile_source = "previous_public_executable"
         protected_files_unchanged = $true
         one_click_saved_configuration = "reused_without_secret_output"
+        messaging_onboarding = "suppressed_for_actual_previous_public_profile"
+        fresh_polling_launcher = "ready_without_app_token"
     } | ConvertTo-Json -Compress
 } finally {
     foreach ($name in $environmentNames) {

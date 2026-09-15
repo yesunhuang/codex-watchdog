@@ -36,7 +36,8 @@ def main() -> None:
     package = args.package.resolve()
     manifest = json.loads((package / "package-manifest.json").read_text())
     allowed = {"codex-watchdog", "watchdog-macos.sh", "setup-slack-relay-macos.sh", "LICENSE",
-               "MACOS_PACKAGE.md", "FEISHU_LARK.md", "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_LICENSES/README.md",
+               "Install and Start Codex WatchDog.command",
+               "MACOS_PACKAGE.md", "FEISHU_LARK.md", "MESSAGING_SETUP.md", "SETUP.md", "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_LICENSES/README.md",
                "THIRD_PARTY_LICENSES/inventory.json"}
     inventory = json.loads((package / "THIRD_PARTY_LICENSES/inventory.json").read_text())
     assert inventory["schema_version"] == 1
@@ -63,6 +64,7 @@ def main() -> None:
     from PyInstaller.archive.readers import CArchiveReader
 
     reader = CArchiveReader(str(package / "codex-watchdog"))
+    assert "pyi-bootloader-ignore-signals" in reader.options, "terminal signals would be forwarded twice"
     assert not any(name.endswith("direct_url.json") for name in reader.toc), "build-location metadata was bundled"
     pyz = reader.open_embedded_archive(next(name for name in reader.toc if name.endswith(".pyz")))
     forbidden = (str(ROOT), str(Path.home()))
@@ -101,13 +103,18 @@ def main() -> None:
         codex = home / ".codex"
         environment.update(HOME=str(home), PATH=str(tools), CODEX_HOME=str(codex),
                            CODEX_WATCHDOG_MACOS_CONFIG_DIR=str(config))
+        empty_security = root / "empty-keychain-fixture"
+        empty_security.write_text("#!/bin/sh\nexit 44\n")
+        empty_security.chmod(0o700)
+        environment["CODEX_WATCHDOG_MACOS_SECURITY_BIN"] = str(empty_security)
         assert shutil.which("python", path=str(tools)) is None and shutil.which("python3", path=str(tools)) is None
         extracted = root / "download with spaces"
         subprocess.run(["/usr/bin/ditto", "-x", "-k", str(archive), str(extracted)], check=True)
         copied = extracted / package.name
         executable = copied / "codex-watchdog"
         assert all(digest(copied / name) == sha for name, sha in manifest["files"].items())
-        assert all(os.access(copied / name, os.X_OK) for name in ("codex-watchdog", "watchdog-macos.sh", "setup-slack-relay-macos.sh"))
+        assert all(os.access(copied / name, os.X_OK) for name in ("codex-watchdog", "watchdog-macos.sh", "setup-slack-relay-macos.sh",
+                                                                "Install and Start Codex WatchDog.command"))
 
         def run(command, *, env=None, accepted=(0,), input_text=None, timeout=30):
             result = subprocess.run([str(v) for v in command], cwd=work, env=environment if env is None else env,
@@ -201,12 +208,27 @@ def main() -> None:
                                          "org.localcodexwatchdog.slack", "-w", str(keychain)], env=environment,
                                         capture_output=True, text=True, timeout=10, check=True)
                 assert result.stdout.strip() == expected
+            # A new profile has only a bot token. Prove the packaged launcher
+            # loads its saved poll mode without requiring --shared-slack-app.
+            poll_config = root / "fresh poll config"
+            poll_config.mkdir()
+            (poll_config / "slack-relay.json").write_text(json.dumps(dict(schema_version=1,
+                channel_id="G12345678", allowed_user_ids=["U12345678"], reply_mode="poll")))
+            poll_security = root / "poll security fixture"
+            poll_security.write_text('#!/bin/bash\nfor arg in "$@"; do [[ $arg == slack-app-token ]] && exit 44; done\nexec /usr/bin/security "$@" "$PACKAGE_TEST_KEYCHAIN"\n')
+            poll_security.chmod(0o700)
+            poll_env = {**keychain_env, "CODEX_WATCHDOG_MACOS_CONFIG_DIR": str(poll_config),
+                        "CODEX_WATCHDOG_MACOS_SECURITY_BIN": str(poll_security)}
+            poll_summary = json.loads(run([launcher, "--slack-only", "--dry-run"], env=poll_env).stdout)
+            assert poll_summary["status"] == "ready" and poll_summary["slack_reply_mode"] == "poll"
+            assert not (poll_config / "messaging-setup.json").exists()
         finally:
             run([security, "delete-keychain", keychain])
 
         # Normal foreground CLI lifetime and busy-owner upgrade refusal; no provider configured.
-        process = subprocess.Popen([str(installed), "run", "--manual-only", "--interval", "1"],
-                                   cwd=work, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        foreground_env = {**environment, "CODEX_WATCHDOG_MACOS_CONFIG_DIR": str(root / "foreground messaging")}
+        process = subprocess.Popen([str(installed), "--runtime", str(runtime), "run", "--manual-only", "--interval", "1"],
+                                   cwd=work, env=foreground_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    text=True, start_new_session=True)
         try:
             with selectors.DefaultSelector() as selector:
@@ -215,13 +237,13 @@ def main() -> None:
                 assert json.loads(process.stdout.readline())["workspace_count"] == 0
             blocked = run([executable, "macos-install"], accepted=(1,))
             assert json.loads(blocked.stderr)["reason"] == "macos_install_busy"
-            process.send_signal(signal.SIGINT)
+            os.killpg(process.pid, signal.SIGINT)
             stdout, stderr = process.communicate(timeout=15)
             output_log.append(stdout + stderr)
             assert process.returncode == 0
         finally:
             if process.poll() is None:
-                process.terminate()
+                os.killpg(process.pid, signal.SIGTERM)
                 process.communicate(timeout=10)
 
         # Exercise the rendered production command; this is fixture hook input, not a real Codex Stop.

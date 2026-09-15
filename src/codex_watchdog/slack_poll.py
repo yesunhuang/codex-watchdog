@@ -10,6 +10,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from .models import sha256_text, utc_now
+from .messaging_device import device_label
 from .slack_mapping import SlackThreadStore, valid_slack_timestamp
 from .storage import FileLock, InstructionStore
 
@@ -45,6 +46,7 @@ class SlackReplyPoller:
 
     def __init__(self, relay, *, api=None):
         self.relay = relay
+        self.device_label = device_label(relay.runtime)
         self.api = api or self._api
         self.path = relay.runtime / "slack" / "poll-cursors.json"
         self.health_path = relay.runtime / "slack" / "poll-health.json"
@@ -75,7 +77,7 @@ class SlackReplyPoller:
 
     def _health(self, status, **fields):
         InstructionStore._atomic_json(self.health_path,
-            dict(schema_version=1, checked_at=utc_now(), status=status, **fields))
+            dict(schema_version=1, checked_at=utc_now(), status=status, device_label=self.device_label, **fields))
 
     def poll_once(self):
         """Caller holds the listener lock; errors never advance a reply cursor."""

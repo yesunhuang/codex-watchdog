@@ -138,6 +138,12 @@ Linux 包覆盖 ARM64 Ubuntu 和 x64 Ubuntu/RHEL 8；准确要求和验收边界
 
 **超简单安装运行：** 让你的本地 Codex 扫描本仓库，并一步步引导你完成安装和启动。
 
+首次交互启动且没有任何消息配置时，可选择 **Slack**、**飞书/Lark**、**两者**或**跳过**。
+选择机器人的群组或频道，发送包含本设备标识的确认短语，即可配对账户。
+新配置的两种消息服务均自动使用独立轮询，其他设备可继续运行。
+已有配置及升级不会自动弹出配置向导。也可运行 `codex-watchdog setup-messaging`；
+服务启动和恢复方法见[消息配置指南](docs/MESSAGING_SETUP.md)。
+
 ### Windows x64
 
 1. 从 [GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases) 下载最新
@@ -210,6 +216,7 @@ Linux 的 Slack 回复使用 `CODEX_WATCHDOG_SLACK_REPLY_MODE=poll`，并配置�
 飞书和国际版 Lark 也支持发送通知，并将纯文本回复转发到原有 Codex 会话。
 设置 `CODEX_WATCHDOG_INTERACTIVE_TRANSPORT=both` 可与 Slack 同时使用。
 请按照[飞书/Lark 配置指南](docs/FEISHU_LARK.md)选择正确的区域并设置获准用户。
+回复默认由各机器轮询读取，可共享同一个应用和聊天。
 安装包已包含 SDK；切换通知渠道时保留原有 Slack 设置。
 
 ## 文档

@@ -134,6 +134,50 @@ def test_fresh_install_uses_stable_current_user_runtime(tmp_path: Path) -> None:
         Path(environment["LOCALAPPDATA"]) / "CodexWatchdog" / "runtime"
     ).resolve()
     assert resolution.source == "new_current_user_runtime"
+    assert resolution.runtime.is_dir()
+    assert prepare_one_click_launch(executable, environment).source == "saved_profile"
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_first_launch_can_be_closed_before_monitor_initializes_and_reopened(
+    tmp_path: Path, explicit: bool,
+) -> None:
+    environment = _environment(tmp_path)
+    executable = _package(tmp_path)
+    if explicit:
+        environment["CODEX_WATCHDOG_RUNTIME"] = str(tmp_path / "custom" / "runtime")
+    calls = []
+
+    def cancelled_before_service(command, **kwargs):
+        runtime = Path(command[-1])
+        assert runtime.is_dir()
+        calls.append(runtime)
+        return 130
+
+    for _ in range(2):
+        assert launch_one_click(executable, environment=environment,
+                               runner=cancelled_before_service, stdout=io.StringIO()) == 130
+    assert calls[0] == calls[1]
+
+
+def test_packaged_messaging_check_does_not_create_a_first_run_profile(tmp_path: Path) -> None:
+    environment = _environment(tmp_path)
+    executable = _package(tmp_path)
+    arguments = ("setup-messaging", "--check")
+    assert packaged_cli_arguments(arguments, executable, environment) == arguments
+    assert not (Path(environment["LOCALAPPDATA"]) / "CodexWatchdog").exists()
+
+
+def test_unusable_new_runtime_does_not_leave_a_saved_profile(tmp_path: Path) -> None:
+    environment = _environment(tmp_path)
+    executable = _package(tmp_path)
+    occupied = tmp_path / "runtime-is-a-file"
+    occupied.write_text("retain", encoding="utf-8")
+    environment["CODEX_WATCHDOG_RUNTIME"] = str(occupied)
+    with pytest.raises(OSError):
+        prepare_one_click_launch(executable, environment)
+    assert not (Path(environment["LOCALAPPDATA"]) / "CodexWatchdog" / "launcher-profile.json").exists()
+    assert occupied.read_text(encoding="utf-8") == "retain"
 
 
 def test_one_click_invokes_bundled_bootstrap_with_resolved_runtime(

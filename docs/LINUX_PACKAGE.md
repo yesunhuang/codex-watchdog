@@ -65,6 +65,15 @@ Unknown or modified destination files are refused. A live foreground owner
 blocks replacement, and failed profile publication restores the previous
 executable. The previous runtime is never removed.
 
+## Messaging on first use
+
+A pristine interactive foreground launch offers Slack, Feishu/Lark, Both, or
+Skip. Run `"$watchdog" setup-messaging` explicitly before starting a service;
+headless startup never waits for input. Confirmation messages discover the
+conversation/user IDs. Existing environment files and pairings suppress the
+automatic prompt and remain unchanged. See [messaging setup](MESSAGING_SETUP.md)
+for the mode-600 environment file and systemd startup.
+
 ## Review and trust stable hooks
 
 ```sh

@@ -8,7 +8,7 @@ from .lark_mapping import LarkThreadStore
 from .lark_transport import LarkApi, LarkConnection, valid_id
 from .models import MAX_PROMPT_CHARS, sha256_text
 from .relay import ExactThreadRelay, ReplyResult, _DELIVERED_STATES
-from .storage import FileLock
+from .storage import FileLock, StoreBusyError
 
 
 class LarkReplyRelay(ExactThreadRelay):
@@ -28,14 +28,20 @@ class LarkReplyRelay(ExactThreadRelay):
         self.connection_factory = connection_factory
         self._connection = None
         self._listener_lock = None
+        self._poller = None
 
     def start(self):
-        if self._connection is not None:
+        if self._connection is not None or self._poller is not None:
             return
         lock = FileLock(self.runtime / "locks" / ("lark-listener-" + self.config.scope + ".lock"))
         lock.__enter__()
         self._listener_lock = lock
         try:
+            if self.config.reply_mode == "poll":
+                from .lark_poll import LarkReplyPoller
+                self._poller = LarkReplyPoller(self)
+                self._poller.start()
+                return
             self._connection = self.connection_factory(self.config, self._received, self.timeout)
             self._connection.start()
         except BaseException:
@@ -43,6 +49,9 @@ class LarkReplyRelay(ExactThreadRelay):
             raise
 
     def close(self):
+        if self._poller is not None:
+            self._poller.close()
+            self._poller = None
         if self._connection is not None:
             self._connection.close()
             self._connection = None
@@ -53,9 +62,12 @@ class LarkReplyRelay(ExactThreadRelay):
     def _received(self, payload):
         # This entry point is registered only on the SDK's authenticated socket.
         result = self.handle_event(payload)
+        if result.status == "queued":
+            self.acknowledge(payload["event"]["message"].get("message_id"), result)
+
+    def acknowledge(self, message_id, result):
         if result.status != "queued":
             return
-        message_id = payload["event"]["message"]["message_id"]
         def send_ack(_event):
             api = self.api or LarkApi(self.config, self.timeout)
             api.send("Queued for the exact existing Codex thread.", "ack:" + result.instruction_id,
@@ -131,6 +143,9 @@ class LarkReplyRelay(ExactThreadRelay):
                 instruction_id=instruction_id, text=text)
             if not claimed:
                 return ReplyResult("duplicate", mapping.target.workspace_id, instruction_id, previous, duplicate=True)
+        except StoreBusyError:
+            # No admission occurred. A history page may safely retry later.
+            return ReplyResult("deferred")
         except Exception as exc:
             return ReplyResult("rejected_state_or_collision", error_sha256=self._error_digest(exc))
         try:

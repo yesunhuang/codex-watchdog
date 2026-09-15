@@ -154,6 +154,13 @@ acceptance limits. VS Code may require Retry or a window reload after handback.
 **Ultra-easy setup:** ask your local Codex to scan this repository and guide you
 through installation and startup step by step.
 
+On a pristine interactive first launch, choose **Slack**, **Feishu/Lark**, **Both**,
+or **Skip**. Select the bot's group/channel and send the displayed device-specific
+confirmation phrase to pair your account. New setups use independent polling for
+both providers; other devices can stay running. Existing settings and upgrades suppress
+the prompt. For manual setup, run `codex-watchdog setup-messaging`; see
+[messaging setup](docs/MESSAGING_SETUP.md) for services and recovery.
+
 ### Windows x64
 
 1. Download the latest `codex-watchdog-vX.Y.Z-windows-x64.zip` and
@@ -235,7 +242,8 @@ native runtime isolation and existing-installation limits.
 Feishu and international Lark can also send notifications and relay plain-text
 replies to the existing Codex conversation. Set `CODEX_WATCHDOG_INTERACTIVE_TRANSPORT=both`
 to use the selected service alongside Slack. Configure the correct region and
-allowed users in the [Feishu/Lark setup guide](docs/FEISHU_LARK.md). Packages include
+allowed users in the [Feishu/Lark setup guide](docs/FEISHU_LARK.md). Replies use
+local polling by default, so machines can share the same app and conversation. Packages include
 the SDK; existing Slack settings are retained when switching providers.
 
 ## Documentation

@@ -332,6 +332,15 @@ if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
                 $storedRelay.allowed_user_ids
             ) -join ","
         }
+        if (
+            [string]::IsNullOrWhiteSpace($env:CODEX_WATCHDOG_SLACK_REPLY_MODE) -and
+            $storedRelay.PSObject.Properties.Name -contains "reply_mode"
+        ) {
+            if ($storedRelay.reply_mode -notin @("poll", "socket")) {
+                throw "The saved Slack reply mode is invalid."
+            }
+            $env:CODEX_WATCHDOG_SLACK_REPLY_MODE = [string]$storedRelay.reply_mode
+        }
         Remove-Variable storedRelay
     }
 }
@@ -349,7 +358,7 @@ $slackRelayValuesSet = @(
 ).Count
 $slackRelayConfigured = (
     $env:CODEX_WATCHDOG_SLACK_BOT_TOKEN -cmatch '^xoxb-' -and
-    $env:CODEX_WATCHDOG_SLACK_APP_TOKEN -cmatch '^xapp-' -and
+    ($env:CODEX_WATCHDOG_SLACK_REPLY_MODE -eq "poll" -or $env:CODEX_WATCHDOG_SLACK_APP_TOKEN -cmatch '^xapp-') -and
     -not [string]::IsNullOrWhiteSpace($env:CODEX_WATCHDOG_SLACK_CHANNEL_ID) -and
     (Test-SlackChannelId $env:CODEX_WATCHDOG_SLACK_CHANNEL_ID) -and
     $slackAllowedUsers.Count -gt 0 -and
@@ -358,7 +367,7 @@ $slackRelayConfigured = (
 if ($slackRelayValuesSet -gt 0 -and -not $slackRelayConfigured) {
     throw (
         "Slack reply relay configuration is incomplete or invalid. Configure " +
-        "both tokens, one channel ID, and at least one allowed user ID."
+        "a bot token, one channel ID, and at least one allowed user ID; Socket Mode also needs an app token."
     )
 }
 if ($slackRelayConfigured) {

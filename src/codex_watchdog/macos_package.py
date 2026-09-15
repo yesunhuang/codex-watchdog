@@ -222,7 +222,12 @@ def relay_values(path: Path) -> str:
             or not isinstance(users, list) or not users
             or any(not isinstance(user, str) or re.fullmatch(r"[UW][A-Z0-9]{8,}", user) is None for user in users)):
         raise PackageError("macos_slack_config_invalid")
-    return channel + "\t" + ",".join(dict.fromkeys(users))
+    result = channel + "\t" + ",".join(dict.fromkeys(users))
+    if "reply_mode" in value:
+        if value["reply_mode"] not in ("poll", "socket"):
+            raise PackageError("macos_slack_config_invalid")
+        result += "\t" + value["reply_mode"]
+    return result
 
 
 def main(argv: Sequence[str], executable: Path) -> int:

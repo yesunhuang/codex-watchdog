@@ -32,10 +32,13 @@ class LarkConfig:
     chat_id: Optional[str] = field(default=None, repr=False)
     allowed_user_ids: tuple[str, ...] = field(default=(), repr=False)
     domain: str = "feishu"
+    reply_mode: str = "poll"
 
     def __post_init__(self):
         if self.domain not in DOMAINS:
             raise ValueError("Lark domain must be feishu or lark")
+        if self.reply_mode not in ("poll", "socket"):
+            raise ValueError("Lark reply mode must be poll or socket")
 
     @classmethod
     def from_environment(cls, environment: Optional[Mapping[str, str]] = None):
@@ -45,7 +48,7 @@ class LarkConfig:
             return raw.strip() if isinstance(raw, str) and raw.strip() else None
         users = tuple(part for part in re.split(r"[,;\s]+", value("ALLOWED_USER_IDS") or "") if part)
         return cls(value("APP_ID"), value("APP_SECRET"), value("CHAT_ID"), users,
-                   (value("DOMAIN") or "feishu").lower())
+                   (value("DOMAIN") or "feishu").lower(), (value("REPLY_MODE") or "poll").lower())
 
     @property
     def present(self):
@@ -100,6 +103,29 @@ class LarkApi:
         self.client = client if client is not None else (
             sdk.Client.builder().app_id(config.app_id).app_secret(config.app_secret)
             .domain(DOMAINS[config.domain]).timeout(timeout).build())
+
+    def history(self, start, end, page_token=None):
+        """Read one bounded page from the authenticated, configured conversation."""
+        import json
+        from lark_channel.api.im.v1.model.list_message_request import ListMessageRequest
+        request = (ListMessageRequest.builder().container_id_type("chat")
+                   .container_id(self.config.chat_id).start_time(str(start)).end_time(str(end))
+                   .sort_type("ByCreateTimeAsc").page_size(50))
+        if page_token is not None:
+            request.page_token(page_token)
+        try:
+            response = self.client.im.v1.message.list(request.build())
+            if response.raw.status_code == 429:
+                raise LarkTransportError("lark_history_rate_limited")
+            if not response.success() or not 200 <= response.raw.status_code < 300:
+                raise LarkTransportError("lark_history_unavailable_check_permissions")
+            # The SDK owns authentication and HTTP. Preserve the API's JSON
+            # types for whole-page validation before any reply is admitted.
+            return json.loads(response.raw.content)["data"]
+        except LarkTransportError:
+            raise
+        except Exception:
+            raise LarkTransportError("lark_history_failed_or_timed_out") from None
 
     def send(self, text, operation_id, *, reply_to=None):
         from lark_channel.api.im.v1.model.create_message_request import CreateMessageRequest

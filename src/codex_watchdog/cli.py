@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
 import uuid
@@ -74,6 +75,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--codex-home", type=_path, help="exact Codex home shared with queue state"
     )
     commands = parser.add_subparsers(dest="command", required=True)
+
+    messaging = commands.add_parser("setup-messaging", help="pair Slack or Feishu/Lark in a terminal; preserve existing settings")
+    messaging.add_argument("--check", action="store_true", help="report configuration evidence without prompting or changing state")
+    messaging.add_argument("--auto", action="store_true", help=argparse.SUPPRESS)
 
     linux_bind = commands.add_parser(
         "linux-bind", help="reserve one exact existing Linux VS Code thread for this runtime"
@@ -292,6 +297,25 @@ def _prompt(message: Optional[str], prompt_file: Optional[Path]) -> str:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "setup-messaging":
+        from .messaging_setup import setup
+        return setup(runtime=args.runtime, auto=args.auto, check=args.check)
+    if args.command in ("run", "linux-run", "linux-auto-run", "notify-test", "lark-check",
+                        "slack-relay-test", "lark-relay-test"):
+        from .messaging_setup import prepare_launch
+        from .messaging_profile import MessagingError, error_code
+        try:
+            environment = prepare_launch(args.runtime,
+                allow_auto=args.command in ("run", "linux-run", "linux-auto-run") and not getattr(args, "once", False),
+                output=lambda text: print(text, file=sys.stderr))
+            os.environ.update(environment)
+        except (MessagingError, OSError, ValueError) as exc:
+            if args.command != "lark-check":
+                print("Messaging startup stopped: " + error_code(exc) +
+                      ". Existing settings were preserved. Run codex-watchdog setup-messaging --check for details.", file=sys.stderr)
+                return 1
+            # A diagnostic still audits the caller's unmodified partial
+            # environment and SDK; it never mixes in another saved app.
     if args.command.startswith("linux-"):
         from .linux_binding import LinuxBinding, LinuxBindingError, locality_identity, read_json
         from .control_state import control_root

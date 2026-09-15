@@ -48,6 +48,9 @@ def main() -> None:
         "Metadata-Version: 2.1\nName: codex-watchdog\nVersion: " + version + "\n", encoding="utf-8")
     subprocess.run([
         sys.executable, "-m", "PyInstaller", "--noconfirm", "--onefile", "--console",
+        # Terminal already signals the whole foreground process group. Avoid
+        # the onefile parent delivering a second interrupt during cleanup.
+        "--bootloader-ignore-signals",
         "--target-arch", "arm64", "--name", "codex-watchdog",
         "--paths", str(ROOT / "src"), "--distpath", str(build / "binary"),
         "--workpath", str(build / "work"), "--specpath", str(build / "spec"),
@@ -73,9 +76,14 @@ def main() -> None:
         # Source checkouts on Windows can have CRLF; packaged POSIX scripts must not.
         (package / filename).write_bytes((ROOT / filename).read_bytes().replace(b"\r\n", b"\n"))
         (package / filename).chmod(0o755)
+    finder_launcher = "Install and Start Codex WatchDog.command"
+    (package / finder_launcher).write_bytes((ROOT / "packaging" / finder_launcher).read_bytes().replace(b"\r\n", b"\n"))
+    (package / finder_launcher).chmod(0o755)
     shutil.copy2(ROOT / "LICENSE", package / "LICENSE")
     shutil.copy2(ROOT / "docs/MACOS_PACKAGE.md", package / "MACOS_PACKAGE.md")
     shutil.copy2(ROOT / "docs/FEISHU_LARK.md", package / "FEISHU_LARK.md")
+    shutil.copy2(ROOT / "docs/MESSAGING_SETUP.md", package / "MESSAGING_SETUP.md")
+    shutil.copy2(ROOT / "docs/SETUP.md", package / "SETUP.md")
     shutil.copy2(ROOT / "THIRD_PARTY_NOTICES.md", package / "THIRD_PARTY_NOTICES.md")
     subprocess.run([
         sys.executable, str(ROOT / "tools/generate_dependency_licenses.py"),

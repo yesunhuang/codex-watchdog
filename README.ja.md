@@ -145,6 +145,14 @@ WatchDog が提供するのは別の mechanism、つまり**正しい machine / 
 **最も簡単な方法：** local Codex にこの repository を scan させ、installation と startup を
 step-by-step で案内してもらってください。
 
+メッセージ設定が一切ない状態で初めて対話起動すると、**Slack**、**Feishu/Lark**、
+**両方**、**スキップ**を選べます。ボットのグループやチャンネルを選び、
+端末の識別ラベルを含む確認フレーズを送信してアカウントを登録します。
+新規設定では両サービスとも独立したポーリングを使い、他の端末は稼働を続けられます。
+既存設定がある場合や更新時には自動で設定を開始しません。手動では
+`codex-watchdog setup-messaging` を実行します。サービスと復旧手順は
+[メッセージ設定ガイド](docs/MESSAGING_SETUP.md)を参照してください。
+
 ### Windows x64
 
 1. [GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases) から最新の
@@ -223,6 +231,7 @@ Linux の Slack 返信には `CODEX_WATCHDOG_SLACK_REPLY_MODE=poll` と既存の
 Feishu と国際版 Lark でも通知を送信し、テキスト返信を既存の Codex 会話に転送できます。
 `CODEX_WATCHDOG_INTERACTIVE_TRANSPORT=both` を設定すると Slack と同時に利用できます。
 [Feishu/Lark 設定ガイド](docs/FEISHU_LARK.md)に従ってリージョンと許可ユーザーを設定してください。
+返信は各マシンがポーリングするため、同じアプリとチャットを共有できます。
 パッケージには SDK が含まれており、通知先を切り替えても既存の Slack 設定は保持されます。
 
 ## ドキュメント
