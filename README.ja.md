@@ -17,11 +17,16 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2e7d32" alt="MIT ライセンス"></a>
   <a href="docs/PLATFORM_SUPPORT.md#support-matrix"><img src="https://img.shields.io/badge/Windows-x64-44627e" alt="Windows x64 対応"></a>
   <a href="docs/PLATFORM_SUPPORT.md#support-matrix"><img src="https://img.shields.io/badge/Linux-ARM64%20%2F%20x64-44627e" alt="Linux ARM64 と x64 対応"></a>
-  <a href="docs/PLATFORM_SUPPORT.md#support-matrix"><img src="https://img.shields.io/badge/macOS-preview-a66b00" alt="macOS プレビュー"></a>
+  <a href="docs/PLATFORM_SUPPORT.md#support-matrix"><img src="https://img.shields.io/badge/macOS-Apple%20Silicon-44627e" alt="macOS Apple Silicon 対応"></a>
   <br>
   <a href="#アーキテクチャと設計思想"><img src="https://img.shields.io/badge/sessions-native-355c7d" alt="既存のネイティブ Codex セッションを維持"></a>
   <a href="#マルチユーザー協調bring-your-own-agents"><img src="https://img.shields.io/badge/collaboration-multi--user%20%2F%20multi--agent-355c7d" alt="マルチユーザー・マルチエージェント協調"></a>
   <a href="#マルチユーザー協調bring-your-own-agents"><img src="https://img.shields.io/badge/central%20server-not%20required-355c7d" alt="中央サーバーは不要"></a>
+  <br>
+  <a href="docs/SETUP.md"><img src="https://img.shields.io/badge/supports-Slack-4A154B" alt="Slack 対応"></a>
+  <a href="docs/FEISHU_LARK.md"><img src="https://img.shields.io/badge/supports-Feishu-3370FF" alt="Feishu 対応"></a>
+  <a href="docs/FEISHU_LARK.md"><img src="https://img.shields.io/badge/supports-Lark-00B96B" alt="Lark 対応"></a>
+  <a href="docs/SETUP.md"><img src="https://img.shields.io/badge/supports-SMTP-6c757d" alt="SMTP 対応"></a>
 </p>
 
 <p align="center">
@@ -133,7 +138,7 @@ WatchDog が提供するのは別の mechanism、つまり**正しい machine / 
 | --- | --- | --- |
 | Windows x64 | ローカル VS Code と Linux Remote-SSH 対象のデスクトップ制御 | 安定したデスクトップ参照実装。ネイティブ E2E、パッケージ更新、アイコンを検証済み |
 | Linux ARM64 / x64 | ネイティブサーバー実行、Remote-SSH、切断後の続行 | ネイティブサーバー/切断後のテストとユーザー受け入れが完了。ローカルデスクトップはプレビュー |
-| macOS Apple Silicon | ネイティブデスクトップのプレビュー | 所属を解決できるウィンドウ構成で限定的なネイティブ E2E 証拠あり。Remote-SSH/引き継ぎの検証範囲は限定的 |
+| macOS Apple Silicon | ネイティブデスクトップ | 正式な安定版デスクトップ。インストール、更新、ロールバック、メッセージングの受け入れが完了。Remote-SSH/引き継ぎの範囲は限定的 |
 
 切断後のネイティブ実行所有者は Linux 専用です。macOS/Windows のネイティブな切断後の
 実行所有者は未対応です。Linux パッケージは ARM64 Ubuntu と x64 Ubuntu/RHEL 8 を対象と
@@ -169,17 +174,14 @@ step-by-step で案内してもらってください。
 
    その後 Codex の `/hooks` で exact definition を確認し、自分で trust してください。
 
-### macOS Apple Silicon preview
+### macOS Apple Silicon
 
-Releases から ARM64 preview ZIP を取得し、`SHA256SUMS.txt` を確認して展開後：
+Releases から最新の macOS ARM64 ZIP を取得し、`SHA256SUMS.txt` を確認して展開したら、
+`Install and Start Codex WatchDog.command` をダブルクリックしてください（Terminal から
+実行することもできます）。インストーラーは実行ファイルを安定したユーザー領域へ配置し、
+WatchDog をセットアップします。hook の trust は引き続きユーザー自身が管理します。
 
-```sh
-./codex-watchdog --version
-./codex-watchdog macos-install
-"$HOME/Library/Application Support/CodexWatchdog/bin/codex-watchdog" doctor
-```
-
-hook trust、Slack、upgrade、rollback、preview の制約は
+hook trust、メッセージング、upgrade、rollback、現在のプラットフォーム上の制約は
 [Mac package guide](docs/MACOS_PACKAGE.md) を参照してください。
 
 ### Linux ARM64 / x64
