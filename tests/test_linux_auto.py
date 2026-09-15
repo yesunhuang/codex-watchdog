@@ -677,14 +677,20 @@ def test_recovering_observer_renews_verified_owner_and_resumes_without_second_wr
     assert len(clients) == 1 and not client.closed and writer[0] == client.process.pid
 
 
-def test_readonly_initialization_failure_rebuilds_with_backoff(scenario, monkeypatch):
+@pytest.mark.parametrize("exited", [False, True])
+def test_readonly_initialization_failure_rebuilds_with_backoff(scenario, monkeypatch, exited):
     store, local, writer, clock, clients, make_agent = scenario
     store.detach(local);writer[0] = None;agent = make_agent()
     original = LinuxThreadOwner._resume
     def fail(owner, workspace):
         owner.resume_requested = False
         owner.client = owner.client_factory(owner.executable, owner.binding.codex_home, workspace.repo_root, owner._event)
-        owner.client.process.returncode = 1
+        owner.client.process.returncode = 1 if exited else None
+        original_close = owner.client.close
+        def close_once():
+            assert not owner.client.closed
+            original_close()
+        owner.client.close = close_once
         raise AppServerError("app_server_exited")
     monkeypatch.setattr(LinuxThreadOwner, "_resume", fail)
     assert agent.step(observe=False)[0]["state"] == "recovering"

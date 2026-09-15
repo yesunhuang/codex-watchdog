@@ -214,16 +214,14 @@ class LinuxAutoWatchdog:
         if client.process.poll() is None:
             # An initialized read-only helper that has never attempted resume
             # owns no conversation. It can be rebuilt without touching a writer.
-            if (getattr(owner, "resume_requested", True) is False
-                    and writer_pid(self.codex_home, store.thread_id) is None):
-                client.close()
-            else:
+            if (getattr(owner, "resume_requested", True)
+                    or writer_pid(self.codex_home, store.thread_id) is not None):
                 return
         if not owner.resumed and getattr(owner, "resume_requested", True):
             # A failed initial resume has no verified ownership receipt. Wait
             # for native attachment or an explicit service restart, not a retry.
             self.failed_resumes[store.thread_id] = reason
-        client.close()  # This exact child has already exited; no live PID is killed.
+        client.close()  # Proven exited, or a helper that never acquired a writer.
         owner.client = None
         try:
             with store.guard(token) as value:
