@@ -83,7 +83,8 @@ class Console:
 def check(executable, evidence):
     evidence.mkdir(parents=True, exist_ok=False)
     results = []
-    for case, diagnostic_first in (("direct-first-launch", False), ("check-then-launch", True)):
+    for case, diagnostic_first in (("direct-first-launch", False), ("check-then-launch", True),
+                                   ("failed-setup-retry", False)):
         home = evidence / case
         home.mkdir()
         env = {k: v for k, v in os.environ.items()
@@ -112,13 +113,29 @@ def check(executable, evidence):
             if diagnostic_first:
                 console.process.write("4\r\n")
                 console.until('"cycle_id"')
+            elif case == "failed-setup-retry":
+                console.process.write("9\r\n")
+                console.until("Press Enter to close")
+                marker = json.loads((config / "messaging-setup.json").read_text(encoding="utf-8"))
+                assert marker["last_error"] == "messaging_setup_choice_invalid"
+                assert "Messaging startup stopped: messaging_setup_choice_invalid" in ANSI.sub("", console.output)
+                console.process.write("\r\n")
+                deadline = time.monotonic() + 20
+                while console.process.isalive() and time.monotonic() < deadline:
+                    time.sleep(0.1)
+                assert not console.process.isalive(), "Own failed-setup fixture did not close"
+                assert console.process.exitstatus == 1
             # Case one exits at the first setup prompt, before service startup.
-            console.interrupt()
+            if case != "failed-setup-retry":
+                console.interrupt()
         finally:
             console.close()
         assert runtime.is_dir()
         console = Console(executable, env, home, home / "reopened-console.log")
         try:
+            if not diagnostic_first:
+                console.until("Choose 1-4:")
+                console.process.write("4\r\n")
             console.until('"cycle_id"')
             assert "no longer exists" not in console.output
             assert (config / "launcher-profile.json").read_bytes() == before
@@ -127,7 +144,8 @@ def check(executable, evidence):
             console.close()
         results.append(dict(case=case, status="passed", no_argument_launch=True,
                             real_console=True, runtime_ready_before_user_input=True,
-                            reopened_without_missing_runtime=True))
+                            reopened_without_missing_runtime=True,
+                            unfinished_setup_retried=not diagnostic_first))
     return dict(schema_version=1, status="passed", cases=results,
                 production_profile_modified=False, provider_contacted=False)
 

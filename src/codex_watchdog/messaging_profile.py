@@ -30,6 +30,12 @@ class MessagingError(RuntimeError):
     """Only fixed, nonsecret diagnostics cross provider/credential boundaries."""
 
 
+def error_code(error):
+    """Keep our bounded diagnostic codes; never expose a raw provider exception."""
+    code = str(error) if isinstance(error, MessagingError) else ""
+    return code if re.fullmatch(r"messaging_[a-z0-9_]{1,96}", code) else "messaging_setup_failed_or_busy"
+
+
 class ConfigurationState(str, Enum):
     PRISTINE_UNCONFIGURED = "PRISTINE_UNCONFIGURED"
     EXISTING_OR_PARTIAL = "EXISTING_OR_PARTIAL"

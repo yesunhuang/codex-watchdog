@@ -22,7 +22,10 @@ throughout pairing. New setups automatically use polling for both providers.
    app ID, secret, and region. Secret prompts are hidden.
 2. Select the intended channel/group from the bot's conversation list. Send the
    displayed `WATCHDOG-PAIR-...` phrase there as a new plain-text message within
-   three minutes. Slack supports public/private channels containing the bot.
+   three minutes. Send only the code, without code-block formatting, as a new
+   conversation message rather than a thread reply. Slack supports public/private
+   channels containing the bot. Setup displays the selected conversation ID and
+   checks for the message every five seconds.
 3. Check the detected conversation and account in the terminal, then confirm.
    Group setup needs no channel ID or user/Open ID lookup. Feishu's group-list
    API cannot discover direct conversations; the advanced direct-chat option
@@ -55,9 +58,11 @@ and [Feishu history](https://open.feishu.cn/document/server-docs/im-v1/message/l
 
 ## Existing settings and upgrades
 
-Only **PRISTINE_UNCONFIGURED** opens setup automatically. Any provider environment
+**PRISTINE_UNCONFIGURED** opens setup automatically. Any provider environment
 entry (even empty), relay/profile file, protected credential, legacy pairing,
-transport selection, or setup marker suppresses it. **CONFIGURED** reuses the
+or transport selection suppresses it. A marker left by unfinished setup permits
+another attempt on the next interactive foreground launch only when no provider
+settings or credentials exist. **CONFIGURED** reuses the
 current settings; **EXISTING_OR_PARTIAL** preserves them and reports a manual
 diagnostic. Partial explicit provider variables are never combined with a saved
 app's credentials. Unknown configuration fields are retained.
@@ -73,14 +78,17 @@ still apply; setup checks history access before declaring pairing complete.
 codex-watchdog setup-messaging --check
 ```
 
-This read-only command reports evidence names and state, never credential values.
+This read-only command reports evidence names, state and the last recorded setup
+error code, never credential values. Older failed markers may lack an error code.
 Headless/service startup never asks questions. Choosing **Skip** saves a nonsecret
 schema-1 marker, so the next launch does not ask again. Cancelled/expired pairing
 saves no provider secrets. A failed storage operation records an incomplete
 setup marker; setup never calls that configuration complete or overwrites it.
 
-Manual setup can retry a marker-only skipped/cancelled setup. It deliberately
-does not replace partial or existing provider settings. Review those using the
+Double-clicking the Windows EXE again retries a failed or cancelled fresh setup;
+no configuration deletion is needed. Choosing Skip still suppresses future
+prompts. Manual setup can also retry a marker-only skipped setup. Neither path
+replaces partial or existing provider settings. Review those using the
 advanced provider instructions below; do not erase working state to make an
 upgrade look pristine.
 

@@ -303,15 +303,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.command in ("run", "linux-run", "linux-auto-run", "notify-test", "lark-check",
                         "slack-relay-test", "lark-relay-test"):
         from .messaging_setup import prepare_launch
-        from .messaging_profile import MessagingError
+        from .messaging_profile import MessagingError, error_code
         try:
             environment = prepare_launch(args.runtime,
                 allow_auto=args.command in ("run", "linux-run", "linux-auto-run") and not getattr(args, "once", False),
                 output=lambda text: print(text, file=sys.stderr))
             os.environ.update(environment)
-        except (MessagingError, OSError, ValueError):
+        except (MessagingError, OSError, ValueError) as exc:
             if args.command != "lark-check":
-                print("Messaging configuration requires review; existing settings were preserved. Run codex-watchdog setup-messaging --check.", file=sys.stderr)
+                print("Messaging startup stopped: " + error_code(exc) +
+                      ". Existing settings were preserved. Run codex-watchdog setup-messaging --check for details.", file=sys.stderr)
                 return 1
             # A diagnostic still audits the caller's unmodified partial
             # environment and SDK; it never mixes in another saved app.

@@ -28,7 +28,9 @@ class NoncePairing:
         self.observed = {}
 
     def check_deadline(self):
-        if self.consumed or self.monotonic() >= self.deadline:
+        if self.monotonic() >= self.deadline:
+            raise MessagingError("messaging_pairing_expired")
+        if self.consumed:
             raise MessagingError("messaging_pairing_expired_or_ambiguous")
 
     def offer(self, message):
@@ -133,10 +135,18 @@ def pair_provider(provider, values, runtime, *, read=input, output=print, api_fa
         chat = select_conversation(api, read=read, output=output)
         api.check_history(chat)
         pairing = NoncePairing(provider, chat, device_label(runtime), bot_user=api.bot_user)
-        output("Device " + pairing.label + ": send this exact NEW plain-text message in the selected conversation (expires in 3 minutes):")
+        output("Device " + pairing.label + ": pairing with " + chat + ".")
+        output("Post only the following code as a NEW plain-text message in that conversation, not a thread reply or code block (expires in 3 minutes):")
         output(pairing.nonce)
-        while not pairing.poll(api):
-            time.sleep(min(5, max(0, pairing.deadline - pairing.monotonic())))
+        output("Waiting for your message; checking every 5 seconds...")
+        try:
+            while not pairing.poll(api):
+                time.sleep(min(5, max(0, pairing.deadline - pairing.monotonic())))
+        except MessagingError as exc:
+            if str(exc) == "messaging_pairing_expired":
+                output("Pairing timed out: no valid exact confirmation was found in " + chat +
+                       ". Check the conversation and post the new code when you retry setup.")
+            raise
         user, identity = pairing.candidate
         api.check_replies(chat, identity)
         output("Received confirmation from " + user + " in " + chat + ".")

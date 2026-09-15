@@ -12,7 +12,7 @@ from .lark_transport import valid_id
 from .messaging_pairing import pair_provider
 from .messaging_profile import (
     ConfigurationState as State, MARKER, PREFIX, SELECTOR, SLACK_SERVICE, LARK_SERVICE,
-    MessagingError, SecretStore, config_directory, detect, json_bytes, load_saved,
+    MessagingError, SecretStore, config_directory, detect, error_code, json_bytes, load_saved,
     private_directory, provider_keys, read_object, route_environment, write_new,
 )
 from .storage import FileLock, StoreBusyError
@@ -40,6 +40,8 @@ def _marker(root, status, **extra):
     old = read_object(path)
     if old.get("schema_version") != 1:
         raise MessagingError("messaging_setup_marker_requires_review")
+    if status != "failed":
+        old.pop("last_error", None)
     old.update(value)
     fd, filename = tempfile.mkstemp(prefix=".messaging-marker-", dir=root)
     temp = Path(filename)
@@ -55,16 +57,33 @@ def _marker(root, status, **extra):
         temp.unlink(missing_ok=True)
 
 
-def _retryable(root, detection, environment):
+def _retryable(root, detection, environment, *, auto=False):
     if provider_keys(environment, "slack") or provider_keys(environment, "lark") or SELECTOR in environment:
         return False
     if set(detection.evidence) != {"saved:" + MARKER}:
         return False
     try:
         value = read_object(root / MARKER)
-        return value.get("schema_version") == 1 and value.get("status") in ("started", "cancelled", "failed", "skipped")
+        statuses = ("started", "cancelled", "failed") if auto else ("started", "cancelled", "failed", "skipped")
+        return value.get("schema_version") == 1 and value.get("status") in statuses
     except MessagingError:
         return False
+
+
+def _setup_status(root):
+    try:
+        value = read_object(root / MARKER)
+        if value.get("schema_version") != 1:
+            return {}
+        status = value.get("status")
+        if status not in ("started", "cancelled", "failed", "skipped", "configured"):
+            return {}
+        result = dict(setup_status=status)
+        if status == "failed" and isinstance(value.get("last_error"), str):
+            result["last_error"] = error_code(MessagingError(value["last_error"]))
+        return result
+    except MessagingError:
+        return {}
 
 
 def _save(root, store, selection, pairings, credentials):
@@ -106,12 +125,13 @@ def setup(*, environment=None, root=None, runtime=None, store=None, auto=False, 
     store = store or SecretStore(root, environment=env)
     found = detect(env, root, store)
     if check:
-        output(json.dumps(dict(schema_version=1, state=found.state.value, evidence=list(found.evidence)), sort_keys=True))
+        output(json.dumps(dict(schema_version=1, state=found.state.value, evidence=list(found.evidence),
+                               **_setup_status(root)), sort_keys=True))
         return 0
     if found.state == State.CONFIGURED:
         output("Messaging is configured; existing settings and credentials are unchanged.")
         return 0
-    if found.state == State.EXISTING_OR_PARTIAL and (auto or not _retryable(root, found, env)):
+    if found.state == State.EXISTING_OR_PARTIAL and not _retryable(root, found, env, auto=auto):
         output("Existing or partial messaging settings were preserved. Review the saved provider profile/environment before manual setup. " + MANUAL)
         return 0 if auto else 1
     if not (interactive() if is_interactive is None else is_interactive):
@@ -163,13 +183,13 @@ def setup(*, environment=None, root=None, runtime=None, store=None, auto=False, 
                 return 0
             except (KeyboardInterrupt, EOFError):
                 _marker(root, "cancelled")
-                output("Messaging setup cancelled; no automatic retry. " + MANUAL)
+                output("Messaging setup cancelled. Reopen WatchDog to try again, or choose Skip to disable setup prompts.")
                 return 130
-            except Exception:
-                _marker(root, "failed")
+            except Exception as exc:
+                _marker(root, "failed", last_error=error_code(exc))
                 raise
     except (Exception, KeyboardInterrupt) as exc:
-        reason = str(exc) if isinstance(exc, MessagingError) else "messaging_setup_failed_or_busy"
+        reason = error_code(exc)
         output(reason + ". Existing settings were preserved. " + MANUAL)
         return 1
 
@@ -182,5 +202,5 @@ def prepare_launch(runtime, *, environment=None, root=None, store=None, allow_au
     if allow_auto and found.state != State.CONFIGURED:
         code = setup(environment=env, root=root, runtime=runtime, store=store, auto=True, output=output)
         if code:
-            raise MessagingError("messaging_setup_did_not_complete")
+            raise MessagingError(_setup_status(root).get("last_error", "messaging_setup_did_not_complete"))
     return load_saved(env, root, store)

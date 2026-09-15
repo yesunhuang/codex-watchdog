@@ -133,7 +133,7 @@ def test_headless_pristine_never_prompts_or_writes(tmp_path):
 
 
 @pytest.mark.parametrize("failure", [KeyboardInterrupt(), EOFError(), MessagingError("messaging_pairing_timed_out")])
-def test_failed_or_cancelled_pairing_leaves_only_nonsecret_suppression(tmp_path, failure):
+def test_failed_or_cancelled_pairing_can_retry_on_next_foreground_launch(tmp_path, failure):
     answers = iter(["2", "feishu", "cli_fixture00001"])
     def failed(*a, **kw):
         raise failure
@@ -145,7 +145,71 @@ def test_failed_or_cancelled_pairing_leaves_only_nonsecret_suppression(tmp_path,
     assert set(files) == {MARKER, "setup.lock"}
     assert b"never-persist" not in b"".join(files.values())
     assert json.loads(files[MARKER])["status"] in ("failed", "cancelled")
-    assert setup(environment={}, root=tmp_path, store=store, auto=True, is_interactive=True, read=forbidden) == 0
+    prompts = []
+    def retry(prompt):
+        prompts.append(prompt)
+        return "4"
+    assert setup(environment={}, root=tmp_path, store=store, auto=True, is_interactive=True,
+                 read=retry, secret=forbidden, pair=forbidden) == 0
+    assert len(prompts) == 1
+    assert json.loads((tmp_path / MARKER).read_bytes())["status"] == "skipped"
+
+
+@pytest.mark.parametrize("status", ["started", "failed", "cancelled"])
+def test_marker_only_retry_is_interactive_and_preserves_unknown_fields(tmp_path, status):
+    (tmp_path / MARKER).write_bytes(json_bytes(dict(schema_version=1, status=status, future="keep")))
+    store = FixtureStore(tmp_path)
+    before = snapshot(tmp_path)
+    assert setup(environment={}, root=tmp_path, store=store, auto=True, is_interactive=False,
+                 read=forbidden) == 0
+    assert snapshot(tmp_path) == before
+    prompts = []
+    assert setup(environment={}, root=tmp_path, store=store, auto=True, is_interactive=True,
+                 read=lambda prompt: prompts.append(prompt) or "4") == 0
+    assert len(prompts) == 1
+    assert json.loads((tmp_path / MARKER).read_bytes())["future"] == "keep"
+
+
+@pytest.mark.parametrize("failure,reason", [
+    (MessagingError("messaging_pairing_expired"), "messaging_pairing_expired"),
+    (RuntimeError("xoxb-private-sdk-exception"), "messaging_setup_failed_or_busy"),
+    (MessagingError("provider says: xoxb-private-sdk-exception"), "messaging_setup_failed_or_busy"),
+])
+def test_failed_setup_records_safe_reason_and_check_is_read_only(tmp_path, failure, reason):
+    store, output = FixtureStore(tmp_path), []
+    def fail(*args, **kwargs):
+        raise failure
+    assert setup(environment={}, root=tmp_path, store=store, is_interactive=True,
+                 read=lambda _: "1", secret=lambda _: "xoxb-private",
+                 pair=fail, output=output.append) == 1
+    assert json.loads((tmp_path / MARKER).read_bytes())["last_error"] == reason
+    before = snapshot(tmp_path)
+    output.clear()
+    assert setup(environment={}, root=tmp_path, store=store, check=True,
+                 read=forbidden, output=output.append) == 0
+    assert json.loads(output[0])["last_error"] == reason
+    assert snapshot(tmp_path) == before
+    assert b"xoxb-private" not in b"".join(before.values())
+    assert "xoxb-private" not in " ".join(output)
+
+
+@pytest.mark.parametrize("name", ["slack-relay.json", "slack-bot-token.clixml", "lark-relay.json"])
+def test_retry_never_overwrites_partial_saved_provider(tmp_path, name):
+    (tmp_path / MARKER).write_bytes(json_bytes(dict(schema_version=1, status="failed")))
+    (tmp_path / name).write_bytes(b"preserve partial state")
+    before = snapshot(tmp_path)
+    assert setup(environment={}, root=tmp_path, store=FixtureStore(tmp_path), auto=True,
+                 is_interactive=True, read=forbidden) == 0
+    assert snapshot(tmp_path) == before
+
+
+def test_cli_keeps_specific_safe_startup_error(monkeypatch, capsys, tmp_path):
+    from codex_watchdog import cli, messaging_setup
+    def fail(*args, **kwargs):
+        raise MessagingError("messaging_pairing_expired")
+    monkeypatch.setattr(messaging_setup, "prepare_launch", fail)
+    assert cli.main(["--runtime", str(tmp_path), "run", "--once"]) == 1
+    assert "messaging_pairing_expired" in capsys.readouterr().err
 
 
 def test_both_providers_pair_before_any_credentials_are_saved(tmp_path):

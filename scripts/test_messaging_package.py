@@ -42,37 +42,44 @@ def check(package):
         tty_checked = False
         if os.name != "nt":
             import pty
-            child, master = pty.fork()
-            if child == 0:
-                os.chdir(home)
-                os.execve(executable, command + ["--auto"], env)
-            output, status, sent = b"", None, False
-            try:
-                deadline = time.monotonic() + 45
-                while time.monotonic() < deadline:
-                    if select.select([master], [], [], 0.1)[0]:
-                        try:
-                            chunk = os.read(master, 4096)
-                        except OSError:
-                            chunk = b""
-                        output += chunk
-                        if b"Choose 1-4:" in output and not sent:
-                            os.write(master, b"4\n")
-                            sent = True
-                    pid, status = os.waitpid(child, os.WNOHANG)
-                    if pid:
-                        break
-                    status = None
-                assert status == 0 and sent, output.decode(errors="replace")
-            finally:
-                if status is None:
-                    os.kill(child, 15)
-                    os.waitpid(child, 0)
-                os.close(master)
+            def choose_skip():
+                child, master = pty.fork()
+                if child == 0:
+                    os.chdir(home)
+                    os.execve(executable, command + ["--auto"], env)
+                output, status, sent = b"", None, False
+                try:
+                    deadline = time.monotonic() + 45
+                    while time.monotonic() < deadline:
+                        if select.select([master], [], [], 0.1)[0]:
+                            try:
+                                chunk = os.read(master, 4096)
+                            except OSError:
+                                chunk = b""
+                            output += chunk
+                            if b"Choose 1-4:" in output and not sent:
+                                os.write(master, b"4\n")
+                                sent = True
+                        pid, status = os.waitpid(child, os.WNOHANG)
+                        if pid:
+                            break
+                        status = None
+                    assert status == 0 and sent, output.decode(errors="replace")
+                finally:
+                    if status is None:
+                        os.kill(child, 15)
+                        os.waitpid(child, 0)
+                    os.close(master)
+            choose_skip()
             assert json.loads((config / "messaging-setup.json").read_text())["status"] == "skipped"
             before = (config / "messaging-setup.json").read_bytes()
             assert "Choose 1-4" not in run("--auto")
             assert (config / "messaging-setup.json").read_bytes() == before
+            for state in ("started", "cancelled", "failed"):
+                marker = config / "messaging-setup.json"
+                marker.write_text(json.dumps(dict(schema_version=1, status=state)))
+                choose_skip()
+                assert json.loads(marker.read_text())["status"] == "skipped"
             tty_checked = True
         config.mkdir(exist_ok=True)
         legacy = config / "lark-relay.json"
@@ -82,6 +89,7 @@ def check(package):
         assert "Choose 1-4" not in run("--auto") and legacy.read_bytes() == before
     return dict(schema_version=1, status="passed", pristine_headless_never_prompts=True,
                 partial_legacy_preserved=True, interactive_skip_and_restart=tty_checked,
+                unfinished_setup_retry=tty_checked,
                 provider_contacted=False, production_profile_modified=False)
 
 
