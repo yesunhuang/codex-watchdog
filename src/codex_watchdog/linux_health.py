@@ -30,7 +30,7 @@ class LinuxOwnerHealth:
         self.path = runtime / "linux" / "health" / (self.identity + ".json")
         self.lock = runtime / "locks" / ("linux-health-" + self.identity + ".lock")
 
-    def report(self, reason=None):
+    def report(self, reason=None, *, recovering=False):
         thread = self.workspace.session_id
         with FileLock(self.lock):
             with effect_guard(self.codex_home, thread, "state"):
@@ -38,16 +38,19 @@ class LinuxOwnerHealth:
                     "schema_version": 1, "identity": self.identity, "health": "healthy",
                 }
                 if (state.get("schema_version") != 1 or state.get("identity") != self.identity
-                        or state.get("health") not in ("healthy", "lost")
+                        or state.get("health") not in ("healthy", "lost", "recovering")
                         or state.get("pending") is True and not isinstance(state.get("outage_id"), str)):
                     raise ControlError("linux_health_state_invalid")
-                health = "lost" if reason is not None else "healthy"
+                health = ("recovering" if recovering else "lost") if reason is not None else "healthy"
                 if state["health"] != health:
-                    if health == "lost":
+                    if state["health"] == "healthy" and reason is not None:
                         state["outage_id"] = str(uuid.uuid4())
                     state.update(health=health, pending=True)
                 if not state.get("pending"):
-                    return state.get("notification") if health == "lost" else None
+                    if state.get("reason") != reason:
+                        state["reason"] = reason
+                        InstructionStore._atomic_json(self.path, state)
+                    return state.get("notification") if reason is not None else None
                 state["reason"] = reason
                 # Persist the event identity before sending. Restart/recovery
                 # cannot silently create another alert for the same outage.
@@ -60,8 +63,10 @@ class LinuxOwnerHealth:
                 subject=f"[Codex Watchdog] {label} detached monitoring {health if reason else 'restored'}",
                 message=(
                     f"The Linux WatchDog can no longer watch or control the existing Codex thread "
-                    f"{thread[:8]} in {label}. Reason: {reason}. Check the Linux WatchDog service "
-                    "and reopen the existing thread in VS Code if intervention is needed."
+                    f"{thread[:8]} in {label}. Reason: {reason}. "
+                    + ("WatchDog is retrying observation automatically; ambiguous actions remain paused."
+                       if recovering else "Check the Linux WatchDog service and reopen the existing thread "
+                       "in VS Code if intervention is needed.")
                     if reason is not None else
                     f"The Linux WatchDog can watch and control the existing Codex thread "
                     f"{thread[:8]} in {label} again."
