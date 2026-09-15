@@ -17,7 +17,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2e7d32" alt="MIT license"></a>
   <a href="docs/PLATFORM_SUPPORT.md#support-matrix"><img src="https://img.shields.io/badge/Windows-x64-44627e" alt="Windows x64 support"></a>
   <a href="docs/PLATFORM_SUPPORT.md#support-matrix"><img src="https://img.shields.io/badge/Linux-ARM64%20%2F%20x64-44627e" alt="Linux ARM64 and x64 support"></a>
-  <a href="docs/PLATFORM_SUPPORT.md#support-matrix"><img src="https://img.shields.io/badge/macOS-preview-a66b00" alt="macOS preview"></a>
+  <a href="docs/PLATFORM_SUPPORT.md#support-matrix"><img src="https://img.shields.io/badge/macOS-Apple%20Silicon-44627e" alt="macOS Apple Silicon support"></a>
   <br>
   <a href="#architecture-and-philosophy"><img src="https://img.shields.io/badge/sessions-native-355c7d" alt="Existing native Codex sessions"></a>
   <a href="#multi-user-collaboration-bring-your-own-agents"><img src="https://img.shields.io/badge/collaboration-multi--user%20%2F%20multi--agent-355c7d" alt="Multi-user and multi-agent collaboration"></a>
@@ -142,7 +142,7 @@ transport layer.
 | --- | --- | --- |
 | Windows x64 | Local VS Code and desktop control of Linux Remote-SSH targets | Stable desktop reference; native E2E, package upgrades and icon verified |
 | Linux ARM64 / x64 | Native server execution, Remote-SSH and detached continuation | Native server/detached tests and user acceptance passed; local desktop remains preview |
-| macOS Apple Silicon | Native desktop preview | Bounded native E2E on resolvable window topologies; Remote-SSH/handoff acceptance remains limited |
+| macOS Apple Silicon | Native desktop | Stable native desktop release; package install/upgrade/rollback and messaging acceptance passed; Remote-SSH/handoff scope remains limited |
 
 The detached execution owner is Linux-specific. Native macOS/Windows detached
 ownership is not supported. Linux packages cover ARM64 Ubuntu and x64 Ubuntu/RHEL
@@ -177,19 +177,15 @@ the prompt. For manual setup, run `codex-watchdog setup-messaging`; see
 
    Then inspect `/hooks` in Codex and trust the exact definitions yourself.
 
-### macOS Apple Silicon preview
+### macOS Apple Silicon
 
-Download the ARM64 preview ZIP from Releases, verify `SHA256SUMS.txt`, extract it,
-and run:
+Download the latest macOS ARM64 ZIP from Releases, verify `SHA256SUMS.txt`, extract
+it, and double-click `Install and Start Codex WatchDog.command` (or run it from
+Terminal). The installer places the executable in a stable per-user location,
+sets up WatchDog, and keeps hook trust under your control.
 
-```sh
-./codex-watchdog --version
-./codex-watchdog macos-install
-"$HOME/Library/Application Support/CodexWatchdog/bin/codex-watchdog" doctor
-```
-
-See the [Mac package guide](docs/MACOS_PACKAGE.md) for hook trust, Slack operation,
-upgrades, rollback, and current preview limits.
+See the [Mac package guide](docs/MACOS_PACKAGE.md) for hook trust, messaging,
+upgrades, rollback, and current platform limits.
 
 ### Linux ARM64 / x64
 
