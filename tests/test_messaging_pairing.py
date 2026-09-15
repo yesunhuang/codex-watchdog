@@ -241,8 +241,65 @@ def test_actual_slack_sdk_discovery_history_and_reply_capability():
         api.check_replies("C12345678", "1700000000.000001")
         history = parse_qs(next(body.decode() for path, body in calls if path == "/conversations.history"))
         assert history["channel"] == ["C12345678"]
-        assert history["oldest"] == ["1700000000"] and history["latest"] == ["1700000001"]
+        assert history["oldest"] == ["1700000000.000000"] and history["latest"] == ["1700000001.000000"]
         assert len(calls) == 4  # No socket or provider write endpoint.
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(2)
+
+
+def test_slack_pairing_reads_code_with_submicrosecond_clock(tmp_path, monkeypatch):
+    """Reproduce the live API's empty result for >6 fractional timestamp digits."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import re
+    import threading
+    from urllib.parse import parse_qs
+    from slack_sdk import WebClient
+    from codex_watchdog import messaging_pairing as module
+    clock, posted, reads = [1700000000.1234567], [], []
+    original = module.NoncePairing
+    monkeypatch.setattr(module, "NoncePairing", lambda *a, **kw: original(
+        *a, **kw, clock=lambda: clock[0], monotonic=lambda: clock[0]))
+    monkeypatch.setattr(module.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0]+seconds))
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args): pass
+        def do_POST(self):
+            params = parse_qs(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode())
+            if self.path == "/auth.test":
+                result = dict(ok=True, bot_id="B12345678", user_id="U87654321", team_id="T12345678")
+            elif self.path == "/users.conversations":
+                result = dict(ok=True, channels=[dict(id="C12345678", name="Selected")])
+            elif self.path == "/conversations.history":
+                low, high = params["oldest"][0], params["latest"][0]
+                reads.append((low, high))
+                supported = all(re.fullmatch(r"\d+(?:\.\d{1,6})?", value) for value in (low, high))
+                result = dict(ok=True, messages=[m for m in posted if supported and
+                              float(low) <= float(m["ts"]) <= float(high)])
+            else:
+                assert self.path == "/conversations.replies"
+                result = dict(ok=True, messages=posted)
+            data = json.dumps(result).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.05), daemon=True)
+    thread.start()
+    try:
+        client = WebClient(token="xoxb-loopback-fixture", base_url="http://127.0.0.1:%d/" % server.server_port,
+                           timeout=2, retry_handlers=[])
+        api = PairingApi("slack", {}, client=client)
+        def show(text):
+            if text.startswith("WATCHDOG-PAIR-"):
+                clock[0] += 1
+                posted.append(dict(type="message", user="U12345678", ts="1700000001.000001", text=text))
+        answers = iter(["1", "yes"])
+        route = pair_provider("slack", {}, tmp_path, read=lambda _: next(answers), output=show,
+                              api_factory=lambda *a: api)
+        assert route["channel_id"] == "C12345678" and route["allowed_user_ids"] == ["U12345678"]
+        assert len(reads) == 3  # Capability check, recognition, final confirmation.
     finally:
         server.shutdown()
         server.server_close()

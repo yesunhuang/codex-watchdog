@@ -92,7 +92,10 @@ class PairingApi:
 
     def history(self, chat, start, end, cursor=None):
         if self.provider == "slack":
-            page = self._slack("conversations_history", channel=chat, oldest=str(start), latest=str(end),
+            # time.time() can stringify with seven fractional digits. Slack
+            # silently returned an empty history for those bounds in live
+            # pairing, so encode its timestamp arguments at microsecond precision.
+            page = self._slack("conversations_history", channel=chat, oldest=f"{start:.6f}", latest=f"{end:.6f}",
                                inclusive=True, limit=100, **({"cursor": cursor} if cursor else {}))
             more = page.get("response_metadata", {}).get("next_cursor") or None
             if page.get("has_more") and not more:
