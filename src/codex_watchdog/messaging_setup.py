@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import getpass
 import json
+import math
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 
@@ -42,6 +44,7 @@ def _marker(root, status, **extra):
         raise MessagingError("messaging_setup_marker_requires_review")
     if status != "failed":
         old.pop("last_error", None)
+        old.pop("pairing", None)
     old.update(value)
     fd, filename = tempfile.mkstemp(prefix=".messaging-marker-", dir=root)
     temp = Path(filename)
@@ -70,6 +73,27 @@ def _retryable(root, detection, environment, *, auto=False):
         return False
 
 
+def _pairing_diagnostics(value):
+    if not isinstance(value, dict) or value.get("provider") not in ("slack", "lark"):
+        return {}
+    result = dict(provider=value["provider"])
+    for key, pattern in (("conversation_id", r"(?:[CG][A-Z0-9]{8,}|oc_[A-Za-z0-9_-]{8,128})"),
+                         ("device_label", r"[0-9a-f]{12}"), ("code_sha256", r"[0-9a-f]{64}")):
+        item = value.get(key)
+        if isinstance(item, str) and re.fullmatch(pattern, item):
+            result[key] = item
+    for key in ("poll_count", "observed_message_count"):
+        item = value.get(key)
+        if type(item) is int and 0 <= item <= 1000000:
+            result[key] = item
+    item = value.get("started_at")
+    if type(item) in (int, float) and math.isfinite(item) and 0 < item < 1e11:
+        result["started_at"] = item
+    if type(value.get("exact_code_seen")) is bool:
+        result["exact_code_seen"] = value["exact_code_seen"]
+    return result
+
+
 def _setup_status(root):
     try:
         value = read_object(root / MARKER)
@@ -81,6 +105,9 @@ def _setup_status(root):
         result = dict(setup_status=status)
         if status == "failed" and isinstance(value.get("last_error"), str):
             result["last_error"] = error_code(MessagingError(value["last_error"]))
+            pairing = _pairing_diagnostics(value.get("pairing"))
+            if pairing:
+                result["pairing"] = pairing
         return result
     except MessagingError:
         return {}
@@ -186,7 +213,8 @@ def setup(*, environment=None, root=None, runtime=None, store=None, auto=False, 
                 output("Messaging setup cancelled. Reopen WatchDog to try again, or choose Skip to disable setup prompts.")
                 return 130
             except Exception as exc:
-                _marker(root, "failed", last_error=error_code(exc))
+                pairing = _pairing_diagnostics(getattr(exc, "pairing_diagnostics", None))
+                _marker(root, "failed", last_error=error_code(exc), **(dict(pairing=pairing) if pairing else {}))
                 raise
     except (Exception, KeyboardInterrupt) as exc:
         reason = error_code(exc)

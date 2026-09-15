@@ -26,6 +26,15 @@ class NoncePairing:
         self.candidate = None
         self.ambiguous = self.consumed = False
         self.observed = {}
+        self.poll_count = 0
+        self.exact_code_seen = False
+
+    def diagnostics(self):
+        # No message text, credentials or raw pairing code enters durable state.
+        return dict(provider=self.provider, conversation_id=self.chat, device_label=self.label,
+                    code_sha256=hashlib.sha256(self.nonce.encode()).hexdigest(),
+                    started_at=self.started, poll_count=self.poll_count,
+                    observed_message_count=len(self.observed), exact_code_seen=self.exact_code_seen)
 
     def check_deadline(self):
         if self.monotonic() >= self.deadline:
@@ -68,6 +77,7 @@ class NoncePairing:
             semantic = (user, identity, created, text, bool(valid))
         if not isinstance(identity, str):
             return False
+        self.exact_code_seen |= text == self.nonce
         digest = hashlib.sha256(json.dumps(semantic, ensure_ascii=True).encode()).hexdigest()
         previous = self.observed.setdefault(identity, digest)
         if previous != digest:
@@ -89,6 +99,7 @@ class NoncePairing:
 
     def poll(self, api):
         self.check_deadline()
+        self.poll_count += 1
         cursor, seen, messages = None, set(), []
         end = self.clock()
         for _ in range(20):
@@ -142,18 +153,19 @@ def pair_provider(provider, values, runtime, *, read=input, output=print, api_fa
         try:
             while not pairing.poll(api):
                 time.sleep(min(5, max(0, pairing.deadline - pairing.monotonic())))
+            user, identity = pairing.candidate
+            api.check_replies(chat, identity)
+            output("Received confirmation from " + user + " in " + chat + ".")
+            if read("Is this the conversation and account you intended? Type yes: ").strip().lower() != "yes":
+                raise MessagingError("messaging_pairing_cancelled")
+            # Re-read before saving; a deleted/changed code cannot survive the
+            # local confirmation, and simultaneous attempts stay independent.
+            if not pairing.poll(api):
+                raise MessagingError("messaging_pairing_confirmation_changed")
+            return pairing.finish(values)
         except MessagingError as exc:
+            exc.pairing_diagnostics = pairing.diagnostics()
             if str(exc) == "messaging_pairing_expired":
                 output("Pairing timed out: no valid exact confirmation was found in " + chat +
                        ". Check the conversation and post the new code when you retry setup.")
             raise
-        user, identity = pairing.candidate
-        api.check_replies(chat, identity)
-        output("Received confirmation from " + user + " in " + chat + ".")
-        if read("Is this the conversation and account you intended? Type yes: ").strip().lower() != "yes":
-            raise MessagingError("messaging_pairing_cancelled")
-        # Re-read before saving; a deleted/changed code cannot survive the local
-        # confirmation, and two simultaneous pairing attempts stay independent.
-        if not pairing.poll(api):
-            raise MessagingError("messaging_pairing_confirmation_changed")
-        return pairing.finish(values)

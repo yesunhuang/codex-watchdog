@@ -212,6 +212,26 @@ def test_cli_keeps_specific_safe_startup_error(monkeypatch, capsys, tmp_path):
     assert "messaging_pairing_expired" in capsys.readouterr().err
 
 
+def test_pairing_diagnostics_survive_failed_setup_without_message_or_secret(tmp_path):
+    store = FixtureStore(tmp_path)
+    def fail(*args, **kwargs):
+        error = MessagingError("messaging_pairing_expired")
+        error.pairing_diagnostics = dict(provider="slack", conversation_id="C12345678",
+            code_sha256="a"*64, device_label="b"*12, started_at=1700000000.0,
+            poll_count=36, observed_message_count=3, exact_code_seen=False,
+            text="never-store-this-message", bot_token="xoxb-private")
+        raise error
+    assert setup(environment={}, root=tmp_path, store=store, is_interactive=True,
+                 read=lambda _: "1", secret=lambda _: "xoxb-private", pair=fail) == 1
+    data = json.loads((tmp_path / MARKER).read_bytes())
+    assert data["pairing"]["poll_count"] == 36
+    assert not data["pairing"]["exact_code_seen"]
+    assert "text" not in data["pairing"] and "bot_token" not in data["pairing"]
+    output = []
+    assert setup(environment={}, root=tmp_path, store=store, check=True, output=output.append) == 0
+    assert json.loads(output[0])["pairing"] == data["pairing"]
+
+
 def test_both_providers_pair_before_any_credentials_are_saved(tmp_path):
     answers = iter(["3", "feishu", "cli_fixture00001"])
     tokens = iter(["xoxb-private", "lark-private"])

@@ -129,6 +129,28 @@ def test_pairing_pagination_failure_never_finishes():
     assert p.candidate is None
 
 
+def test_pairing_failure_exposes_only_hash_and_read_metadata(tmp_path):
+    history = []
+    api = SimpleNamespace(provider="slack", bot_user="U87654321",
+        conversations=lambda: [("C12345678", "Selected channel")], check_history=lambda *a: None,
+        history=lambda *a: (history, None))
+    def fail(*args):
+        raise MessagingError("messaging_slack_missing_scope")
+    api.check_replies = fail
+    def show(text):
+        if text.startswith("WATCHDOG-PAIR-"):
+            import time
+            history.append(dict(type="message", user="U12345678", ts="%.6f" % (time.time()+0.001), text=text))
+    with pytest.raises(MessagingError) as error:
+        pair_provider("slack", {}, tmp_path, read=lambda _: "1", output=show, api_factory=lambda *a: api)
+    diagnostic = error.value.pairing_diagnostics
+    assert diagnostic["conversation_id"] == "C12345678"
+    assert diagnostic["exact_code_seen"] and diagnostic["observed_message_count"] == 1
+    assert diagnostic["poll_count"] == 1
+    assert len(diagnostic["code_sha256"]) == 64
+    assert history[0]["text"] not in json.dumps(diagnostic)
+
+
 def test_pairing_works_while_normal_runtime_listener_locks_are_held(tmp_path):
     history, output = [], []
     api = SimpleNamespace(provider="slack", bot_user="U87654321",

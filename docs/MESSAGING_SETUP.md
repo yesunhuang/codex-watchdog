@@ -79,7 +79,10 @@ codex-watchdog setup-messaging --check
 ```
 
 This read-only command reports evidence names, state and the last recorded setup
-error code, never credential values. Older failed markers may lack an error code.
+error code, never credential values. A failed pairing also records the selected
+conversation, device label, code hash and polling counts to distinguish an unread
+conversation from an unmatched code. It does not save message text or the raw
+pairing code. Older failed markers may lack these diagnostics.
 Headless/service startup never asks questions. Choosing **Skip** saves a nonsecret
 schema-1 marker, so the next launch does not ask again. Cancelled/expired pairing
 saves no provider secrets. A failed storage operation records an incomplete
