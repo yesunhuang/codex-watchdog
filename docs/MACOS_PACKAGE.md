@@ -21,8 +21,23 @@ Download the Mac ZIP and `SHA256SUMS.txt` from
 [GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases).
 Verify the ZIP's checksum against its entry before extracting it.
 
-Stop the foreground WatchDog before replacing it. Extract the ZIP, open a
-terminal in that directory, and run:
+Stop the foreground WatchDog before replacing it. Extract the ZIP and
+double-click **Install and Start Codex WatchDog.command** in the extracted
+folder. Keep it beside the other package files; a Finder alias can point to it
+from your Desktop.
+
+The launcher installs the package and its stable hook definitions, then opens
+messaging setup when needed and starts monitoring every 30 seconds. Terminal
+opens automatically; no command entry is required. Choose Slack, Feishu/Lark,
+or Both during fresh setup. Compatible saved profiles and credentials are reused
+on later launches. Review the exact hooks in Codex if it requests trust. Keep
+the Terminal window open while WatchDog runs; press Control-C to stop.
+When supervising this foreground package from another process, send shutdown
+signals to its process group. The onefile parent does not forward signals a
+second time to its worker.
+
+For a manual command-line installation, open a terminal in the extracted folder
+and run:
 
 ```sh
 ./codex-watchdog --version
