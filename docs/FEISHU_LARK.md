@@ -13,14 +13,24 @@ choose the domain that owns your application.
    enable receiving private messages (`im:message.p2p_msg:readonly`). For group
    chats, grant the receive permissions required for the messages you intend to
    relay; mention-only permissions can omit ordinary replies.
+   Grant the [message-history API](https://open.feishu.cn/document/server-docs/im-v1/message/list)
+   permission (`im:message` or the applicable read-only message permission).
+   Reading a group also requires access to that group's messages.
 3. Configure long-connection event delivery and subscribe to
    `im.message.receive_v1`. Publish the application and permission changes to
    your tenant, and open the bot conversation or add it to the chosen group.
 4. Obtain the app's `cli_...` ID and secret. The setup flow learns the conversation
    and permitted sender from your confirmation message; no Open ID lookup is needed.
 
-WatchDog uses an authenticated outbound WebSocket. It does not require a public
-callback server. An incoming-webhook bot alone cannot receive these replies.
+Normal replies use authenticated history polling every 10 seconds. Each runtime
+accepts only replies to its recorded notifications, so several machines may
+share the app and conversation without competing for events. First-use pairing
+uses a temporary WebSocket. Neither path needs a public callback server. An
+incoming-webhook bot alone cannot receive these replies.
+
+Feishu's long connections deliver each event to one client, not all clients
+([official SDK](https://github.com/larksuite/node-sdk/blob/main/README.zh.md)).
+Use the advanced `socket` reply mode only when one listener owns the app.
 
 ## Pair on first use
 
@@ -42,6 +52,7 @@ upgrades preserve saved pairings and credentials.
 | `CODEX_WATCHDOG_LARK_APP_SECRET` | App secret supplied from the host's protected configuration |
 | `CODEX_WATCHDOG_LARK_CHAT_ID` | The permitted `oc_...` conversation |
 | `CODEX_WATCHDOG_LARK_ALLOWED_USER_IDS` | Comma-separated permitted `ou_...` open IDs |
+| `CODEX_WATCHDOG_LARK_REPLY_MODE` | `poll` (default, shared apps), or `socket` for an exclusive listener |
 
 Omitting the allowed-user list enables notifications only. An invalid list does
 not enable replies. When Slack is already configured, explicitly select `lark`;
@@ -83,6 +94,18 @@ arguments, shell history, source files, release bundles and chat messages.
 Upgrades reuse compatible runtimes and retain existing Slack, Outlook, workspace
 and provider choices. Detached Linux owners need configuration on the Linux
 host; handoff does not copy credentials from the desktop.
+
+Existing notification mappings and admission receipts are reused in place. On
+the first switch to polling, a new cursor starts at that launch; historical
+commands are not replayed. Later restarts catch up from the retained cursor.
+Replies to older mapped notifications still work. The text first read from
+history is admitted once; editing that same message does not issue a new command.
+Send a new reply when changing an instruction.
+
+Polling status and fixed error codes appear in `lark/<app-scope>/poll-health-*.json`
+inside the runtime. Missing history access preserves the cursor and reports
+`lark_history_unavailable_check_permissions`; it never silently falls back to a
+competing socket. Requests are bounded and rate limiting delays retries.
 
 ### Saved Windows launch configuration
 

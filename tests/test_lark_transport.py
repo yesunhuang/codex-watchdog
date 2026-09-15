@@ -1,5 +1,6 @@
 """Real SDK against an isolated HTTP/WebSocket provider; never uses account secrets."""
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from dataclasses import replace
 import json
 from queue import Queue
 import threading
@@ -33,6 +34,8 @@ class FakeProvider:
         self.frames = Queue()
         self.responses = Queue()
         self.token = "loopback-bearer-token"
+        self.history = []
+        self.gets = []
         provider = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -40,6 +43,14 @@ class FakeProvider:
                 pass
 
             def do_GET(self):
+                provider.gets.append(self.path)
+                if self.path.startswith("/open-apis/im/v1/messages?"):
+                    assert self.headers.get("Authorization") == "Bearer " + provider.token
+                    if provider.failure:
+                        self.respond({"code": 999, "msg": "raw-secret-provider-error"}, provider.failure)
+                    else:
+                        self.respond({"code": 0, "data": {"items": provider.history, "has_more": False}})
+                    return
                 self.respond({"code": 0, "bot": {"open_id": "ou_loopbackbot01", "app_name": "fixture"}})
 
             def do_POST(self):
@@ -183,6 +194,44 @@ def test_real_sdk_auth_create_reply_and_stable_idempotency_uuid(provider):
     assert len([p for p in provider.posts if "/auth/" in p[0]]) == 1
 
 
+def test_real_sdk_history_shared_chat_keeps_independent_runtime_routes(provider, tmp_path):
+    from codex_watchdog.lark_poll import LarkReplyPoller
+    from test_lark_poll import message
+    other_parent = "om_notification02"
+    provider.history = [dict(message(), chat_id=CHAT),
+                        dict(message("om_reply00000002", other_parent), chat_id=CHAT)]
+    for item in provider.history:
+        item["sender"]["id"] = USER
+    destinations = []
+    for label, parent in (("a", ROOT_MESSAGE), ("b", other_parent)):
+        calls = []
+        queue = SimpleNamespace(dispatch=lambda *args, calls=calls: calls.append(args) or SimpleNamespace(status="enqueued"))
+        relay = LarkReplyRelay(tmp_path / label, provider.config, queue_dispatcher=queue,
+                              remote_ssh_adapter=None, api=provider.api())
+        relay.thread_store.cache_mappings([dict(provider="lark", scope=provider.config.scope,
+            chat_id=CHAT, message_id=parent, event_fingerprint="a" * 64)],
+            RelayTarget(label, THREAD, "process_local"))
+        clock = [100]
+        poller = LarkReplyPoller(relay, clock=lambda: clock[0])
+        poller._read(); clock[0] = 110
+        poller.poll_once()
+        assert len(calls) == 1
+        destinations.append(calls[0][1])
+    assert destinations[0] != destinations[1]
+    assert provider.connections.empty()  # Neither runtime competed for events.
+    reads = [parse_qs(urlparse(path).query) for path in provider.gets if "/messages?" in path]
+    assert len(reads) == 2 and reads[0] == reads[1]
+    assert reads[0] == dict(container_id_type=["chat"], container_id=[CHAT],
+                           start_time=["100"], end_time=["108"], sort_type=["ByCreateTimeAsc"], page_size=["50"])
+
+
+@pytest.mark.parametrize("status,code", [(403, "unavailable_check_permissions"), (429, "rate_limited")])
+def test_real_sdk_history_failure_has_only_fixed_safe_diagnostic(provider, status, code):
+    provider.failure = status
+    with pytest.raises(LarkTransportError, match="^lark_history_" + code + "$"):
+        provider.api().history(100, 108)
+
+
 @pytest.mark.parametrize("failure", [200, 401, 429, 500, "timeout", "identity"])
 def test_actual_http_failures_are_safe_and_do_not_resend_uncertain_notification(provider, tmp_path, failure):
     if failure == "timeout": provider.delay = 0.2
@@ -207,7 +256,7 @@ def test_sdk_socket_notification_reply_reconnect_duplicate_and_collision(provide
             completed.put(payload)
         return LarkConnection(config, received, timeout, channel=provider.channel())
     queue = SimpleNamespace(dispatch=lambda *args: (calls.append(args) or SimpleNamespace(status="enqueued")))
-    relay = LarkReplyRelay(tmp_path, provider.config, queue_dispatcher=queue, remote_ssh_adapter=None,
+    relay = LarkReplyRelay(tmp_path, replace(provider.config, reply_mode="socket"), queue_dispatcher=queue, remote_ssh_adapter=None,
                           timeout=2, api=provider.api(), connection_factory=factory)
     notifier = EnvironmentNotifier(tmp_path, NotificationConfig(lark=provider.config), lark_api=provider.api())
     event = NotificationEvent("workspace", "waiting", "notification", "Waiting", "Reply",

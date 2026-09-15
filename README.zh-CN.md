@@ -215,6 +215,7 @@ Linux 的 Slack 回复使用 `CODEX_WATCHDOG_SLACK_REPLY_MODE=poll`，并配置�
 飞书和国际版 Lark 也支持发送通知，并将纯文本回复转发到原有 Codex 会话。
 设置 `CODEX_WATCHDOG_INTERACTIVE_TRANSPORT=both` 可与 Slack 同时使用。
 请按照[飞书/Lark 配置指南](docs/FEISHU_LARK.md)选择正确的区域并设置获准用户。
+回复默认由各机器轮询读取，可共享同一个应用和聊天。
 安装包已包含 SDK；切换通知渠道时保留原有 Slack 设置。
 
 ## 文档

@@ -230,6 +230,7 @@ Linux の Slack 返信には `CODEX_WATCHDOG_SLACK_REPLY_MODE=poll` と既存の
 Feishu と国際版 Lark でも通知を送信し、テキスト返信を既存の Codex 会話に転送できます。
 `CODEX_WATCHDOG_INTERACTIVE_TRANSPORT=both` を設定すると Slack と同時に利用できます。
 [Feishu/Lark 設定ガイド](docs/FEISHU_LARK.md)に従ってリージョンと許可ユーザーを設定してください。
+返信は各マシンがポーリングするため、同じアプリとチャットを共有できます。
 パッケージには SDK が含まれており、通知先を切り替えても既存の Slack 設定は保持されます。
 
 ## ドキュメント

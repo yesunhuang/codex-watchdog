@@ -40,7 +40,9 @@ edited, bot, unrelated, or ambiguous confirmations are rejected. See the officia
 [Slack Socket Mode](https://docs.slack.dev/apis/events-api/using-socket-mode/),
 [Slack event authorization](https://docs.slack.dev/apis/events-api/), and
 [Feishu receive-message event](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive)
-references. No public callback server or additional provider scope is added.
+references. Pairing needs no public callback server. Normal Feishu/Lark replies
+use history polling and require the history access listed in the prerequisites;
+several machines can share the same app without competing for reply events.
 
 ## Existing settings and upgrades
 

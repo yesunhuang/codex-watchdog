@@ -241,7 +241,8 @@ native runtime isolation and existing-installation limits.
 Feishu and international Lark can also send notifications and relay plain-text
 replies to the existing Codex conversation. Set `CODEX_WATCHDOG_INTERACTIVE_TRANSPORT=both`
 to use the selected service alongside Slack. Configure the correct region and
-allowed users in the [Feishu/Lark setup guide](docs/FEISHU_LARK.md). Packages include
+allowed users in the [Feishu/Lark setup guide](docs/FEISHU_LARK.md). Replies use
+local polling by default, so machines can share the same app and conversation. Packages include
 the SDK; existing Slack settings are retained when switching providers.
 
 ## Documentation
