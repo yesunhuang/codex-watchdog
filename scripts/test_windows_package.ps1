@@ -301,7 +301,11 @@ try {
         ConvertTo-Json | Set-Content -LiteralPath (Join-Path $pollConfig "slack-relay.json") -Encoding UTF8
     $env:LOCALAPPDATA = $pollLocal
     $pollOutput = & $powershell -NoProfile -File $launcher -DryRun -NoDuo -Runtime $runtime
-    if ($LASTEXITCODE -ne 0 -or ($pollOutput | Out-String) -notmatch "slack_reply\s*:\s*encrypted_store") {
+    if ($LASTEXITCODE -ne 0) {
+        throw "Fresh polling profile failed in the packaged desktop launcher."
+    }
+    $pollSummary = $pollOutput | ConvertFrom-Json
+    if ($pollSummary.status -ne "ready" -or $pollSummary.slack_reply -ne "encrypted_store") {
         throw "Fresh polling profile failed in the packaged desktop launcher."
     }
     $env:LOCALAPPDATA = Split-Path -Parent $savedConfigRoot
