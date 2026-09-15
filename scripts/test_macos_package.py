@@ -64,7 +64,7 @@ def main() -> None:
     from PyInstaller.archive.readers import CArchiveReader
 
     reader = CArchiveReader(str(package / "codex-watchdog"))
-    assert "pyi-bootloader-ignore-signals" in reader.toc, "terminal signals would be forwarded twice"
+    assert "pyi-bootloader-ignore-signals" in reader.options, "terminal signals would be forwarded twice"
     assert not any(name.endswith("direct_url.json") for name in reader.toc), "build-location metadata was bundled"
     pyz = reader.open_embedded_archive(next(name for name in reader.toc if name.endswith(".pyz")))
     forbidden = (str(ROOT), str(Path.home()))
