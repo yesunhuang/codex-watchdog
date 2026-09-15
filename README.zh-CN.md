@@ -17,11 +17,16 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-2e7d32" alt="MIT 许可证"></a>
   <a href="docs/PLATFORM_SUPPORT.md#support-matrix"><img src="https://img.shields.io/badge/Windows-x64-44627e" alt="支持 Windows x64"></a>
   <a href="docs/PLATFORM_SUPPORT.md#support-matrix"><img src="https://img.shields.io/badge/Linux-ARM64%20%2F%20x64-44627e" alt="支持 Linux ARM64 和 x64"></a>
-  <a href="docs/PLATFORM_SUPPORT.md#support-matrix"><img src="https://img.shields.io/badge/macOS-preview-a66b00" alt="macOS 预览版"></a>
+  <a href="docs/PLATFORM_SUPPORT.md#support-matrix"><img src="https://img.shields.io/badge/macOS-Apple%20Silicon-44627e" alt="支持 macOS Apple Silicon"></a>
   <br>
   <a href="#架构与设计理念"><img src="https://img.shields.io/badge/sessions-native-355c7d" alt="保留现有原生 Codex 会话"></a>
   <a href="#多人协作bring-your-own-agents"><img src="https://img.shields.io/badge/collaboration-multi--user%20%2F%20multi--agent-355c7d" alt="多用户、多 Agent 协作"></a>
   <a href="#多人协作bring-your-own-agents"><img src="https://img.shields.io/badge/central%20server-not%20required-355c7d" alt="无需中央服务器"></a>
+  <br>
+  <a href="docs/SETUP.md"><img src="https://img.shields.io/badge/supports-Slack-4A154B" alt="支持 Slack"></a>
+  <a href="docs/FEISHU_LARK.md"><img src="https://img.shields.io/badge/supports-Feishu-3370FF" alt="支持飞书"></a>
+  <a href="docs/FEISHU_LARK.md"><img src="https://img.shields.io/badge/supports-Lark-00B96B" alt="支持 Lark"></a>
+  <a href="docs/SETUP.md"><img src="https://img.shields.io/badge/supports-SMTP-6c757d" alt="支持 SMTP"></a>
 </p>
 
 <p align="center">
@@ -128,7 +133,7 @@ Policy 继续留在 transport layer 之外。
 | --- | --- | --- |
 | Windows x64 | 本地 VS Code，以及对 Linux Remote-SSH 目标的桌面控制 | 稳定的桌面参考实现；已验证原生端到端流程、包升级与图标 |
 | Linux ARM64 / x64 | 原生服务器执行、Remote-SSH，以及断开后的继续运行 | 原生服务器/分离运行测试和用户验收通过；本地桌面仍为预览 |
-| macOS Apple Silicon | 原生桌面预览 | 在可解析归属的窗口结构中有有限的原生端到端证据；Remote-SSH/交接验收范围仍有限 |
+| macOS Apple Silicon | 原生桌面 | 正式稳定桌面版本；安装、升级、回滚和消息通信均已通过验收；Remote-SSH/交接范围仍有限 |
 
 断开连接后的原生执行所有者目前仅支持 Linux，不支持 macOS/Windows 原生分离执行。
 Linux 包覆盖 ARM64 Ubuntu 和 x64 Ubuntu/RHEL 8；准确要求和验收边界见
@@ -159,17 +164,13 @@ Linux 包覆盖 ARM64 Ubuntu 和 x64 Ubuntu/RHEL 8；准确要求和验收边界
 
    然后在 Codex 中打开 `/hooks`，自己检查并信任准确的定义。
 
-### macOS Apple Silicon 预览
+### macOS Apple Silicon
 
-从 Releases 下载 ARM64 preview ZIP，校验 `SHA256SUMS.txt` 后解压并运行：
+从 Releases 下载最新 macOS ARM64 ZIP，校验 `SHA256SUMS.txt` 后解压，然后双击
+`Install and Start Codex WatchDog.command`（也可以在 Terminal 中运行）。安装器会把
+可执行文件放到稳定的当前用户目录，完成 WatchDog 设置，同时保留 hook 的人工信任流程。
 
-```sh
-./codex-watchdog --version
-./codex-watchdog macos-install
-"$HOME/Library/Application Support/CodexWatchdog/bin/codex-watchdog" doctor
-```
-
-hook 信任、Slack、升级、回滚和当前 preview 限制见
+hook 信任、消息通信、升级、回滚和当前平台限制见
 [Mac 安装包指南](docs/MACOS_PACKAGE.md)。
 
 ### Linux ARM64 / x64
