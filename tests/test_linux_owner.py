@@ -574,6 +574,15 @@ def test_foreground_owner_recovers_observation_without_closing_live_writer(owner
     assert len(client.requests) >= 2
 
 
+def test_foreground_initial_foreign_writer_rejects_admission_without_starting(owner):
+    instance, client, cycles, pid = owner
+    pid[0] = 777
+    results = []
+    assert instance.run(emit=results.append) == 1
+    assert results[-1]["reason"] == "linux_conflicting_writer"
+    assert client.requests == [] and not client.closed and cycles == []
+
+
 def test_uncoordinated_owner_does_not_replay_an_uncertain_health_notification(owner):
     instance, client, cycles, pid = owner
     attempts = []

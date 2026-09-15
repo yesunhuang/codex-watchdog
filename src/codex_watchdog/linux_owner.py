@@ -446,6 +446,10 @@ class LinuxThreadOwner:
                         time.sleep(0.5)
                     retry_delay = 0.5
                 except (LinuxBindingError, AppServerError, ControlError, OSError, ValueError) as exc:
+                    if self.client is None and isinstance(exc, LinuxBindingError):
+                        # Initial binding/foreign-writer rejection is a failed
+                        # admission, not an interrupted observation transport.
+                        raise
                     reason = owner_failure_reason(exc)
                     recovering = isinstance(exc, (AppServerError, OSError))
                     result = self._status("recovering" if recovering else "blocked", reason)
