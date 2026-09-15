@@ -22,6 +22,92 @@ class AppServerError(RuntimeError):
     pass
 
 
+_CONTROL_EVENTS = ("thread/status/changed", "turn/started", "turn/completed")
+
+
+def _discardable_notification(line: bytes) -> bool:
+    """Inspect envelope strings and framing, never decode content values.
+
+    An ID anywhere in the envelope keeps the frame on the reliable path, even
+    when it follows params. Unrecognized framing takes the normal validation
+    path. Intermediate content itself is deliberately not validated or retained.
+    """
+    depth = 0
+    key = None
+    expecting_key = False
+    method = None
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if char == 34:
+            end = index + 1
+            while True:
+                end = line.find(b'"', end)
+                if end < 0:
+                    return False
+                slash = end - 1
+                while slash > index and line[slash] == 92:
+                    slash -= 1
+                if (end - 1 - slash) % 2 == 0:
+                    break
+                end += 1
+            if depth == 1 and (expecting_key or key == "method"):
+                if end - index > 4096:
+                    return False
+                try:
+                    value = json.loads(line[index:end + 1])
+                except (ValueError, UnicodeError):
+                    return False
+                if expecting_key:
+                    key = value
+                    expecting_key = False
+                    if key == "id":
+                        return False
+                elif key == "method":
+                    if method is not None:
+                        return False
+                    method = value
+                    key = None
+            index = end + 1
+            continue
+        if char in (123, 91):  # { [
+            if depth == 0 and char != 123:
+                return False
+            depth += 1
+            if depth == 1:
+                expecting_key = True
+        elif char in (125, 93):
+            depth -= 1
+            if depth < 0:
+                return False
+        elif char == 44 and depth == 1:
+            expecting_key = True
+            key = None
+        index += 1
+    return depth == 0 and isinstance(method, str) and method not in _CONTROL_EVENTS
+
+
+class _ControlQueue(queue.Queue):
+    """Bound reliable traffic; retain only the latest pending thread status."""
+
+    def put(self, item, block=True, timeout=None):
+        params = item.get("params")
+        thread = params.get("threadId") if isinstance(params, dict) else None
+        if ("id" not in item and item.get("method") == "thread/status/changed"
+                and isinstance(thread, str)):
+            with self.not_full:
+                for previous in tuple(self.queue):
+                    old_params = previous.get("params")
+                    if ("id" not in previous and previous.get("method") == "thread/status/changed"
+                            and isinstance(old_params, dict) and old_params.get("threadId") == thread):
+                        self.queue.remove(previous)
+                        self.unfinished_tasks -= 1
+                        self.not_full.notify()
+        # Append the latest status at its actual position relative to reliable
+        # turn/approval/response events; never evict any of those events.
+        return super().put(item, block, timeout)
+
+
 class StdioAppServer:
     def __init__(self, executable: str, codex_home: Path, cwd: Path,
                  on_event: Callable[[Dict[str, Any]], None]) -> None:
@@ -31,7 +117,7 @@ class StdioAppServer:
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             cwd=str(cwd), env=codex_process_environment(codex_home),
         )
-        self.messages: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=128)
+        self.messages: "queue.Queue[Dict[str, Any]]" = _ControlQueue(maxsize=128)
         self.failed = threading.Event()
         self.stopping = threading.Event()
         self.next_id = 0
@@ -107,6 +193,8 @@ class StdioAppServer:
                 self._problem("app_server_frame_discarded")
                 draining = not line.endswith(b"\n")
                 continue
+            if _discardable_notification(line):
+                continue
             try:
                 value = json.loads(line)
                 if not isinstance(value, dict):
@@ -115,9 +203,7 @@ class StdioAppServer:
                 self._problem("app_server_frame_discarded")
                 continue
             # Content stays out of the queue and all recovery diagnostics.
-            if "id" not in value and value.get("method") not in (
-                "thread/status/changed", "turn/started", "turn/completed",
-            ):
+            if "id" not in value and value.get("method") not in _CONTROL_EVENTS:
                 continue
             pressure = False
             while not self.stopping.is_set():

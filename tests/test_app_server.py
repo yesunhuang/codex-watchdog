@@ -141,7 +141,7 @@ def test_queue_backpressure_preserves_backlog_and_reader(tmp_path, monkeypatch):
     client, events = start(tmp_path, monkeypatch, '''
 import json,sys
 for i in range(300):
-    print(json.dumps({"method":"thread/status/changed","params":{"n":i}}),flush=True)
+    print(json.dumps({"method":"turn/started","params":{"n":i}}),flush=True)
 print(json.dumps({"method":"turn/completed","params":{}}),flush=True)
 r=json.loads(sys.stdin.readline())
 print(json.dumps({"id":r["id"],"result":{"ok":True}}),flush=True)
@@ -208,3 +208,72 @@ for line in sys.stdin:
         assert client.observation_verified(generation)
     finally:
         client.close()
+
+
+def test_content_pressure_is_discarded_without_decoding_payload(tmp_path, monkeypatch):
+    original = json.loads
+    def envelope_only(value, *args, **kwargs):
+        if isinstance(value, bytes):
+            assert b"DISPOSABLE_PAYLOAD" not in value
+        return original(value, *args, **kwargs)
+    monkeypatch.setattr(app_server.json, "loads", envelope_only)
+    client, events = start(tmp_path, monkeypatch, '''
+import json,sys
+r=json.loads(sys.stdin.readline())
+for i in range(300):
+    print(json.dumps({"method":"item/agentMessage/delta","params":{"text":"DISPOSABLE_PAYLOAD"*4096}}),flush=True)
+print(json.dumps({"method":"turn/completed","params":{"threadId":"exact","turn":{"id":"done"}}}),flush=True)
+print(json.dumps({"id":r["id"],"result":{"ok":True}}),flush=True)
+sys.stdin.read()
+''')
+    try:
+        assert client.request("thread/read", {}, timeout=10) == {"ok": True}
+        assert len(events) == 1 and events[0]["method"] == "turn/completed"
+        assert client.recovery_snapshot()[1] is None and client.messages.empty()
+    finally:
+        client.close()
+
+
+def test_status_backlog_keeps_latest_without_evicting_completion(tmp_path, monkeypatch):
+    client, events = start(tmp_path, monkeypatch, '''
+import json,sys
+for i in range(1000):
+    print(json.dumps({"method":"thread/status/changed","params":{"threadId":"exact","status":{"type":str(i)}}}),flush=True)
+print(json.dumps({"method":"turn/completed","params":{"threadId":"exact"}}),flush=True)
+r=json.loads(sys.stdin.readline())
+print(json.dumps({"id":r["id"],"result":{"ok":True}}),flush=True)
+sys.stdin.read()
+''')
+    try:
+        deadline = time.monotonic() + 5
+        while client.messages.qsize() < 2 and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert client.messages.qsize() == 2
+        assert client.request("thread/read", {}, timeout=3) == {"ok": True}
+        assert len(events) == 2
+        assert events[0]["params"]["status"]["type"] == "999"
+        assert events[1]["method"] == "turn/completed"
+        assert client.recovery_snapshot()[1] is None
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("encoded", [
+    b'{"method":"unknown","params":{"id":"content"},"id":"request"}',
+    b'{"params":{"method":"content"},"method":"turn/completed"}',
+    b'{"method":"item/commandExecution/requestApproval","params":{},"id":"approval"}',
+])
+def test_content_discard_never_hides_reliable_envelope_fields(encoded):
+    assert not app_server._discardable_notification(encoded)
+
+
+def test_status_coalescing_preserves_reliable_order_and_other_threads():
+    pending = app_server._ControlQueue(maxsize=5)
+    def status(thread, value):
+        return {"method":"thread/status/changed","params":{"threadId":thread,"status":{"type":value}}}
+    completion = {"method":"turn/completed","params":{"threadId":"a"}}
+    response = {"id":4,"result":{}}
+    pending.put(status("a", "old"));pending.put(status("b", "idle"))
+    pending.put(completion);pending.put(response);pending.put(status("a", "active"))
+    assert pending.qsize() == 4
+    assert [pending.get_nowait() for _ in range(4)] == [status("b", "idle"), completion, response, status("a", "active")]
