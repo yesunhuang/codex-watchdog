@@ -126,7 +126,7 @@ class SlackThreadStore:
     def cache_mappings(self, entries, target):
         """Cache immutable observed routing; delivery still requires the remote fence."""
         for entry in entries:
-            if isinstance(entry, dict) and entry.get("provider") == "lark":
+            if isinstance(entry, dict) and entry.get("provider") in ("lark", "onebot"):
                 continue
             existing = self.lookup_thread(entry["channel_id"], entry["thread_ts"])
             if existing is not None:

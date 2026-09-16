@@ -80,6 +80,7 @@ def main() -> None:
         "--collect-submodules", "msal_extensions",
         "--collect-submodules", "slack_bolt", "--collect-submodules", "slack_sdk",
         "--collect-submodules", "lark_channel",
+        "--collect-data", "codex_watchdog._vendor.napcat_sdk",
         "--collect-data", "certifi", "--exclude-module", "tkinter",
         str(ROOT / "packaging/linux_entry.py"),
     ], cwd=ROOT, env=build_env, check=True)
@@ -95,6 +96,8 @@ def main() -> None:
                            ("docs/FEISHU_LARK.md", "FEISHU_LARK.md"),
                            ("docs/MESSAGING_SETUP.md", "MESSAGING_SETUP.md"),
                            ("docs/SETUP.md", "SETUP.md"),
+                           ("docs/ONEBOT_QQ.md", "ONEBOT_QQ.md"),
+                           ("docs/ONEBOT_REUSE.md", "ONEBOT_REUSE.md"),
                            ("THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md")):
         shutil.copy2(ROOT / source, package / target)
     subprocess.run([
@@ -114,6 +117,8 @@ def main() -> None:
         [executable, *(Path(original) for _, original, _ in binaries)], architecture)
     add_native_inventory(package / "THIRD_PARTY_LICENSES", binaries, native_runtime=native_runtime)
     subprocess.run([sys.executable, str(ROOT / "scripts/test_lark_package.py"),
+                    "--package", str(package), "--expected-version", version], check=True)
+    subprocess.run([sys.executable, str(ROOT / "scripts/test_onebot_package.py"),
                     "--package", str(package), "--expected-version", version], check=True)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     files = {path.relative_to(package).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()

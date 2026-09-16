@@ -108,6 +108,7 @@ try {
         "--collect-submodules", "slack_bolt",
         "--collect-submodules", "slack_sdk",
         "--collect-submodules", "lark_channel",
+        "--collect-data", "codex_watchdog._vendor.napcat_sdk",
         "--collect-data", "certifi",
         "--exclude-module", "tkinter",
         (Join-Path $repoRoot "packaging\windows_entry.py")
@@ -157,7 +158,7 @@ try {
     }
     $packageDocs = Join-Path $packageDirectory "docs"
     New-Item -ItemType Directory -Path $packageDocs -Force | Out-Null
-    foreach ($name in @("PLATFORM_SUPPORT.md", "AUTOMATIC_REMOTE_HANDOFF.md", "FEISHU_LARK.md", "MESSAGING_SETUP.md", "SETUP.md")) {
+    foreach ($name in @("PLATFORM_SUPPORT.md", "AUTOMATIC_REMOTE_HANDOFF.md", "FEISHU_LARK.md", "MESSAGING_SETUP.md", "SETUP.md", "ONEBOT_QQ.md", "ONEBOT_REUSE.md")) {
         Copy-Item -LiteralPath (Join-Path $repoRoot "docs\$name") -Destination $packageDocs
     }
     $packageImages = Join-Path $packageDirectory "images"
@@ -189,6 +190,11 @@ try {
         --package $packageDirectory --expected-version $version
     if ($LASTEXITCODE -ne 0) {
         throw "The frozen Feishu/Lark SDK or its license notices are incomplete."
+    }
+    & $Python (Join-Path $repoRoot "scripts\test_onebot_package.py") `
+        --package $packageDirectory --expected-version $version
+    if ($LASTEXITCODE -ne 0) {
+        throw "The frozen OneBot client or its license notices are incomplete."
     }
 
     $packageChecksums = Get-ChildItem -LiteralPath $packageDirectory -File -Recurse |

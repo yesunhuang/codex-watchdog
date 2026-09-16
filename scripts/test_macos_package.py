@@ -37,7 +37,7 @@ def main() -> None:
     manifest = json.loads((package / "package-manifest.json").read_text())
     allowed = {"codex-watchdog", "watchdog-macos.sh", "setup-slack-relay-macos.sh", "LICENSE",
                "Install and Start Codex WatchDog.command",
-               "MACOS_PACKAGE.md", "FEISHU_LARK.md", "MESSAGING_SETUP.md", "SETUP.md", "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_LICENSES/README.md",
+               "MACOS_PACKAGE.md", "FEISHU_LARK.md", "MESSAGING_SETUP.md", "SETUP.md", "ONEBOT_QQ.md", "ONEBOT_REUSE.md", "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_LICENSES/README.md",
                "THIRD_PARTY_LICENSES/inventory.json"}
     inventory = json.loads((package / "THIRD_PARTY_LICENSES/inventory.json").read_text())
     assert inventory["schema_version"] == 1

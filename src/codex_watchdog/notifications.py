@@ -25,6 +25,9 @@ from .slack_mapping import (
 )
 from .lark_transport import LarkApi, LarkConfig
 from .lark_mapping import LarkThreadStore
+from .messaging_profile import TRANSPORTS
+from .onebot_transport import OneBotApi, OneBotConfig
+from .onebot_relay import OneBotThreadStore
 from .storage import FileLock, InstructionStore
 from .control_context import current_effect
 
@@ -190,13 +193,14 @@ class NotificationConfig:
     windows_message_target: Optional[str] = field(default=None, repr=False)
     timeout_seconds: float = field(default=10.0, repr=False)
     lark: LarkConfig = field(default_factory=LarkConfig, repr=False)
+    onebot: OneBotConfig = field(default_factory=OneBotConfig, repr=False)
     interactive_transport: Optional[str] = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.slack_reply_mode not in ("socket", "poll"):
             raise ValueError("Slack reply mode must be socket or poll")
-        if self.interactive_transport not in (None, "slack", "lark", "both"):
-            raise ValueError("interactive transport must be slack, lark or both")
+        if self.interactive_transport is not None and self.interactive_transport not in TRANSPORTS:
+            raise ValueError("interactive transport is invalid")
         if not 1 <= self.smtp_port <= 65535:
             raise ValueError("SMTP port must be from 1 to 65535")
         if self.smtp_security not in _SMTP_SECURITY_VALUES:
@@ -230,6 +234,7 @@ class NotificationConfig:
             windows_target = _optional_environment_value(source, "USERNAME")
         return cls(
             lark=LarkConfig.from_environment(source),
+            onebot=OneBotConfig.from_environment(source),
             interactive_transport=_optional_environment_value(source, "CODEX_WATCHDOG_INTERACTIVE_TRANSPORT"),
             slack_webhook_url=_optional_environment_value(source, SLACK_WEBHOOK_ENV),
             slack_bot_token=_optional_environment_value(source, SLACK_BOT_TOKEN_ENV),
@@ -268,13 +273,21 @@ class NotificationConfig:
     def selected_interactive_transport(self) -> str:
         if self.interactive_transport is not None:
             return self.interactive_transport
+        if self.onebot.present:
+            if self.slack_configured:
+                return "slack+onebot"
+            return "lark+onebot" if self.lark.present else "onebot"
         return "lark" if self.lark.present and not self.slack_configured else "slack"
 
     @property
+    def interactive_providers(self):
+        return TRANSPORTS[self.selected_interactive_transport]
+
+    @property
     def interactive_relay_configured(self) -> bool:
-        if self.selected_interactive_transport == "both":
-            return self.lark.relay_configured and self.slack_relay_configured
-        return self.lark.relay_configured if self.selected_interactive_transport == "lark" else self.slack_relay_configured
+        configured = {"slack": self.slack_relay_configured, "lark": self.lark.relay_configured,
+                      "onebot": self.onebot.relay_configured}
+        return all(configured[provider] for provider in self.interactive_providers)
 
     @property
     def slack_configured(self) -> bool:
@@ -336,10 +349,12 @@ class NotificationConfig:
     @property
     def configuration_issues(self) -> Tuple[str, ...]:
         issues = []
-        if (self.lark.present or self.interactive_transport in ("lark", "both")) and not self.lark.configured:
+        if (self.lark.present or "lark" in self.interactive_providers) and not self.lark.configured:
             issues.append("lark_configuration_incomplete")
-        if self.interactive_transport == "both" and not self.slack_configured:
+        if len(self.interactive_providers) > 1 and "slack" in self.interactive_providers and not self.slack_configured:
             issues.append("slack_configuration_incomplete")
+        if (self.onebot.present or "onebot" in self.interactive_providers) and not self.onebot.configured:
+            issues.append("onebot_configuration_incomplete")
         relay_values_present = any(
             (
                 self.slack_bot_token,
@@ -546,6 +561,8 @@ class EnvironmentNotifier:
         slack_thread_store: Optional[SlackThreadStore] = None,
         lark_api: Any = None,
         lark_thread_store: Any = None,
+        onebot_api: Any = None,
+        onebot_thread_store: Any = None,
     ) -> None:
         if config is not None and environment is not None:
             raise ValueError("provide notification config or environment, not both")
@@ -588,13 +605,17 @@ class EnvironmentNotifier:
         self.lark_api = lark_api
         self.lark_thread_store = lark_thread_store or (
             LarkThreadStore(runtime, self.config.lark.scope) if self.config.lark.configured else None)
+        self.onebot_api = onebot_api
+        self.onebot_thread_store = onebot_thread_store or (
+            OneBotThreadStore(runtime, self.config.onebot.scope) if self.config.onebot.configured else None)
 
     @property
     def relay_thread_store(self):
-        if self.config.selected_interactive_transport == "both":
-            from .relay import CombinedThreadStores
-            return CombinedThreadStores(self.slack_thread_store, self.lark_thread_store)
-        return self.lark_thread_store if self.config.selected_interactive_transport == "lark" else self.slack_thread_store
+        from .relay import CombinedThreadStores
+        stores = {"slack": self.slack_thread_store, "lark": self.lark_thread_store,
+                  "onebot": self.onebot_thread_store}
+        selected = [stores[provider] for provider in self.config.interactive_providers]
+        return selected[0] if len(selected) == 1 else CombinedThreadStores(*selected)
 
     def notify(self, event: NotificationEvent) -> NotificationResult:
         with current_effect("notification"):
@@ -687,7 +708,7 @@ class EnvironmentNotifier:
         attempts = []
         failures = []
 
-        if self.config.selected_interactive_transport == "both":
+        if len(self.config.interactive_providers) > 1:
             delivery = self._deliver_both(event)
             # Preserve SMTP/desktop fallback when neither messaging provider
             # delivered. A partial send remains visibly failed, not all-sent.
@@ -714,6 +735,15 @@ class EnvironmentNotifier:
                 failures.append(self._error_digest("slack_failed", exc))
             else:
                 return _DeliveryResult("sent", "slack", tuple(attempts), None)
+
+        if self.config.selected_interactive_transport == "onebot" and self.config.onebot.configured:
+            attempts.append("onebot")
+            try:
+                self._send_onebot(event)
+            except Exception as exc:
+                failures.append(self._error_digest("onebot_failed", exc))
+            else:
+                return _DeliveryResult("sent", "onebot", tuple(attempts), None)
 
         if self.config.smtp_configured:
             attempts.append("smtp")
@@ -771,8 +801,21 @@ class EnvironmentNotifier:
                 raise ValueError("dual notification receipt is malformed")
         receipt = state["events"].setdefault(event.event_fingerprint(), {})
         delivered, failures, attempts = [], [], []
-        for provider, configured in (("slack", self.config.slack_configured),
-                                     ("lark", self.config.lark.configured)):
+        configuration = {"slack": self.config.slack_configured, "lark": self.config.lark.configured,
+                         "onebot": self.config.onebot.configured}
+        for provider in self.config.interactive_providers:
+            configured = configuration[provider]
+            if provider == "onebot":
+                # OneBot's own journal fences its sends. Keep the previous
+                # Slack/Feishu receipt format byte-compatible with rollback.
+                attempts.append(provider)
+                try:
+                    self._send_onebot(event)
+                except Exception as error:
+                    failures.append(self._error_digest("onebot_failed", error))
+                else:
+                    delivered.append(provider)
+                continue
             if receipt.get(provider) == "sent":
                 delivered.append(provider)
                 continue
@@ -797,7 +840,7 @@ class EnvironmentNotifier:
             self.atomic_writer(path, state)
             delivered.append(provider)
         return _DeliveryResult(
-            "sent" if len(delivered) == 2 else "delivery_failed",
+            "sent" if len(delivered) == len(self.config.interactive_providers) else "delivery_failed",
             "+".join(delivered) or "local_audit", tuple(attempts),
             self._combine_error_digests(tuple(failures)))
 
@@ -887,6 +930,35 @@ class EnvironmentNotifier:
         result = api.send(text, fingerprint)
         if result.get("chat_id") != self.config.lark.chat_id:
             raise RuntimeError("lark_response_destination_mismatch")
+        store.finish_notification(fingerprint, result["chat_id"], result["message_id"], target)
+
+    def _send_onebot(self, event: NotificationEvent) -> None:
+        config = self.config.onebot
+        if not config.configured:
+            raise RuntimeError("onebot_configuration_incomplete")
+        target = event.relay_target if config.relay_configured else None
+        try:
+            machine = _notification_label_component(socket.gethostname()) or "unknown"
+        except OSError:
+            machine = "unknown"
+        context = f"Machine: {machine}"
+        if target is not None and target.execution_locality == "remote_ssh":
+            remote = (target.remote_authority or "unknown").removeprefix("ssh-remote+")
+            context = f"Thread location (SSH): {remote}\nWatchDog machine: {machine}"
+        text = f"{event.subject.strip()}\n{context}\n{event.message}"
+        if target is not None:
+            text += "\n\nQuote/reply to this message to send text to this exact existing Codex thread."
+        fingerprint = event.event_fingerprint()
+        payload_digest = sha256_text(json.dumps(
+            [text, config.destination, target.to_dict() if target else None],
+            ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+        store = self.onebot_thread_store
+        if store.prepare_notification(fingerprint, payload_digest) is not None:
+            return
+        api = self.onebot_api or OneBotApi(config, self.config.timeout_seconds)
+        result = api.send(text, fingerprint)
+        if result.get("chat_id") != config.destination:
+            raise RuntimeError("onebot_response_destination_mismatch")
         store.finish_notification(fingerprint, result["chat_id"], result["message_id"], target)
 
     def _send_slack_webhook(self, text: str) -> None:

@@ -18,12 +18,18 @@ import sys
 import tempfile
 
 from .lark_transport import LarkConfig, valid_id
+from .onebot_transport import OneBotConfig
 
 PREFIX = "CODEX_WATCHDOG_"
 SELECTOR = PREFIX + "INTERACTIVE_TRANSPORT"
 MARKER = "messaging-setup.json"
 SLACK_SERVICE = "org.localcodexwatchdog.slack"
 LARK_SERVICE = "org.localcodexwatchdog.lark"
+TRANSPORTS = {
+    "slack": ("slack",), "lark": ("lark",), "both": ("slack", "lark"),
+    "onebot": ("onebot",), "slack+onebot": ("slack", "onebot"),
+    "lark+onebot": ("lark", "onebot"), "all": ("slack", "lark", "onebot"),
+}
 
 
 class MessagingError(RuntimeError):
@@ -83,6 +89,8 @@ def identity_keys(env, provider):
     suffixes = ("TOKEN", "URL", "APP_ID", "APP_SECRET", "CHAT_ID", "CHANNEL_ID", "ALLOWED_USER_IDS")
     if provider == "lark":
         suffixes += ("DOMAIN",)
+    if provider == "onebot":
+        suffixes += ("SELF_ID", "CHAT_TYPE")
     return tuple(k for k in provider_keys(env, provider) if k.endswith(suffixes))
 
 
@@ -259,13 +267,14 @@ def detect(environment=None, root=None, store=None):
     env = dict(os.environ if environment is None else environment)
     root = config_directory(env) if root is None else Path(root)
     store = store or SecretStore(root, environment=env)
-    evidence = ["provider_environment"] if provider_keys(env, "slack") or provider_keys(env, "lark") or SELECTOR in env else []
+    evidence = ["provider_environment"] if any(provider_keys(env, provider) for provider in ("slack", "lark", "onebot")) or SELECTOR in env else []
     try:
         if root.exists():
             evidence.extend("saved:" + p.name for p in root.iterdir()
-                            if p.name.startswith(("slack", "lark", "feishu", "linux-notifications", "messaging-setup")))
+                            if p.name.startswith(("slack", "lark", "feishu", "onebot", "linux-notifications", "messaging-setup")))
         for service, account in ((SLACK_SERVICE, "slack-bot-token"), (SLACK_SERVICE, "slack-app-token"),
-                                 (LARK_SERVICE, "lark-app-secret")):
+                                 (LARK_SERVICE, "lark-app-secret"),
+                                 ("org.localcodexwatchdog.onebot", "onebot-access-token")):
             if store.has(service, account):
                 evidence.append("protected_credential")
         # Existing Mac host helper used its own service. Its presence is enough
@@ -279,7 +288,9 @@ def detect(environment=None, root=None, store=None):
         loaded = load_saved(env, root, store, secrets=False)
         slack, lark = slack_complete(loaded), lark_complete(loaded)
         selected = loaded.get(SELECTOR) or ("lark" if lark and not slack else "slack")
-        good = {"slack": slack, "lark": lark, "both": slack and lark}.get(selected, False)
+        configured = {"slack": slack, "lark": lark,
+                      "onebot": OneBotConfig.from_environment(loaded).relay_configured}
+        good = selected in TRANSPORTS and all(configured[provider] for provider in TRANSPORTS[selected])
         marker = root / MARKER
         if marker.exists() and read_object(marker).get("status") not in ("configured", "skipped"):
             good = False
@@ -287,6 +298,8 @@ def detect(environment=None, root=None, store=None):
         if identity_keys(env, "slack") and not slack_complete(env):
             good = False
         if identity_keys(env, "lark") and not lark_complete(env):
+            good = False
+        if identity_keys(env, "onebot") and not OneBotConfig.from_environment(env).relay_configured:
             good = False
         return Detection(ConfigurationState.CONFIGURED if good else ConfigurationState.EXISTING_OR_PARTIAL,
                          tuple(sorted(set(evidence))))
@@ -360,4 +373,5 @@ def load_saved(environment, root, store=None, *, secrets=True):
         value = read_object(marker)
         if value.get("schema_version") == 1 and value.get("status") == "configured" and value.get("transport") in ("slack", "lark", "both"):
             env[SELECTOR] = value["transport"]
-    return env
+    from .onebot_setup import load_onebot
+    return load_onebot(env, root, store, secrets=secrets, selector_explicit=SELECTOR in environment)

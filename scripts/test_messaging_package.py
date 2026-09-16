@@ -57,7 +57,7 @@ def check(package):
                             except OSError:
                                 chunk = b""
                             output += chunk
-                            if b"Choose 1-4:" in output and not sent:
+                            if b"Choose 1-5:" in output and not sent:
                                 os.write(master, b"4\n")
                                 sent = True
                         pid, status = os.waitpid(child, os.WNOHANG)
@@ -73,7 +73,7 @@ def check(package):
             choose_skip()
             assert json.loads((config / "messaging-setup.json").read_text())["status"] == "skipped"
             before = (config / "messaging-setup.json").read_bytes()
-            assert "Choose 1-4" not in run("--auto")
+            assert "Choose 1-5" not in run("--auto")
             assert (config / "messaging-setup.json").read_bytes() == before
             for state in ("started", "cancelled", "failed"):
                 marker = config / "messaging-setup.json"
@@ -86,7 +86,7 @@ def check(package):
         legacy.write_bytes(b"malformed legacy profile; preserve exactly")
         before = legacy.read_bytes()
         assert json.loads(run("--check"))["state"] == "EXISTING_OR_PARTIAL"
-        assert "Choose 1-4" not in run("--auto") and legacy.read_bytes() == before
+        assert "Choose 1-5" not in run("--auto") and legacy.read_bytes() == before
     return dict(schema_version=1, status="passed", pristine_headless_never_prompts=True,
                 partial_legacy_preserved=True, interactive_skip_and_restart=tty_checked,
                 unfinished_setup_retry=tty_checked,

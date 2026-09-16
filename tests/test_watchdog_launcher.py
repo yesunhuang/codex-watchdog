@@ -16,7 +16,7 @@ def _run_launcher(tmp_path: Path, **environment_updates: str):
     root = Path(__file__).resolve().parents[1]
     environment = os.environ.copy()
     for name in list(environment):
-        if name.startswith("CODEX_WATCHDOG_LARK_") or name == "CODEX_WATCHDOG_INTERACTIVE_TRANSPORT":
+        if name.startswith(("CODEX_WATCHDOG_LARK_", "CODEX_WATCHDOG_ONEBOT_")) or name == "CODEX_WATCHDOG_INTERACTIVE_TRANSPORT":
             environment.pop(name)
     environment["LOCALAPPDATA"] = str(tmp_path / "local-app-data")
     for name in (
@@ -166,3 +166,12 @@ def test_partial_feishu_environment_fails_without_loading_other_credentials(tmp_
     result=_run_launcher(tmp_path, CODEX_WATCHDOG_LARK_APP_SECRET="private-fixture-value")
     assert result.returncode != 0 and "incomplete" in result.stderr
     assert "private-fixture-value" not in result.stdout+result.stderr
+
+
+@pytest.mark.parametrize("selection", ["onebot", "slack+onebot", "lark+onebot", "all"])
+def test_onebot_selection_is_accepted_by_launcher_without_secret_output(tmp_path, selection):
+    result = _run_launcher(tmp_path, CODEX_WATCHDOG_INTERACTIVE_TRANSPORT=selection,
+        CODEX_WATCHDOG_ONEBOT_ACCESS_TOKEN="onebot-launcher-private-fixture")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["interactive_transport"] == selection
+    assert "onebot-launcher-private-fixture" not in result.stdout + result.stderr

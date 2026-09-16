@@ -530,6 +530,37 @@ def test_slack_relay_test_fails_when_webhook_fallback_has_no_mapping(
     assert json.loads(capsys.readouterr().out)["relay_mapping"] == "missing"
 
 
+@pytest.mark.parametrize("provider", ["slack", "lark", "onebot"])
+def test_named_relay_test_targets_only_named_provider_from_all(tmp_path, capsys, monkeypatch, provider):
+    from codex_watchdog.messaging_profile import PREFIX
+    from codex_watchdog import messaging_setup
+    environment = {PREFIX + "INTERACTIVE_TRANSPORT": "all", PREFIX + "SLACK_BOT_TOKEN": "xoxb-fixture",
+        PREFIX + "SLACK_APP_TOKEN": "xapp-fixture", PREFIX + "SLACK_CHANNEL_ID": "C12345678",
+        PREFIX + "SLACK_ALLOWED_USER_IDS": "U12345678", PREFIX + "LARK_APP_ID": "cli_fixture000001",
+        PREFIX + "LARK_APP_SECRET": "fixture", PREFIX + "LARK_CHAT_ID": "oc_fixture000001",
+        PREFIX + "LARK_ALLOWED_USER_IDS": "ou_fixture000001"}
+    environment.update({PREFIX + "ONEBOT_" + key: value for key, value in dict(
+        WS_URL="ws://127.0.0.1:3001", ACCESS_TOKEN="fixture", SELF_ID="12345",
+        CHAT_TYPE="group", CHAT_ID="67890", ALLOWED_USER_IDS="54321").items()})
+    config = notifications.NotificationConfig.from_environment(environment)
+    monkeypatch.setattr(messaging_setup, "prepare_launch", lambda *a, **kw: {})
+    seen = []
+    class Notifier:
+        def __init__(self, runtime, override=None):
+            self.config = override or config
+            setattr(self, provider + "_thread_store", SimpleNamespace(has_notification_mapping=lambda fp: True))
+        def notify(self, event):
+            seen.append((self.config.interactive_providers, event))
+            return SimpleNamespace(status="sent", channel=provider,
+                to_dict=lambda: dict(status="sent", channel=provider))
+    monkeypatch.setattr(cli, "EnvironmentNotifier", Notifier)
+    monkeypatch.setattr(cli, "EffectiveWorkspaceCatalog", lambda *a, **kw: SimpleNamespace(
+        list_workspaces=lambda: [SimpleNamespace(workspace_id="exact", repo_root=tmp_path, session_id=SESSION)]))
+    assert cli.main(["--runtime", str(tmp_path), provider + "-relay-test", "--id", "named-test"]) == 0
+    assert seen[0][0] == (provider,) and seen[0][1].relay_target.thread_id == SESSION
+    assert json.loads(capsys.readouterr().out)["relay_mapping"] == "created"
+
+
 def test_notify_test_distinct_ids_bypass_debounce(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
 ) -> None:

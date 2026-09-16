@@ -107,7 +107,7 @@ def validate_archive(package: Path) -> dict:
     architecture, machine = {"aarch64": ("arm64", 183), "x86_64": ("x64", 62)}[platform.machine()]
     assert manifest["platform"] == "linux" and manifest["architecture"] == architecture
     assert manifest["schema_version"] == 1 and len(manifest["source_commit"]) == 40
-    allowed = {"codex-watchdog", "LICENSE", "LINUX_PACKAGE.md", "FEISHU_LARK.md", "MESSAGING_SETUP.md", "SETUP.md", "THIRD_PARTY_NOTICES.md",
+    allowed = {"codex-watchdog", "LICENSE", "LINUX_PACKAGE.md", "FEISHU_LARK.md", "MESSAGING_SETUP.md", "SETUP.md", "ONEBOT_QQ.md", "ONEBOT_REUSE.md", "THIRD_PARTY_NOTICES.md",
                "THIRD_PARTY_LICENSES/README.md", "THIRD_PARTY_LICENSES/inventory.json"}
     inventory = json.loads((package / "THIRD_PARTY_LICENSES/inventory.json").read_text())
     assert inventory["schema_version"] == 1
