@@ -191,8 +191,8 @@ jobs:
         cat incoming/windows/SHA256SUMS.txt "incoming/macos/codex-watchdog-v$RELEASE_VERSION-macos-arm64-preview.zip.sha256" > release-assets/SHA256SUMS.txt
         cat "incoming/linux/codex-watchdog-v$RELEASE_VERSION-linux-arm64.zip.sha256" "incoming/linux/codex-watchdog-v$RELEASE_VERSION-linux-x64.zip.sha256" >> release-assets/SHA256SUMS.txt
         (cd release-assets && sha256sum --check SHA256SUMS.txt)
-        cp incoming/windows/windows-package-acceptance.json incoming/macos/macos-package-acceptance.json release-assets/
-        cp incoming/linux/linux-arm64-package-acceptance.json incoming/linux/linux-x64-package-acceptance.json release-assets/
+        cp incoming/windows/*package-acceptance.json incoming/macos/*package-acceptance.json release-assets/
+        cp incoming/linux/*package-acceptance.json release-assets/
         cp LICENSE THIRD_PARTY_NOTICES.md ASSETS.md release-assets/
     - name: Retain all verified assets for publication review
       uses: actions/upload-artifact@v4

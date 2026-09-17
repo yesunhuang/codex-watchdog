@@ -26,6 +26,7 @@
   <a href="docs/SETUP.md"><img src="https://img.shields.io/badge/supports-Slack-4A154B" alt="Slack 対応"></a>
   <a href="docs/FEISHU_LARK.md"><img src="https://img.shields.io/badge/supports-Feishu-3370FF" alt="Feishu 対応"></a>
   <a href="docs/FEISHU_LARK.md"><img src="https://img.shields.io/badge/supports-Lark-00B96B" alt="Lark 対応"></a>
+  <a href="docs/ONEBOT_QQ.md"><img src="https://img.shields.io/badge/optional-OneBot%20%2F%20QQ-2679b5" alt="任意の OneBot / QQ 連携"></a>
   <a href="docs/SETUP.md"><img src="https://img.shields.io/badge/supports-SMTP-6c757d" alt="SMTP 対応"></a>
 </p>
 

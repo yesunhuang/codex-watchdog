@@ -1,8 +1,14 @@
-# OneBot 11 / QQ candidate
+# OneBot 11 / QQ
 
-This feature is under development for 1.1.0. Synthetic tests do not establish
-real QQ support. Release acceptance requires a real NapCat/QQ human round trip
-and native package/upgrade checks on all supported platforms.
+Version 1.1.0 adds optional OneBot 11 messaging. Real Windows acceptance covered
+NapCat 4.18.28, confirmation-message pairing, a mapped private notification and
+an authorized official QQ quoted reply waking the exact existing Codex thread.
+Group messaging and shared-bot isolation also have synthetic regression coverage;
+this is not a claim of live acceptance for every QQ client or network topology.
+
+TIM 3.4.5 did not preserve a usable quoted-message identity in the tested backend.
+Use official QQ for quoted replies. WatchDog rejects replies whose destination
+cannot be identified; it never guesses the most recently active Codex thread.
 
 WatchDog connects to an external OneBot 11 forward WebSocket server. NapCat owns
 QQ login and protocol maintenance; it is installed and operated separately under
@@ -53,7 +59,7 @@ Adding OneBot saves a selection including the existing providers. A deliberate
 `CODEX_WATCHDOG_INTERACTIVE_TRANSPORT` environment value still takes precedence:
 `slack`, `lark`, `both` (Slack + Feishu), `onebot`, `slack+onebot`, `lark+onebot`, or
 `all`. An existing Linux service/environment file that explicitly selects `both`
-must select `all` for this candidate to send to all three. Preserve its previous
+must select `all` to send to all three. Preserve its previous
 value for rollback; 1.0.x does not recognize the new selections. Do not copy
 secrets between machines to perform an upgrade.
 
