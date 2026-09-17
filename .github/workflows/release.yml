@@ -15,7 +15,7 @@ env:
   PYTHONUTF8: '1'
 jobs:
   version:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     outputs:
       should_release: ${{ steps.version.outputs.should_release }}
@@ -45,7 +45,7 @@ jobs:
     needs: version
     if: needs.version.outputs.should_release == 'true'
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     env:
       RELEASE_VERSION: ${{ needs.version.outputs.version }}
       PREVIOUS_TAG: ${{ needs.version.outputs.previous_tag }}
@@ -119,13 +119,23 @@ jobs:
             PreviousVersion = $env:PREVIOUS_VERSION
         }
         ./scripts/test_windows_package.ps1 @parameters | Set-Content -LiteralPath dist/windows-package-acceptance.json -Encoding utf8
+    - name: Frozen messaging and OneBot acceptance
+      shell: pwsh
+      run: |
+        $package = "dist/codex-watchdog-v$env:RELEASE_VERSION-windows-x64"
+        python scripts/test_lark_package.py --package $package --expected-version $env:RELEASE_VERSION > dist/windows-lark-package-acceptance.json
+        if ($LASTEXITCODE -ne 0) { throw 'Frozen Lark acceptance failed' }
+        python scripts/test_messaging_package.py --package $package > dist/windows-messaging-package-acceptance.json
+        if ($LASTEXITCODE -ne 0) { throw 'Frozen messaging acceptance failed' }
+        python scripts/test_onebot_package.py --package $package --expected-version $env:RELEASE_VERSION > dist/windows-onebot-package-acceptance.json
+        if ($LASTEXITCODE -ne 0) { throw 'Frozen OneBot acceptance failed' }
     - uses: actions/upload-artifact@v4
       with:
         name: windows-release-candidate
         path: |
           dist/*.zip
           dist/SHA256SUMS.txt
-          dist/windows-package-acceptance.json
+          dist/*package-acceptance.json
         if-no-files-found: error
         retention-days: 14
   macos:
@@ -184,12 +194,19 @@ jobs:
         cp incoming/windows/windows-package-acceptance.json incoming/macos/macos-package-acceptance.json release-assets/
         cp incoming/linux/linux-arm64-package-acceptance.json incoming/linux/linux-x64-package-acceptance.json release-assets/
         cp LICENSE THIRD_PARTY_NOTICES.md ASSETS.md release-assets/
-    - name: Publish a new beta after every source and package gate passes
+    - name: Retain all verified assets for publication review
+      uses: actions/upload-artifact@v4
+      with:
+        name: verified-release-assets
+        path: release-assets/*
+        if-no-files-found: error
+        retention-days: 14
+    - name: Create a draft after every source and package gate passes
+      if: github.ref == 'refs/heads/main'
       shell: bash
       run: |
         set -euo pipefail
         gh release create "$RELEASE_TAG" release-assets/* \
           --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-          --title "Codex WatchDog $RELEASE_TAG beta" --draft --prerelease \
+          --title "Codex WatchDog $RELEASE_TAG" --draft \
           --generate-notes --notes-start-tag "$PREVIOUS_TAG" --notes-file docs/RELEASE_NOTES.md
-        gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
