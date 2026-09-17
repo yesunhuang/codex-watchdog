@@ -61,7 +61,7 @@ def _marker(root, status, **extra):
 
 
 def _retryable(root, detection, environment, *, auto=False):
-    if provider_keys(environment, "slack") or provider_keys(environment, "lark") or SELECTOR in environment:
+    if any(provider_keys(environment, provider) for provider in ("slack", "lark", "onebot")) or SELECTOR in environment:
         return False
     if set(detection.evidence) != {"saved:" + MARKER}:
         return False
@@ -174,15 +174,22 @@ def setup(*, environment=None, root=None, runtime=None, store=None, auto=False, 
                 raise MessagingError("messaging_setup_changed_concurrently")
             _marker(root, "started")
             try:
-                output("Set up WatchDog messaging: 1 Slack / 2 Feishu or Lark / 3 Both / 4 Skip (do not ask again)")
-                choice = read("Choose 1-4: ").strip().lower()
-                selection = {"1": "slack", "slack": "slack", "2": "lark", "lark": "lark", "feishu": "lark", "3": "both", "both": "both", "4": "skip", "skip": "skip"}.get(choice)
+                output("Set up WatchDog messaging: 1 Slack / 2 Feishu or Lark / 3 Both / 4 Skip (do not ask again) / 5 OneBot (QQ)")
+                choice = read("Choose 1-5: ").strip().lower()
+                selection = {"1": "slack", "slack": "slack", "2": "lark", "lark": "lark", "feishu": "lark", "3": "both", "both": "both", "4": "skip", "skip": "skip", "5": "onebot", "onebot": "onebot", "qq": "onebot"}.get(choice)
                 if selection is None:
                     raise MessagingError("messaging_setup_choice_invalid")
                 if selection == "skip":
                     _marker(root, "skipped")
                     output("Messaging setup skipped. " + MANUAL)
                     return 0
+                if selection == "onebot":
+                    from .onebot_setup import setup_onebot
+                    code = setup_onebot(environment=env, root=root, runtime=runtime, store=store,
+                                        is_interactive=True, read=read, secret=secret,
+                                        output=output, guarded=True)
+                    _marker(root, "configured" if code == 0 else "failed", transport="onebot")
+                    return code
                 output("Other devices can keep running. Pairing and replies use independent polling automatically.")
                 credentials, pairings = {}, {}
                 for provider in (("slack", "lark") if selection == "both" else (selection,)):

@@ -5,7 +5,7 @@ workflow. The workflow files remain as historical descriptions of acceptance
 checks; they are not the release mechanism.
 
 Use `pyproject.toml` as the version source. On an approved machine, install the
-appropriate pinned release dependencies and run `python -m pytest` and
+appropriate pinned release dependencies and run `python tools/run_isolated_tests.py` and
 `python -m compileall -q src tools tests packaging scripts`. Native process tests
 need native OS permissions; record any platform skips and verify them on their
 own platform.

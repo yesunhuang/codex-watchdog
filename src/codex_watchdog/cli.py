@@ -76,9 +76,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
-    messaging = commands.add_parser("setup-messaging", help="pair Slack or Feishu/Lark in a terminal; preserve existing settings")
+    messaging = commands.add_parser("setup-messaging", help="pair messaging in a terminal; preserve existing settings")
     messaging.add_argument("--check", action="store_true", help="report configuration evidence without prompting or changing state")
     messaging.add_argument("--auto", action="store_true", help=argparse.SUPPRESS)
+    messaging.add_argument("--onebot", action="store_true", help="add OneBot 11/QQ while retaining existing Slack/Feishu settings")
 
     linux_bind = commands.add_parser(
         "linux-bind", help="reserve one exact existing Linux VS Code thread for this runtime"
@@ -236,7 +237,7 @@ def build_parser() -> argparse.ArgumentParser:
     notify_test.add_argument("--workspace", type=_safe_id, default="notification-test")
     relay_test = commands.add_parser(
         "slack-relay-test",
-        aliases=["lark-relay-test"],
+        aliases=["lark-relay-test", "onebot-relay-test"],
         help="post one reply-enabled test for an auto-discovered local workspace",
     )
     relay_test.add_argument("--id", required=True, type=_safe_id)
@@ -245,6 +246,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="exact workspace id, repository name, or canonical local path",
     )
     commands.add_parser("lark-check", help="audit Feishu/Lark configuration and SDK without sending messages")
+    onebot_check = commands.add_parser("onebot-check", help="audit OneBot configuration and client without sending messages")
+    onebot_check.add_argument("--connect", action="store_true", help="also authenticate the configured backend and verify its bot identity")
     commands.add_parser(
         "outlook-login",
         help="authorize personal Outlook SMTP using a one-time Microsoft device code",
@@ -298,10 +301,16 @@ def _prompt(message: Optional[str], prompt_file: Optional[Path]) -> str:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "setup-messaging":
+        if args.onebot:
+            from .onebot_setup import setup_onebot
+            if args.auto:
+                print("Adding OneBot requires explicit interactive setup.", file=sys.stderr)
+                return 1
+            return setup_onebot(runtime=args.runtime, check=args.check)
         from .messaging_setup import setup
         return setup(runtime=args.runtime, auto=args.auto, check=args.check)
-    if args.command in ("run", "linux-run", "linux-auto-run", "notify-test", "lark-check",
-                        "slack-relay-test", "lark-relay-test"):
+    if args.command in ("run", "linux-run", "linux-auto-run", "notify-test", "lark-check", "onebot-check",
+                        "slack-relay-test", "lark-relay-test", "onebot-relay-test"):
         from .messaging_setup import prepare_launch
         from .messaging_profile import MessagingError, error_code
         try:
@@ -310,7 +319,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 output=lambda text: print(text, file=sys.stderr))
             os.environ.update(environment)
         except (MessagingError, OSError, ValueError) as exc:
-            if args.command != "lark-check":
+            if args.command not in ("lark-check", "onebot-check"):
                 print("Messaging startup stopped: " + error_code(exc) +
                       ". Existing settings were preserved. Run codex-watchdog setup-messaging --check for details.", file=sys.stderr)
                 return 1
@@ -565,13 +574,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                   "relay_configured": config.relay_configured, "sdk_error": sdk_error}
         print(json.dumps(output, sort_keys=True))
         return 0 if config.configured and sdk_error is None else 1
-    if args.command in ("slack-relay-test", "lark-relay-test"):
+    if args.command == "onebot-check":
+        from .onebot_transport import OneBotConfig, check_configuration
+        output = check_configuration(OneBotConfig.from_environment(), connect=args.connect)
+        print(json.dumps(output, sort_keys=True))
+        return 0 if output["notification_configured"] and output["error"] is None else 1
+    if args.command in ("slack-relay-test", "lark-relay-test", "onebot-relay-test"):
+        from .messaging_profile import TRANSPORTS
         notifier = EnvironmentNotifier(args.runtime)
-        provider = "lark" if args.command == "lark-relay-test" else "slack"
+        provider = args.command.split("-", 1)[0]
         configured = (notifier.config.slack_relay_configured if provider == "slack"
-                      else notifier.config.lark.relay_configured)
+                      else getattr(notifier.config, provider).relay_configured)
         if (not configured
-                or getattr(notifier.config, "selected_interactive_transport", "slack") not in (provider, "both")):
+                or provider not in TRANSPORTS.get(getattr(notifier.config, "selected_interactive_transport", "slack"), ())):
             print(
                 json.dumps(
                     {
@@ -586,8 +601,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
             return 1
         # An explicit provider test sends only to its named provider, even
-        # when normal monitoring sends each event to both.
-        if getattr(notifier.config, "selected_interactive_transport", "slack") == "both":
+        # when normal monitoring sends each event to multiple providers.
+        if getattr(notifier.config, "selected_interactive_transport", "slack") != provider:
             from dataclasses import replace
             notifier = EnvironmentNotifier(args.runtime, replace(notifier.config, interactive_transport=provider))
         catalog = EffectiveWorkspaceCatalog(args.runtime, codex_home=args.codex_home)
@@ -619,8 +634,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             transition_fingerprint=sha256_text(f"{provider}_relay_test\0{args.id}"),
             subject=f"[Codex Watchdog RELAY TEST] {args.id}",
             message=(
-                ("Reply in this Slack thread. WatchDog will relay your text " if provider == "slack" else
-                 "Reply to this Feishu/Lark message. WatchDog will relay your text ") +
+                {"slack": "Reply in this Slack thread. WatchDog will relay your text ",
+                 "lark": "Reply to this Feishu/Lark message. WatchDog will relay your text ",
+                 "onebot": "Quote/reply to this QQ message. WatchDog will relay your text "}[provider] +
                 "without interpreting it to the exact existing VS Code Codex "
                 "thread shown by this workspace."
             ),
@@ -631,7 +647,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             ),
         )
         result = notifier.notify(relay_event)
-        thread_store = notifier.slack_thread_store if provider == "slack" else notifier.lark_thread_store
+        thread_store = getattr(notifier, provider + "_thread_store")
         mapping_created = thread_store.has_notification_mapping(
             relay_event.event_fingerprint()
         )

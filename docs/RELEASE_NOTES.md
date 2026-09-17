@@ -1,5 +1,20 @@
 # Release notes
 
+## v1.1.0
+
+- Adds optional QQ messaging through an external authenticated OneBot 11
+  backend, tested with NapCat. WatchDog does not bundle QQ or its protocol stack.
+- Confirmation-message pairing learns the authorized person and conversation.
+  Quote a mapped notification to reply to its exact existing Codex thread.
+  Existing Slack and Feishu configurations are preserved; providers can be combined.
+- Reuses the MIT-licensed napcat-sdk connection component with pinned provenance,
+  authenticated bot identity, durable duplicate suppression and ownership checks.
+- Official QQ quoted replies passed the live Windows test. TIM 3.4.5 dropped
+  the quoted-message identity in the tested backend and is not an accepted client.
+  Messages without an unambiguous reply target cannot wake a conversation.
+- macOS ARM64 remains an ad-hoc signed, unnotarized preview. Native package and
+  upgrade receipts describe the acceptance performed for each release artifact.
+
 ## v0.2.26
 
 - Git-attention alerts now queue a deduplicated prompt to the exact existing

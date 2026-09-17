@@ -26,6 +26,7 @@
   <a href="docs/SETUP.md"><img src="https://img.shields.io/badge/supports-Slack-4A154B" alt="支持 Slack"></a>
   <a href="docs/FEISHU_LARK.md"><img src="https://img.shields.io/badge/supports-Feishu-3370FF" alt="支持飞书"></a>
   <a href="docs/FEISHU_LARK.md"><img src="https://img.shields.io/badge/supports-Lark-00B96B" alt="支持 Lark"></a>
+  <a href="docs/ONEBOT_QQ.md"><img src="https://img.shields.io/badge/optional-OneBot%20%2F%20QQ-2679b5" alt="可选 OneBot / QQ 集成"></a>
   <a href="docs/SETUP.md"><img src="https://img.shields.io/badge/supports-SMTP-6c757d" alt="支持 SMTP"></a>
 </p>
 

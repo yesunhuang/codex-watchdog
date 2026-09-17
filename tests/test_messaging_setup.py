@@ -257,7 +257,7 @@ def test_new_desktop_setup_saves_poll_without_app_token_or_listener_confirmation
     prompts = []
     def read(prompt):
         prompts.append(prompt)
-        assert "Choose 1-4" in prompt
+        assert "Choose 1-5" in prompt
         return "1"
     assert setup(environment={}, root=tmp_path, store=store, is_interactive=True,
                  read=read, secret=lambda _: "xoxb-fixture", pair=lambda *a, **k: route("slack")) == 0

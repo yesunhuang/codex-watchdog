@@ -144,6 +144,20 @@ def _copy_python_license(destination: Path) -> Dict[str, object]:
     }
 
 
+def _copy_onebot_component(destination: Path) -> Dict[str, object]:
+    source = Path(__file__).resolve().parents[1] / "src/codex_watchdog/_vendor/napcat_sdk"
+    target = destination / "napcat-sdk-connection"
+    target.mkdir()
+    files = []
+    for name in ("LICENSE", "UPSTREAM.md"):
+        shutil.copyfile(source / name, target / name)
+        files.append(dict(path=(target / name).relative_to(destination).as_posix(),
+                          sha256=hashlib.sha256((target / name).read_bytes()).hexdigest()))
+    return dict(name="napcat-sdk connection (vendored)",
+                version="4d2f72a7e11ff749e1b0d7d8962198db31fc74a8", license="MIT",
+                url="https://github.com/faithleysath/napcat-sdk", license_files=files)
+
+
 def generate(destination: Path, include_distributions: Sequence[str]) -> Dict:
     destination = destination.resolve()
     destination.mkdir(parents=True, exist_ok=False)
@@ -168,6 +182,7 @@ def generate(destination: Path, include_distributions: Sequence[str]) -> Dict:
             }
         )
     records.append(_copy_python_license(destination))
+    records.append(_copy_onebot_component(destination))
     records.sort(key=lambda item: str(item["name"]).casefold())
     inventory = {
         "schema_version": 1,

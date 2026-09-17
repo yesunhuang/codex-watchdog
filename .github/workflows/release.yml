@@ -15,7 +15,7 @@ env:
   PYTHONUTF8: '1'
 jobs:
   version:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     outputs:
       should_release: ${{ steps.version.outputs.should_release }}
@@ -45,7 +45,7 @@ jobs:
     needs: version
     if: needs.version.outputs.should_release == 'true'
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     env:
       RELEASE_VERSION: ${{ needs.version.outputs.version }}
       PREVIOUS_TAG: ${{ needs.version.outputs.previous_tag }}
@@ -61,14 +61,14 @@ jobs:
         cache: pip
         cache-dependency-path: requirements-release.txt
     - name: Install pinned release environment
-      shell: pwsh
+      shell: powershell
       run: |
         python -m pip install --disable-pip-version-check --upgrade pip==26.0.1
         python -m pip install --disable-pip-version-check -r requirements-release.txt
         python -m pip install --disable-pip-version-check --no-deps --no-build-isolation .
         python -m pip check
     - name: Scan complete public history with Gitleaks
-      shell: pwsh
+      shell: powershell
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
@@ -84,17 +84,17 @@ jobs:
         & (Join-Path $expanded 'gitleaks.exe') git --no-banner --no-color --redact=100 --ignore-gitleaks-allow --report-format json --report-path (Join-Path $toolRoot 'report.json') --log-opts='--all --full-history' .
         if ($LASTEXITCODE -ne 0) { throw "Gitleaks returned exit code $LASTEXITCODE" }
     - name: Build Windows x64 package
-      shell: pwsh
+      shell: powershell
       run: |
         .\scripts\build_windows_release.ps1 -Python (Get-Command python).Source -OutputDirectory dist
     - name: Verify embedded application icon
-      shell: pwsh
+      shell: powershell
       run: |
         python .\tools\verify_windows_executable_icon.py `
           --executable ".\dist\codex-watchdog-v${{ needs.version.outputs.version }}-windows-x64\codex-watchdog.exe" `
           --icon ".\images\codex-watchdog.ico"
     - name: Download and verify the immediately previous public Windows package
-      shell: pwsh
+      shell: powershell
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
@@ -110,7 +110,7 @@ jobs:
         Expand-Archive -LiteralPath $archive -DestinationPath $previousRoot
         "PREVIOUS_PACKAGE=$previousRoot/codex-watchdog-v$env:PREVIOUS_VERSION-windows-x64" >> $env:GITHUB_ENV
     - name: Test fresh startup and previous-release upgrade without Python
-      shell: pwsh
+      shell: powershell
       run: |
         $parameters = @{
             PackageDirectory = "./dist/codex-watchdog-v$env:RELEASE_VERSION-windows-x64"
@@ -119,13 +119,23 @@ jobs:
             PreviousVersion = $env:PREVIOUS_VERSION
         }
         ./scripts/test_windows_package.ps1 @parameters | Set-Content -LiteralPath dist/windows-package-acceptance.json -Encoding utf8
+    - name: Frozen messaging and OneBot acceptance
+      shell: powershell
+      run: |
+        $package = "dist/codex-watchdog-v$env:RELEASE_VERSION-windows-x64"
+        python scripts/test_lark_package.py --package $package --expected-version $env:RELEASE_VERSION > dist/windows-lark-package-acceptance.json
+        if ($LASTEXITCODE -ne 0) { throw 'Frozen Lark acceptance failed' }
+        python scripts/test_messaging_package.py --package $package > dist/windows-messaging-package-acceptance.json
+        if ($LASTEXITCODE -ne 0) { throw 'Frozen messaging acceptance failed' }
+        python scripts/test_onebot_package.py --package $package --expected-version $env:RELEASE_VERSION > dist/windows-onebot-package-acceptance.json
+        if ($LASTEXITCODE -ne 0) { throw 'Frozen OneBot acceptance failed' }
     - uses: actions/upload-artifact@v4
       with:
         name: windows-release-candidate
         path: |
           dist/*.zip
           dist/SHA256SUMS.txt
-          dist/windows-package-acceptance.json
+          dist/*package-acceptance.json
         if-no-files-found: error
         retention-days: 14
   macos:
@@ -181,15 +191,22 @@ jobs:
         cat incoming/windows/SHA256SUMS.txt "incoming/macos/codex-watchdog-v$RELEASE_VERSION-macos-arm64-preview.zip.sha256" > release-assets/SHA256SUMS.txt
         cat "incoming/linux/codex-watchdog-v$RELEASE_VERSION-linux-arm64.zip.sha256" "incoming/linux/codex-watchdog-v$RELEASE_VERSION-linux-x64.zip.sha256" >> release-assets/SHA256SUMS.txt
         (cd release-assets && sha256sum --check SHA256SUMS.txt)
-        cp incoming/windows/windows-package-acceptance.json incoming/macos/macos-package-acceptance.json release-assets/
-        cp incoming/linux/linux-arm64-package-acceptance.json incoming/linux/linux-x64-package-acceptance.json release-assets/
+        cp incoming/windows/*package-acceptance.json incoming/macos/*package-acceptance.json release-assets/
+        cp incoming/linux/*package-acceptance.json release-assets/
         cp LICENSE THIRD_PARTY_NOTICES.md ASSETS.md release-assets/
-    - name: Publish a new beta after every source and package gate passes
+    - name: Retain all verified assets for publication review
+      uses: actions/upload-artifact@v4
+      with:
+        name: verified-release-assets
+        path: release-assets/*
+        if-no-files-found: error
+        retention-days: 14
+    - name: Create a draft after every source and package gate passes
+      if: github.ref == 'refs/heads/main'
       shell: bash
       run: |
         set -euo pipefail
         gh release create "$RELEASE_TAG" release-assets/* \
           --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-          --title "Codex WatchDog $RELEASE_TAG beta" --draft --prerelease \
+          --title "Codex WatchDog $RELEASE_TAG" --draft \
           --generate-notes --notes-start-tag "$PREVIOUS_TAG" --notes-file docs/RELEASE_NOTES.md
-        gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false

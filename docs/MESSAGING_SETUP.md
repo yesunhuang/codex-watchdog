@@ -1,7 +1,9 @@
 # First-use messaging setup
 
 On a pristine interactive foreground launch, WatchDog offers **Slack**, **Feishu /
-Lark**, **Both**, or **Skip**. You can also start the same flow yourself:
+Lark**, **Both**, **Skip**, or the experimental **OneBot (QQ)** candidate. The
+[OneBot guide](ONEBOT_QQ.md) covers its separate backend and confirmation-message
+pairing. You can also start the same flow yourself:
 
 ```text
 codex-watchdog setup-messaging

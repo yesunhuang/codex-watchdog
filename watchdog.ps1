@@ -382,6 +382,15 @@ if ($slackRelayConfigured) {
 Remove-Variable slackAllowedUsers
 
 $larkSource = "not_configured"
+# The shared loader owns new OneBot profiles and credentials. Do not turn an
+# older saved Feishu selection into an explicit override of that newer choice.
+$deferMessagingSelection = @([Environment]::GetEnvironmentVariables("Process").Keys | Where-Object {
+    $_ -like "CODEX_WATCHDOG_ONEBOT_*"
+}).Count -gt 0
+if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA) -and
+    (Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA "CodexWatchdog\onebot-relay.json") -PathType Leaf)) {
+    $deferMessagingSelection = $true
+}
 $larkCoreNames = @("CODEX_WATCHDOG_LARK_APP_ID", "CODEX_WATCHDOG_LARK_APP_SECRET", "CODEX_WATCHDOG_LARK_CHAT_ID")
 $larkCoreCount = @($larkCoreNames | Where-Object {
     -not [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_, "Process"))
@@ -424,7 +433,7 @@ if ($larkCoreCount -eq 3) {
         $env:CODEX_WATCHDOG_LARK_DOMAIN = $storedLark.domain
         $env:CODEX_WATCHDOG_LARK_CHAT_ID = $storedLark.chat_id
         $env:CODEX_WATCHDOG_LARK_ALLOWED_USER_IDS = @($storedLark.allowed_user_ids) -join ","
-        if ([string]::IsNullOrWhiteSpace($env:CODEX_WATCHDOG_INTERACTIVE_TRANSPORT)) {
+        if (-not $deferMessagingSelection -and [string]::IsNullOrWhiteSpace($env:CODEX_WATCHDOG_INTERACTIVE_TRANSPORT)) {
             $env:CODEX_WATCHDOG_INTERACTIVE_TRANSPORT = $storedLark.interactive_transport
         }
         $larkSource = "encrypted_store"
@@ -445,8 +454,8 @@ if ($larkSource -ne "not_configured") {
     }
 }
 if (-not [string]::IsNullOrWhiteSpace($env:CODEX_WATCHDOG_INTERACTIVE_TRANSPORT) -and
-    $env:CODEX_WATCHDOG_INTERACTIVE_TRANSPORT -cnotin @("slack", "lark", "both")) {
-    throw "Interactive transport must be slack, lark or both."
+    $env:CODEX_WATCHDOG_INTERACTIVE_TRANSPORT -cnotin @("slack", "lark", "both", "onebot", "slack+onebot", "lark+onebot", "all")) {
+    throw "Interactive transport must be slack, lark, both, onebot, slack+onebot, lark+onebot or all."
 }
 if ($env:CODEX_WATCHDOG_INTERACTIVE_TRANSPORT -ceq "both" -and
     ($larkSource -eq "not_configured" -or ($slackSource -eq "not_configured" -and -not $slackRelayConfigured))) {
@@ -496,6 +505,8 @@ $summary = [pscustomobject][ordered]@{
 if ($larkSource -ne "not_configured") {
     $summary | Add-Member -NotePropertyName lark -NotePropertyValue $larkSource
     $summary | Add-Member -NotePropertyName lark_domain -NotePropertyValue $env:CODEX_WATCHDOG_LARK_DOMAIN
+}
+if (-not [string]::IsNullOrWhiteSpace($env:CODEX_WATCHDOG_INTERACTIVE_TRANSPORT)) {
     $summary | Add-Member -NotePropertyName interactive_transport -NotePropertyValue $env:CODEX_WATCHDOG_INTERACTIVE_TRANSPORT
 }
 

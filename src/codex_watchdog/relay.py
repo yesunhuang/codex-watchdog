@@ -16,13 +16,22 @@ _DELIVERED_STATES = frozenset({"enqueued", "consumed_or_started", "started"})
 
 
 def reply_relay_from_config(runtime, config, *, queue_dispatcher, remote_ssh_adapter):
-    if getattr(config, "selected_interactive_transport", "slack") == "both":
+    from .messaging_profile import TRANSPORTS
+    selected = getattr(config, "selected_interactive_transport", "slack")
+    providers = TRANSPORTS[selected]
+    if len(providers) > 1:
         relays = [reply_relay_from_config(
             runtime, replace(config, interactive_transport=provider),
             queue_dispatcher=queue_dispatcher, remote_ssh_adapter=remote_ssh_adapter)
-            for provider in ("slack", "lark")]
+            for provider in providers]
         relays = [relay for relay in relays if relay is not None]
         return CombinedReplyRelays(relays) if relays else None
+    if selected == "onebot":
+        from .onebot_relay import OneBotReplyRelay
+        if not config.onebot.relay_configured:
+            return None
+        return OneBotReplyRelay(runtime, config.onebot, queue_dispatcher=queue_dispatcher,
+                               remote_ssh_adapter=remote_ssh_adapter, timeout=config.timeout_seconds)
     if getattr(config, "selected_interactive_transport", "slack") == "lark":
         from .lark_relay import LarkReplyRelay
         if not config.lark.relay_configured:

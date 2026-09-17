@@ -105,7 +105,7 @@ def check(executable, evidence):
         assert not config.exists()
         console = Console(executable, env, home, home / "first-console.log")
         try:
-            console.until("Choose 1-4:")
+            console.until("Choose 1-5:")
             profile = json.loads((config / "launcher-profile.json").read_text(encoding="utf-8"))
             runtime = Path(profile["runtime_path"])
             assert runtime == config / "runtime" and runtime.is_dir(), "First-run profile points to absent runtime"
@@ -134,7 +134,7 @@ def check(executable, evidence):
         console = Console(executable, env, home, home / "reopened-console.log")
         try:
             if not diagnostic_first:
-                console.until("Choose 1-4:")
+                console.until("Choose 1-5:")
                 console.process.write("4\r\n")
             console.until('"cycle_id"')
             assert "no longer exists" not in console.output

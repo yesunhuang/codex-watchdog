@@ -24,7 +24,7 @@ jobs:
           - architecture: arm64
             runner: ubuntu-22.04-arm
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 25
+    timeout-minutes: 60
     env:
       PYTHONUTF8: '1'
     steps:
@@ -45,7 +45,7 @@ jobs:
       - name: Verify the source and shared installer regressions
         run: |
           python -m compileall -q src tools tests packaging scripts
-          python -m pytest --basetemp .pytest-temp-linux-package
+          python tools/run_isolated_tests.py --basetemp .pytest-temp-linux-package
       - name: Build the native ELF package and dependency inventory
         if: matrix.architecture == 'arm64'
         run: python scripts/build_linux_package.py
@@ -54,9 +54,11 @@ jobs:
         run: |
           docker build --file packaging/linux-rhel8.Dockerfile --tag watchdog-rhel8-builder .
           docker run --rm --volume "$PWD:/workspace" --env BUILDER_UID="$(id -u)" --env BUILDER_GID="$(id -g)" watchdog-rhel8-builder bash -euc '
+            # Native source tests enforce the same machine identity prerequisite.
+            test -s /etc/machine-id || tr -d "-" < /proc/sys/kernel/random/uuid > /etc/machine-id
             python -m pip install --disable-pip-version-check --no-deps --no-build-isolation .
             python -m compileall -q src tools tests packaging scripts
-            python -m pytest --basetemp .pytest-temp-rhel8-package
+            python tools/run_isolated_tests.py --basetemp .pytest-temp-rhel8-package
             python scripts/build_linux_package.py
             chown -R "$BUILDER_UID:$BUILDER_GID" dist build .pytest-temp-rhel8-package
           '
@@ -72,6 +74,15 @@ jobs:
             test -s /etc/machine-id || tr -d "-" < /proc/sys/kernel/random/uuid > /etc/machine-id
             python scripts/test_linux_package.py --package dist/*-linux-x64
           '
+      - name: Frozen messaging and OneBot acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          package="dist/codex-watchdog-v$version-linux-${{ matrix.architecture }}"
+          python scripts/test_lark_package.py --package "$package" --expected-version "$version" > dist/linux-${{ matrix.architecture }}-lark-package-acceptance.json
+          python scripts/test_messaging_package.py --package "$package" > dist/linux-${{ matrix.architecture }}-messaging-package-acceptance.json
+          python scripts/test_onebot_package.py --package "$package" --expected-version "$version" > dist/linux-${{ matrix.architecture }}-onebot-package-acceptance.json
       - uses: actions/upload-artifact@v4
         # Retain a failed development candidate for isolated diagnosis. Release
         # callers still require successful acceptance before uploading assets.

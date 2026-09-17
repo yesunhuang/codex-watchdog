@@ -77,7 +77,7 @@ def check(package):
                     if select.select([master], [], [], 0.1)[0]:
                         try: output += os.read(master, 8192)
                         except OSError: pass
-                    if b'Choose 1-4:' in output and not chosen:
+                    if b'Choose 1-5:' in output and not chosen:
                         assert choice is not None, 'Saved setup prompted again'
                         installed_before_pairing()
                         if protected:
@@ -95,7 +95,7 @@ def check(package):
                             second = subprocess.run([str(launcher)], cwd=work, env=env, stdin=subprocess.DEVNULL,
                                                     capture_output=True, text=True, timeout=20)
                             assert second.returncode == 1 and 'macos_install_busy' in second.stderr
-                            assert 'Choose 1-4:' not in second.stdout
+                            assert 'Choose 1-5:' not in second.stdout
                             assert all(p.read_bytes() == raw for p,raw in before.items())
                         os.write(master, b'\x03'); stopped = True
                     pid, exit_status = os.waitpid(child, os.WNOHANG)
@@ -105,7 +105,7 @@ def check(package):
                 assert status is not None and os.waitstatus_to_exitcode(status) in (0,130,-signal.SIGINT), output.decode(errors='replace')
                 if choice in ('cancel', 'eof'): assert chosen and not cycle
                 else: assert cycle and stopped
-                if choice is None: assert b'Choose 1-4:' not in output
+                if choice is None: assert b'Choose 1-5:' not in output
             finally:
                 if status is None:
                     os.killpg(child, signal.SIGTERM)

@@ -1,0 +1,3 @@
+# Exact historical false positive: Python call argument pending_instruction_id,
+# not a credential. Keep every other commit/path/rule/line in the history scan.
+9eb92f52364d84c0c93e662a2125a005027aee20:src/codex_watchdog/linux_auto.py:generic-api-key:187

@@ -540,14 +540,34 @@ class ControlStore:
         key = hashlib.sha256((value["scope"] + "\0" + value["chat_id"] + "\0" + value["message_id"]).encode()).hexdigest()
         return key, value
 
+    @staticmethod
+    def _onebot_mapping(entry, event_id=None):
+        if (not isinstance(entry, dict) or entry.get("provider") != "onebot"
+                or not all(isinstance(entry.get(key), str) for key in
+                           ("scope", "chat_id", "message_id", "event_fingerprint"))
+                or re.fullmatch(r"[0-9a-f]{64}", entry["scope"]) is None
+                or re.fullmatch(r"(?:group|private):[1-9][0-9]{0,18}", entry["chat_id"]) is None
+                or re.fullmatch(r"(?:0|-?[1-9][0-9]{0,18})", entry["message_id"]) is None
+                or re.fullmatch(r"[0-9a-f]{64}", entry["event_fingerprint"]) is None
+                or int(entry["chat_id"].split(":")[1]) >= 2**63
+                or not -(2**63) <= int(entry["message_id"]) < 2**63
+                or event_id is not None and entry["event_fingerprint"] != event_id):
+            raise ControlError("control_onebot_mapping_invalid")
+        mapping = dict(schema_version=1, **{name: entry[name] for name in (
+            "provider", "scope", "chat_id", "message_id", "event_fingerprint")})
+        key = hashlib.sha256((mapping["scope"] + "\0" + mapping["chat_id"] + "\0" + mapping["message_id"]).encode()).hexdigest()
+        return key, mapping
+
     def merge_relay_mappings(self, value, entries, event_id=None):
         for entry in entries:
-            if isinstance(entry, dict) and entry.get("provider") == "lark":
-                key, mapping = self._lark_mapping(entry, event_id)
-                path = self.directory / "lark-threads" / (key + ".json")
+            if isinstance(entry, dict) and entry.get("provider") in ("lark", "onebot"):
+                provider = entry["provider"]
+                validate = self._lark_mapping if provider == "lark" else self._onebot_mapping
+                key, mapping = validate(entry, event_id)
+                path = self.directory / (provider + "-threads") / (key + ".json")
                 if path.exists():
                     if control_read_json(path) != mapping:
-                        raise ControlError("control_lark_mapping_collision")
+                        raise ControlError("control_" + provider + "_mapping_collision")
                 else:
                     control_atomic_json(path, mapping)
             elif isinstance(entry, dict) and entry.get("provider") in (None, "slack"):
@@ -562,6 +582,12 @@ class ControlStore:
             key, mapping = self._lark_mapping(stored)
             if stored != mapping or path.stem != key:
                 raise ControlError("control_lark_mapping_invalid")
+            mappings.append(mapping)
+        for path in sorted((self.directory / "onebot-threads").glob("*.json")):
+            stored = control_read_json(path)
+            key, mapping = self._onebot_mapping(stored)
+            if stored != mapping or path.stem != key:
+                raise ControlError("control_onebot_mapping_invalid")
             mappings.append(mapping)
         return mappings
 

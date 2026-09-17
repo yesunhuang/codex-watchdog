@@ -58,6 +58,7 @@ def main() -> None:
         "--collect-submodules", "msal_extensions",
         "--collect-submodules", "slack_bolt", "--collect-submodules", "slack_sdk",
         "--collect-submodules", "lark_channel",
+        "--collect-data", "codex_watchdog._vendor.napcat_sdk",
         "--collect-data", "certifi", "--exclude-module", "tkinter",
         str(ROOT / "packaging/macos_entry.py"),
     ], cwd=ROOT, check=True)
@@ -84,6 +85,8 @@ def main() -> None:
     shutil.copy2(ROOT / "docs/FEISHU_LARK.md", package / "FEISHU_LARK.md")
     shutil.copy2(ROOT / "docs/MESSAGING_SETUP.md", package / "MESSAGING_SETUP.md")
     shutil.copy2(ROOT / "docs/SETUP.md", package / "SETUP.md")
+    shutil.copy2(ROOT / "docs/ONEBOT_QQ.md", package / "ONEBOT_QQ.md")
+    shutil.copy2(ROOT / "docs/ONEBOT_REUSE.md", package / "ONEBOT_REUSE.md")
     shutil.copy2(ROOT / "THIRD_PARTY_NOTICES.md", package / "THIRD_PARTY_NOTICES.md")
     subprocess.run([
         sys.executable, str(ROOT / "tools/generate_dependency_licenses.py"),
@@ -93,6 +96,8 @@ def main() -> None:
         "--include-distribution", "setuptools", "--include-distribution", "zipp",
     ], check=True)
     subprocess.run([sys.executable, str(ROOT / "scripts/test_lark_package.py"),
+                    "--package", str(package), "--expected-version", version], check=True)
+    subprocess.run([sys.executable, str(ROOT / "scripts/test_onebot_package.py"),
                     "--package", str(package), "--expected-version", version], check=True)
     files = {p.relative_to(package).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
              for p in package.rglob("*") if p.is_file()}
