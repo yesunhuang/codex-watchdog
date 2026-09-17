@@ -54,6 +54,8 @@ jobs:
         run: |
           docker build --file packaging/linux-rhel8.Dockerfile --tag watchdog-rhel8-builder .
           docker run --rm --volume "$PWD:/workspace" --env BUILDER_UID="$(id -u)" --env BUILDER_GID="$(id -g)" watchdog-rhel8-builder bash -euc '
+            # Native source tests enforce the same machine identity prerequisite.
+            test -s /etc/machine-id || tr -d "-" < /proc/sys/kernel/random/uuid > /etc/machine-id
             python -m pip install --disable-pip-version-check --no-deps --no-build-isolation .
             python -m compileall -q src tools tests packaging scripts
             python tools/run_isolated_tests.py --basetemp .pytest-temp-rhel8-package

@@ -505,6 +505,8 @@ $summary = [pscustomobject][ordered]@{
 if ($larkSource -ne "not_configured") {
     $summary | Add-Member -NotePropertyName lark -NotePropertyValue $larkSource
     $summary | Add-Member -NotePropertyName lark_domain -NotePropertyValue $env:CODEX_WATCHDOG_LARK_DOMAIN
+}
+if (-not [string]::IsNullOrWhiteSpace($env:CODEX_WATCHDOG_INTERACTIVE_TRANSPORT)) {
     $summary | Add-Member -NotePropertyName interactive_transport -NotePropertyValue $env:CODEX_WATCHDOG_INTERACTIVE_TRANSPORT
 }
 

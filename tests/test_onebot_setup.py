@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -40,7 +41,8 @@ def configure(root, store, **kwargs):
                         pair=pairing, **kwargs)
 
 
-@pytest.mark.parametrize("platform", ["darwin", "win32", "linux"])
+@pytest.mark.parametrize("platform", ["darwin", "win32", pytest.param("linux",
+    marks=pytest.mark.skipif(os.name == "nt", reason="native POSIX ownership and mode checks"))])
 def test_pairing_saved_in_existing_platform_boundary_and_reused(tmp_path, platform):
     store = Store(platform)
     assert configure(tmp_path, store) == 0

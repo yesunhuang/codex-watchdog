@@ -15,6 +15,11 @@ def main():
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith(("CODEX_WATCHDOG_", "PYTHON", "XDG_"))
                        and key not in ("CODEX_HOME", "VIRTUAL_ENV")}
+        if os.name == "nt":
+            # Hosted pwsh injects its module paths. Native Windows PowerShell
+            # fixtures must discover their own 5.1 security/DPAPI modules.
+            environment = {key: value for key, value in environment.items()
+                           if key.casefold() != "psmodulepath"}
         # Leave CODEX_HOME unset: code defaults to this disposable HOME, and
         # individual tests can explicitly select their own fixture Codex home.
         environment.update(HOME=temporary, USERPROFILE=temporary,
