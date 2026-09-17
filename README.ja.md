@@ -26,89 +26,92 @@
   <a href="docs/SETUP.md"><img src="https://img.shields.io/badge/supports-Slack-4A154B" alt="Slack 対応"></a>
   <a href="docs/FEISHU_LARK.md"><img src="https://img.shields.io/badge/supports-Feishu-3370FF" alt="Feishu 対応"></a>
   <a href="docs/FEISHU_LARK.md"><img src="https://img.shields.io/badge/supports-Lark-00B96B" alt="Lark 対応"></a>
-  <a href="docs/ONEBOT_QQ.md"><img src="https://img.shields.io/badge/optional-OneBot%20%2F%20QQ-2679b5" alt="任意の OneBot / QQ 連携"></a>
+  <a href="docs/ONEBOT_QQ.md"><img src="https://img.shields.io/badge/supports-OneBot%2011-2679b5" alt="OneBot 11 対応"></a>
+  <a href="docs/ONEBOT_QQ.md"><img src="https://img.shields.io/badge/tested-QQ%20via%20NapCat-12b886" alt="NapCat 経由 QQ を検証済み"></a>
   <a href="docs/SETUP.md"><img src="https://img.shields.io/badge/supports-SMTP-6c757d" alt="SMTP 対応"></a>
 </p>
 
 <p align="center">
-  <a href="#quick-start">クイックスタート</a> · <a href="#アーキテクチャと設計思想">アーキテクチャ</a> · <a href="docs/SETUP.md">設定</a> · <a href="https://github.com/yesunhuang/codex-watchdog/releases">リリース</a>
+  <a href="#quick-start">クイックスタート</a> · <a href="#メッセージングトランスポート">メッセージング</a> · <a href="#アーキテクチャと設計思想">アーキテクチャ</a> · <a href="https://github.com/yesunhuang/codex-watchdog/releases">リリース</a>
 </p>
 
 Codex WatchDog は、**既存の** VS Code Codex セッションを対象にした軽量な coordination /
 control fabric です。人、Agent、マシン、通信インターフェースをつなぎますが、チームに
-別の agent platform、runtime、dashboard、DB、scheduler、あるいは必須の中央 manager への
+別の Agent platform、runtime、dashboard、DB、scheduler、あるいは必須の中央 manager への
 移行を要求しません。
 
 基本思想は単純です。成熟したツールは、それぞれの役割をすでによく解決しています。
-GitHub は durable な共同状態と audit history、Slack は team communication、SSH は remote
-machine への接続、VS Code は developer workspace、Codex は conversation と execution context
-をすでに所有しています。**WatchDog はそれらの小さな代替品を作り直すのではなく、
+GitHub は durable な共同状態と audit history、Slack・Feishu/Lark・QQ は人と Agent の通信、
+SSH は remote machine への接続、VS Code は developer workspace、Codex は conversation と
+execution context をすでに所有しています。**WatchDog はそれらの小さな代替品を作り直すのではなく、
 足りない接続だけを補います。**
 
-各メンバーは、自分の machine、credential、native Codex session、管理スタイルをそのまま
-維持できます。共有したい agent だけを既存の GitHub / Slack surface に参加させ、project policy
-と reply allowlist が許す場合には、別の teammate や manager がその正確な既存 agent session に
-指示できます。Manager は human でも AI でもよく、集中型でも分散型でも構いません。
-単一の manager や中央 WatchDog server は必須ではありません。
+各メンバーは、自分の machine、credential、native Codex session、管理スタイルをそのまま維持できます。
+共有したい Agent だけを既存の GitHub と messaging surface に参加させ、project policy と reply allowlist
+が許す場合には、別の teammate や manager がその**正確な既存 Agent session** に指示できます。
+Manager は human でも AI でもよく、集中型でも分散型でも構いません。単一の manager や中央 WatchDog
+server は必須ではありません。
 
 ## アーキテクチャと設計思想
 
-- **WatchDog は監視し、Codex が実行します。** WatchDog は読み取り専用の Git 確認で
-  更新を検出します。指示の読み取りとコミット、取得、マージを含む Git 操作は Codex が
-  担います。WatchDog は別の AI エージェントではありません。
-- **GitHub に永続的な指示、Slack に素早い返信。** **Parrot Dog** が WatchDog の
-  作成した Slack スレッドから許可ユーザーの返信を正確な既存の Codex 会話へ戻します。
-- **各会話の実行所有者は一つ。** Linux ホストの WatchDog が登録済みの会話を優先し、
-  利用できない場合にデスクトップ側が補います。所有権や配信状態が不明なら操作を止めます。
-- **軽量な連携を保つ。** ネイティブ会話、ファイル、既存ツールを再利用します。
-  チームの役割やレビュー規則はプロジェクトの `AGENTS.md` で定めます。
+- **WatchDog は監視し、Codex が実行します。** WatchDog は読み取り専用 Git チェックで更新を検出し、
+  指示の読み取り、commit、pull、merge などの Git 操作は Codex が担います。WatchDog は別の AI Agent
+  ではありません。
+- **GitHub は durable control plane、messaging transport は quick control surface です。**
+  Parrot Dog は Slack、Feishu/Lark、OneBot 11 の許可された返信を**正確な既存 Codex conversation**
+  に戻します。
+- **OneBot は transport boundary であり、QQ の再実装ではありません。** WatchDog は認証付き forward
+  WebSocket で generic OneBot 11 を話し、platform 固有の login と protocol maintenance は外部 backend
+  が担当します。**NapCat は実機検証済みの QQ reference backend です。WatchDog は NapCat や QQ runtime
+  を同梱しません。**
+- **各 conversation の execution owner は一つです。** ownership、destination、delivery が曖昧なら、
+  推測せずに操作を止めます。
+- **軽量な協調を保ちます。** native session、file、既存ツール、成熟した protocol adapter を再利用し、
+  team role や review rule は project の `AGENTS.md` に置きます。
 
 ![WatchDog workflow: discuss the task, publish a GitHub comment, detect the update, wake Codex, run the task, and notify the user](images/watchdog_workflow_jp.png)
 
-![Parrot Dog workflow: Codex asks for help, Slack relays the message, the human replies, and Codex continues](images/parrot_workflow_jp.png)
+![Parrot Dog workflow: Codex asks for help, a messaging surface relays the message, the human replies, and Codex continues](images/parrot_workflow_jp.png)
+
+> 図では messaging surface の一例として Slack を使っています。Feishu/Lark と OneBot 11 も同じ
+> exact-thread relay semantics を使います。
 
 ### シングルユーザー・マルチエージェントのワークフロー
-
-一人のユーザーが GitHub と Slack を通じて複数の既存エージェントを連携させられます。
-必要に応じて、人間や AI を manager にすることもできます。
 
 ```text
                          Human / Manager
                                |
                      aggregated control surface
                                |
-                 +-------------+-------------+
-                 |                           |
-              GitHub                       Slack
-       durable direction / reports    quick notify / reply
-                 |                           |
-                 +-------------+-------------+
-                               |
-                           WatchDog
-                    observe / wake / route
-                    relay / notify / handoff
-                               |
-           +-------------------+-------------------+
-           |                   |                   |
-      Codex A (local)    Codex B (Remote-SSH)  Codex C (detached)
-       native session       native session        native session
-           |                   |                   |
-           +---------- checkpoint reports ---------+
-                               |
-                             GitHub
+                 +-------------+--------------------------+
+                 |                                        |
+              GitHub                             Messaging transports
+       durable direction / reports     Slack / Feishu / Lark / OneBot 11
+                 |                                        |
+                 +-------------------+--------------------+
+                                     |
+                                 WatchDog
+                       observe / wake / route / relay
+                         notify / handoff / fencing
+                                     |
+           +-------------------------+-------------------------+
+           |                         |                         |
+      Codex A (local)         Codex B (Remote-SSH)       Codex C (detached)
+       native session            native session             native session
+           |                         |                         |
+           +------------- checkpoint progress reports -------+
+                                     |
+                                   GitHub
 ```
 
-Codex が Git 操作と進捗報告を担い、WatchDog が更新を検出して正確なスレッドを起動し、
-通知を送ります。Parrot Dog は許可ユーザーの Slack 返信を同じスレッドへ戻します。
-これは構成の一例であり、中央 manager や WatchDog サーバーは必須ではありません。
+Codex が Git と進捗報告を担当し、WatchDog が更新を検出して正確な thread を wake し、通知を送ります。
+Parrot Dog は設定済み transport 上の許可された reply を同じ thread に戻します。
 
 ## マルチユーザー協調：Bring Your Own Agents
 
-WatchDog は、team がすべての machine と agent を一つの中央 runtime に登録することを要求しません。
-各メンバーは自分の machine 上で自分の WatchDog を動かし、共有したい agent だけを、team がすでに
+WatchDog は、team がすべての machine と Agent を一つの中央 runtime に登録することを要求しません。
+各メンバーは自分の machine 上で自分の WatchDog を動かし、共有したい Agent だけを、team がすでに
 使っている collaboration surface に接続できます。
-
-### マルチユーザー・マルチエージェントのワークフロー
 
 ```text
         Alice の machines                        Bob の machines
@@ -119,45 +122,73 @@ WatchDog は、team がすべての machine と agent を一つの中央 runtime
               |                                         |
           Alice's dogs                              Bob's dogs
               |                                         |
-              +------------- GitHub + Slack ------------+
-                              shared team surfaces
+              +--------- GitHub + messaging surfaces --+
+                              shared team control
 ```
 
-Slack notification には machine identity が含まれるため、team member はどの locality から来た
-message かを区別できます。owner が shared Slack surface に設定した dog だけがそこに現れます。
-共有したくない agent は、その channel に参加させる必要がありません。project rule と reply allowlist
-が許す場合、teammate はその dog の Slack thread に返信し、owner の machine 上の**正確な既存 Codex
-session** に message を route できます。
+Notification には machine identity が含まれるため、team member はどの locality から来た message かを
+区別できます。owner が共有 surface に設定した dog だけがそこに現れます。project rule と reply allowlist
+が許す場合、teammate は返信し、その message を owner の machine 上の**正確な既存 Codex session**へ
+route できます。
 
 GitHub branch、repository permission、`AGENTS.md` は**誰が何をしてよいか**を定義できます。
 WatchDog が提供するのは別の mechanism、つまり**正しい machine / thread を見つけ、安全に message を
 届けること**です。policy は transport layer の外に残します。
 
+## メッセージングトランスポート
+
+| Transport | 役割 | 現在の対応状況 |
+| --- | --- | --- |
+| Slack | 通知 + exact-thread reply relay | 対応済み・production 検証済み |
+| Feishu / Lark | 通知 + exact-thread plain-text reply relay | 対応済み・production 検証済み |
+| OneBot 11 | generic authenticated forward-WebSocket transport | v1.1.0 から対応 |
+| QQ via NapCat | OneBot 11 の reference backend | Windows 上で NapCat 4.18.28 + 公式 QQ の引用返信を実機検証済み |
+| その他の OneBot 11 backend | protocol-compatible path | 個別の live test までは best-effort |
+| SMTP | outbound notification fallback | 対応済み |
+
+OneBot 11 では、WatchDog は薄い transport と exact-thread routing だけを担当し、chat platform 自体は
+外部 backend が担当します。QQ の推奨・検証済み経路は次の通りです。
+
+```text
+existing Codex thread
+        |
+     WatchDog
+        |
+   OneBot 11 WebSocket
+        |
+      NapCat
+        |
+        QQ
+```
+
+WatchDog は**返信先 thread を推測しません**。公式 QQ の quoted reply は live acceptance を通過しています。
+一方、テストした backend では TIM 3.4.5 が利用可能な quoted-message identity を保持しなかったため、
+TIM は control reply 用として受け入れていません。設定、安全境界、acceptance limit は
+[OneBot 11 / QQ](docs/ONEBOT_QQ.md) を参照してください。
+
 ## 対応する構成
 
 | プラットフォーム | 推奨ワークフロー | 状況と制限 |
 | --- | --- | --- |
-| Windows x64 | ローカル VS Code と Linux Remote-SSH 対象のデスクトップ制御 | 安定したデスクトップ参照実装。ネイティブ E2E、パッケージ更新、アイコンを検証済み |
-| Linux ARM64 / x64 | ネイティブサーバー実行、Remote-SSH、切断後の続行 | ネイティブサーバー/切断後のテストとユーザー受け入れが完了。ローカルデスクトップはプレビュー |
-| macOS Apple Silicon | ネイティブデスクトップ | 正式な安定版デスクトップ。インストール、更新、ロールバック、メッセージングの受け入れが完了。Remote-SSH/引き継ぎの範囲は限定的 |
+| Windows x64 | ローカル VS Code と Linux Remote-SSH 対象の desktop control | 安定した desktop reference。native E2E、upgrade、icon、OneBot/QQ を検証済み |
+| Linux ARM64 / x64 | native server、Remote-SSH、detached continuation | native server / detached の test と user acceptance が完了。local desktop は best-effort |
+| macOS Apple Silicon | native desktop | 正式な stable desktop release。install、upgrade、rollback、messaging acceptance が完了。Remote-SSH / handoff の範囲は限定的 |
 
-切断後のネイティブ実行所有者は Linux 専用です。macOS/Windows のネイティブな切断後の
-実行所有者は未対応です。Linux パッケージは ARM64 Ubuntu と x64 Ubuntu/RHEL 8 を対象と
-します。正確な要件と検証範囲は[プラットフォーム対応](docs/PLATFORM_SUPPORT.md)を参照
-してください。制御が戻った後、VS Code の再試行やウィンドウ再読み込みが必要な場合があります。
+**Detached execution ownership は現在 Linux のみ実装済みです。Windows と macOS の native detached
+ownership はまだ実装されていません。** Linux package は ARM64 Ubuntu と x64 Ubuntu/RHEL 8 を対象と
+します。正確な要件と検証範囲は[プラットフォーム対応](docs/PLATFORM_SUPPORT.md)を参照してください。
+Handback 後に VS Code の Retry や window reload が必要な場合があります。
 
 ## Quick Start
 
 **最も簡単な方法：** local Codex にこの repository を scan させ、installation と startup を
 step-by-step で案内してもらってください。
 
-メッセージ設定が一切ない状態で初めて対話起動すると、**Slack**、**Feishu/Lark**、
-**両方**、**スキップ**を選べます。ボットのグループやチャンネルを選び、
-端末の識別ラベルを含む確認フレーズを送信してアカウントを登録します。
-新規設定では両サービスとも独立したポーリングを使い、他の端末は稼働を続けられます。
-既存設定がある場合や更新時には自動で設定を開始しません。手動では
-`codex-watchdog setup-messaging` を実行します。サービスと復旧手順は
-[メッセージ設定ガイド](docs/MESSAGING_SETUP.md)を参照してください。
+初回の interactive launch では **Slack**、**Feishu/Lark**、**Both**、**OneBot (QQ)**、**Skip** を
+設定できます。既存 profile は互換 upgrade で保持されます。手動設定は
+`codex-watchdog setup-messaging` を実行してください。provider ごとの説明は
+[メッセージ設定](docs/MESSAGING_SETUP.md)、[Feishu/Lark](docs/FEISHU_LARK.md)、
+[OneBot 11 / QQ](docs/ONEBOT_QQ.md) にあります。
 
 ### Windows x64
 
@@ -178,16 +209,16 @@ step-by-step で案内してもらってください。
 ### macOS Apple Silicon
 
 Releases から最新の macOS ARM64 ZIP を取得し、`SHA256SUMS.txt` を確認して展開したら、
-`Install and Start Codex WatchDog.command` をダブルクリックしてください（Terminal から
-実行することもできます）。インストーラーは実行ファイルを安定したユーザー領域へ配置し、
-WatchDog をセットアップします。hook の trust は引き続きユーザー自身が管理します。
+`Install and Start Codex WatchDog.command` をダブルクリックしてください（Terminal から実行することも
+できます）。installer は実行ファイルを安定した current-user 領域へ配置し、WatchDog をセットアップします。
+hook trust は引き続きユーザー自身が管理します。
 
-hook trust、メッセージング、upgrade、rollback、現在のプラットフォーム上の制約は
-[Mac package guide](docs/MACOS_PACKAGE.md) を参照してください。
+hook trust、messaging、upgrade、rollback、signing / notarization 状態、現在の platform limit は
+[Mac package guide](docs/MACOS_PACKAGE.md)を参照してください。
 
 ### Linux ARM64 / x64
 
-対応する Linux ZIP を取得し、`SHA256SUMS.txt` を確認して展開後：
+対応する Linux ZIP を取得し、`SHA256SUMS.txt` を確認して展開したら：
 
 ```sh
 ./codex-watchdog --version
@@ -197,63 +228,65 @@ watchdog="${XDG_DATA_HOME:-$HOME/.local/share}/codex-watchdog/bin/codex-watchdog
 "$watchdog" linux-hooks
 ```
 
-Linux のフック定義を確認して `"$watchdog" linux-hooks --install` を実行し、Codex で
-正確な定義を信頼します。互換性のある更新はプロファイル、ランタイム、通知先設定を保持
-します。変更されたフックのコマンドは再確認と信頼が必要です。インストールとロールバックは
-[Linux パッケージ](docs/LINUX_PACKAGE.md)を参照してください。
+Linux hook definition を確認してから `"$watchdog" linux-hooks --install` を実行し、その exact definition を
+Codex 側で trust してください。互換 upgrade は既存 profile、runtime、provider setting を保持します。
+Install と rollback は [Linux package guide](docs/LINUX_PACKAGE.md) を参照してください。
+
+### OneBot 11 / QQ の最短セットアップ
+
+1. 外部 OneBot 11 backend を起動します。QQ では検証済み reference backend の NapCat を使い、access token
+   付き forward WebSocket を有効にします。
+2. `codex-watchdog setup-messaging --onebot` を実行し、hidden prompt に WebSocket endpoint と token を入力します。
+3. 表示された `PAIR_CODEX_ONEBOT_...` code を対象の direct chat または group に送信します。WatchDog は bot、
+   conversation、authorized human を自動で学習するため、QQ user ID の手動検索は不要です。
+4. `codex-watchdog onebot-check --connect` を実行します。
+5. WatchDog notification を quote / reply すると、対応する exact Codex thread に text を届けられます。
+   unknown / ambiguous quotation は拒否されます。
+
+WatchDog 自体は NapCat や QQ を install、bundle、manage しません。
 
 ## 現在の使い方
 
-Linux サーバーで、許可したリポジトリの登録済み会話を監視します。
+Linux server で approved repository 内の enrolled conversation を監視する例：
 
 ```sh
 "$watchdog" linux-auto-run --repo /absolute/repository/path \
   --interval 30 --renew-lease --continue-interrupted
 ```
 
-`--repo` を繰り返すと対象を追加でき、`--thread UUID` を加えると一つの既存会話に限定
-できます。一度の Git 更新で同じリポジトリの複数の登録済み会話が再開される場合があります。
-これらの指定は会話を作成・登録しません。
+`--repo` を繰り返して repository を追加し、`--thread UUID` で既存 conversation 一つに絞れます。
+これらの filter は新しい conversation を作成したり enroll したりしません。
 
-このコマンドは前景で動きます。Remote-SSH/切断後の利用では、SSH 接続に依存しない
-永続的なユーザーサービスで WatchDog を動かしてください。上記のオプションは中断後の
-自動続行を有効にします。アイドル中も監視は続き、安全な状態で切断後の書き込み所有権を
-解放し、新しい作業に合わせて再取得するため、VS Code から同じ会話を開けます。
-詳しくは[引き継ぎと起動](docs/AUTOMATIC_REMOTE_HANDOFF.md)を参照してください。
+Remote-SSH / detached use では、SSH connection から独立した persistent user service で WatchDog を動かしてください。
+Idle 中も monitoring は続き、安全なときに detached writer を release し、新しい作業時に再取得します。
+[handoff and startup](docs/AUTOMATIC_REMOTE_HANDOFF.md) を参照してください。
 
-Linux の Slack 返信には `CODEX_WATCHDOG_SLACK_REPLY_MODE=poll` と既存のボットトークン、
-チャンネル、許可ユーザー一覧を設定します。ノート PC の Slack 接続には依存しません。
-トークンとチャンネルだけでは通知の送信のみが有効です。設定と制限は引き継ぎガイドにあります。
+Shared-home cluster では、**eligible login node ごとに node-local WatchDog を一つ**動かします。各 node は native thread
+を検出し、独立した volatile runtime state を保持します。conversation は node 間で自動 migrate しません。
+[login-node setup](docs/LINUX_NODE_SETUP.md) を参照してください。
 
-ホームを共有するクラスタでは、**対象となる各ログインノードに一つずつローカルの WatchDog**
-を配置します。各ノードは自分のネイティブ会話を検出し、ランタイム状態を分離します。
-ノードを変える前に作業を完了または一時停止してください。会話は自動移行しません。
-永続起動、ネイティブランタイムの分離、既存環境の制限は[ノード設定](docs/LINUX_NODE_SETUP.md)
-を参照してください。
-
-Feishu と国際版 Lark でも通知を送信し、テキスト返信を既存の Codex 会話に転送できます。
-`CODEX_WATCHDOG_INTERACTIVE_TRANSPORT=both` を設定すると Slack と同時に利用できます。
-[Feishu/Lark 設定ガイド](docs/FEISHU_LARK.md)に従ってリージョンと許可ユーザーを設定してください。
-返信は各マシンがポーリングするため、同じアプリとチャットを共有できます。
-パッケージには SDK が含まれており、通知先を切り替えても既存の Slack 設定は保持されます。
+Interactive transport selection は `slack`、`lark`、`both`、`onebot`、`slack+onebot`、`lark+onebot`、`all`
+をサポートします。既存の explicit selection は互換 upgrade で保持されます。production service の environment を
+変更する前に各 provider guide を確認してください。
 
 ## ドキュメント
 
-- 設定：[Windows](WINDOWS_PACKAGE.md)、[macOS](docs/MACOS_PACKAGE.md)、
-  [Linux](docs/LINUX_PACKAGE.md)、[通知先設定](docs/SETUP.md)。
-- Linux：[引き継ぎ](docs/AUTOMATIC_REMOTE_HANDOFF.md)、[ログインノード](docs/LINUX_NODE_SETUP.md)、
-  [ソース版の手順](docs/LINUX_SOURCE_WORKFLOW.md)。
-- [プラットフォーム状況と doctor](docs/PLATFORM_SUPPORT.md)。
-- [アーキテクチャ](doc/architecture.md)と[セキュリティ境界](SECURITY.md)。
-- [手動ビルドとリリース](docs/MANUAL_RELEASE.md)、
-  [リリース履歴](https://github.com/yesunhuang/codex-watchdog/releases)。
-- [任意のマルチエージェント向けプロジェクト契約](examples/AGENTS.multi-agent.md)。
-- [素材の出典](ASSETS.md)と[第三者ライセンス](THIRD_PARTY_NOTICES.md)。
-- [開発と実運用の履歴](doc/Progress/)。
+- Install: [Windows](WINDOWS_PACKAGE.md)、[macOS](docs/MACOS_PACKAGE.md)、
+  [Linux](docs/LINUX_PACKAGE.md)、[provider configuration](docs/SETUP.md)。
+- Messaging: [Feishu/Lark](docs/FEISHU_LARK.md)、[OneBot 11 / QQ](docs/ONEBOT_QQ.md)、
+  [OneBot reuse audit](docs/ONEBOT_REUSE.md)。
+- Linux: [handoff](docs/AUTOMATIC_REMOTE_HANDOFF.md)、[login nodes](docs/LINUX_NODE_SETUP.md)、
+  [source workflow](docs/LINUX_SOURCE_WORKFLOW.md)。
+- [Platform status and doctor](docs/PLATFORM_SUPPORT.md)。
+- [Architecture](doc/architecture.md) と [security boundaries](SECURITY.md)。
+- [Build and release](docs/MANUAL_RELEASE.md) と
+  [release history](https://github.com/yesunhuang/codex-watchdog/releases)。
+- [Optional multi-agent project contract](examples/AGENTS.multi-agent.md)。
+- [Asset provenance](ASSETS.md) と [third-party notices](THIRD_PARTY_NOTICES.md)。
+- [Development / dogfooding history](doc/Progress/)。
 
-このプロジェクトは人間が主導し、AI を広く活用しています。メンテナーが製品方針、
-受け入れ判断、リリースを担い、ChatGPT が設計とレビューを支援し、OpenAI Codex が
-実装、テスト、パッケージ作成の多くを担当します。
+これは human-led で、AI の支援を広く活用している project です。maintainer が product direction、acceptance、release を
+所有し、ChatGPT が design / review を支援し、OpenAI Codex が implementation、test、packaging の多くを担っています。
 
-Codex WatchDog は独立したコミュニティプロジェクトであり、OpenAI、Microsoft、GitHub、
-Slack およびその関連会社とは提携しておらず、公式の推薦も受けていません。
+Codex WatchDog は独立した community project であり、OpenAI、Microsoft、GitHub、Slack、ByteDance、Tencent、NapCat、
+およびそれらの関連組織とは提携していません。
