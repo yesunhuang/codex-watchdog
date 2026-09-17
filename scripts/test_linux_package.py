@@ -532,13 +532,23 @@ def main() -> None:
         assert "ConditionHost=" + configured["node"] in configured["unit"]
         assert "CODEX_WATCHDOG_SLACK_REPLY_MODE=poll" in configured["unit"]
         analyzer = shutil.which("systemd-analyze")
+        systemd_verify_bus_unavailable = False
         if analyzer:
             # Older systemd versions ignore generator-path overrides. Give
             # their installed generators the normal OS path for this offline
             # unit parse only; all packaged executable checks keep Python hidden.
             checked = run([analyzer, "--user", "verify", configured["unit_path"]],
                           env={**node_environment, "PATH": os.defpath})
-            assert not checked.stderr.strip(), checked.stderr
+            diagnostic = checked.stderr.strip()
+            # RHEL8's offline verifier exits zero after parsing this unit but
+            # its host generators also probe the system bus. A disposable
+            # container has no system bus; retain all other diagnostics and
+            # the existing nonzero-exit failure above.
+            systemd_verify_bus_unavailable = (
+                Path("/.dockerenv").is_file()
+                and diagnostic == "Failed to connect to system bus: No such file or directory"
+            )
+            assert not diagnostic or systemd_verify_bus_unavailable, checked.stderr
         process = subprocess.Popen([str(executable), "linux-auto-run", "--interval", "1"],
                                    cwd=work, env=node_environment, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -652,6 +662,7 @@ with lock.open("w") as handle:
               "fixture_exact_thread_resume_restart_release": True, "fixture_queue_deduplication": True,
               "bounded_release_lock_admission": True,
               "node_unit_idempotent_and_host_conditioned": True,
+              "systemd_verify_container_bus_unavailable": systemd_verify_bus_unavailable,
               "node_controller_runtime_isolated": True,
               "node_slack_startup_and_restart": True,
               "queue_courier_invocations": len(courier_calls),
