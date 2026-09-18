@@ -127,6 +127,40 @@ GitHub branch、repository permission 与 `AGENTS.md` 可以定义**谁应该被
 WatchDog 负责的是另一件事：**找到正确的机器/thread，并安全地把消息送过去。**
 Policy 继续留在 transport layer 之外。
 
+## 可组合的模型 Worker
+
+WatchDog 的管理边界是**现有 Codex session**，而不是 Codex 内部可能调用的每一个模型或
+工具。Codex agent 或 subagent 可以把边界明确的子任务交给已经认证的模型 CLI / tool，
+例如 Claude Code、由 DeepSeek 驱动的 CLI，或其他本地/远程模型接口；这不需要再为每个
+模型给 WatchDog 写一套 adapter。
+
+```text
+Human / Manager
+      |
+   WatchDog
+      |
+现有 Codex session
+      |
+Codex subagent
+      |
+模型 Worker / CLI
+(Claude Code / DeepSeek / 其他)
+```
+
+下游模型 Worker **不是** WatchDog 的一等 Agent。WatchDog 不负责它的 session、
+routing、progress report 或 merge authority；调用它的 Codex 仍然负责拆题、验收、
+policy 与最终集成。这个边界是有意设计的：只要 Codex 能安全调用某个工具，并且用户的
+认证、quota、隐私要求和仓库 policy 允许，它就可以作为 Codex 背后的能力参与工作，
+而无需扩大 WatchDog 的 control plane。
+
+仓库提供了一个可直接复制/改造的
+[**codex-use-claude** skill 模板](examples/skills/codex-use-claude/SKILL.md)。
+它采用很简单的分工：Claude 承担边界明确的实现劳动，Codex 负责定义 contract、验证结果，
+并保留判断和集成权。相同模式也可以改造成 DeepSeek 或其他模型 CLI 的 worker。
+
+这里说的是**可组合的间接兼容**，并不表示 WatchDog 原生管理 Claude、DeepSeek 或其他
+下游模型的 session。
+
 ## 消息传输层
 
 | 传输方式 | 作用 | 当前状态 |
@@ -267,11 +301,12 @@ Remote-SSH/分离运行应通过独立于 SSH 连接的持久用户服务启动 
 - [构建与发布](docs/MANUAL_RELEASE.md)与
   [release history](https://github.com/yesunhuang/codex-watchdog/releases)。
 - [可选多 Agent 项目契约](examples/AGENTS.multi-agent.md)。
+- [Codex → Claude delegation skill 模板](examples/skills/codex-use-claude/SKILL.md)。
 - [资源来源](ASSETS.md)与[第三方声明](THIRD_PARTY_NOTICES.md)。
 - [开发与 dogfooding 历史](doc/Progress/)。
 
 这是一个由人主导、AI 深度协助的项目。维护者负责产品方向、验收与发布；ChatGPT 支持设计与
 review；OpenAI Codex 完成大量实现、测试和打包工作。
 
-Codex WatchDog 是独立社区项目，与 OpenAI、Microsoft、GitHub、Slack、字节跳动、腾讯、NapCat
-及其关联方均无隶属关系。
+Codex WatchDog 是独立社区项目，与 OpenAI、Anthropic、DeepSeek、Microsoft、GitHub、Slack、
+字节跳动、腾讯、NapCat 及其关联方均无隶属关系。
