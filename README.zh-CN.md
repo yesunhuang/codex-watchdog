@@ -308,5 +308,5 @@ Remote-SSH/分离运行应通过独立于 SSH 连接的持久用户服务启动 
 这是一个由人主导、AI 深度协助的项目。维护者负责产品方向、验收与发布；ChatGPT 支持设计与
 review；OpenAI Codex 完成大量实现、测试和打包工作。
 
-Codex WatchDog 是独立社区项目，与 OpenAI、Microsoft、GitHub、Slack、字节跳动、腾讯、NapCat
-及其关联方均无隶属关系。
+Codex WatchDog 是独立社区项目，与 OpenAI、Anthropic、DeepSeek、Microsoft、GitHub、Slack、
+字节跳动、腾讯、NapCat 及其关联方均无隶属关系。
