@@ -326,5 +326,5 @@ Interactive transport selection は `slack`、`lark`、`both`、`onebot`、`slac
 これは human-led で、AI の支援を広く活用している project です。maintainer が product direction、acceptance、release を
 所有し、ChatGPT が design / review を支援し、OpenAI Codex が implementation、test、packaging の多くを担っています。
 
-Codex WatchDog は独立した community project であり、OpenAI、Microsoft、GitHub、Slack、ByteDance、Tencent、NapCat、
-およびそれらの関連組織とは提携していません。
+Codex WatchDog は独立した community project であり、OpenAI、Anthropic、DeepSeek、Microsoft、GitHub、Slack、
+ByteDance、Tencent、NapCat、およびそれらの関連組織とは提携していません。
