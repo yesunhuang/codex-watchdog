@@ -141,6 +141,44 @@ be allowed to do what**. WatchDog supplies the separate mechanism: **find the
 right machine/thread and deliver the message safely**. Policy remains outside the
 transport layer.
 
+## Composable model-backed workers
+
+WatchDog's managed boundary is the **existing Codex session**, not every model or
+tool that Codex may use internally. A Codex agent or subagent can delegate a
+bounded subtask to an authenticated model-backed CLI or tool — for example Claude
+Code, a DeepSeek-backed CLI, or another local/remote model interface — without a
+new WatchDog adapter.
+
+```text
+Human / Manager
+      |
+   WatchDog
+      |
+existing Codex session
+      |
+Codex subagent
+      |
+model-backed worker / CLI
+(Claude Code / DeepSeek / other)
+```
+
+The downstream worker is **not** a first-class WatchDog agent. WatchDog does not
+own its session, routing, progress reports, or merge authority; the calling Codex
+agent remains responsible for scoping, validation, policy, and integration. This
+is deliberate: if Codex can invoke a tool safely and the user's authentication,
+quota, privacy, and repository policy allow it, that capability can participate
+behind the managed Codex session without expanding the WatchDog control plane.
+
+A ready-to-copy example is the
+[**codex-use-claude** skill template](examples/skills/codex-use-claude/SKILL.md).
+Its default division of labor is simple: Claude handles bounded implementation
+labor while Codex defines the contract, validates the result, and keeps judgment
+and integration authority. The same pattern can be adapted to DeepSeek or other
+model-backed CLIs.
+
+This is **composable/indirect compatibility**, not a claim that WatchDog natively
+manages Claude, DeepSeek, or every downstream model session.
+
 ## Messaging transports
 
 | Transport | Role | Current support |
@@ -300,6 +338,7 @@ production service environment.
 - [Builds and releases](docs/MANUAL_RELEASE.md) and
   [release history](https://github.com/yesunhuang/codex-watchdog/releases).
 - [Optional multi-agent project contract](examples/AGENTS.multi-agent.md).
+- [Codex → Claude delegation skill template](examples/skills/codex-use-claude/SKILL.md).
 - [Asset provenance](ASSETS.md) and [third-party notices](THIRD_PARTY_NOTICES.md).
 - [Development and dogfooding history](doc/Progress/).
 
