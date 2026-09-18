@@ -347,4 +347,5 @@ product direction, acceptance, and releases; ChatGPT supports design and review;
 OpenAI Codex performs much of the implementation, testing, and packaging.
 
 Codex WatchDog is an independent community project, unaffiliated with OpenAI,
-Microsoft, GitHub, Slack, ByteDance, Tencent, NapCat, or their affiliates.
+Anthropic, DeepSeek, Microsoft, GitHub, Slack, ByteDance, Tencent, NapCat, or their
+affiliates.
