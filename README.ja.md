@@ -135,6 +135,43 @@ GitHub branch、repository permission、`AGENTS.md` は**誰が何をしてよ�
 WatchDog が提供するのは別の mechanism、つまり**正しい machine / thread を見つけ、安全に message を
 届けること**です。policy は transport layer の外に残します。
 
+## 組み合わせ可能な model-backed worker
+
+WatchDog が管理する境界は**既存の Codex session**であり、Codex が内部で利用する
+すべての model や tool ではありません。Codex agent / subagent は、認証済みの
+model-backed CLI や tool に境界の明確な subtask を委譲できます。たとえば Claude Code、
+DeepSeek-backed CLI、その他の local / remote model interface です。モデルごとに新しい
+WatchDog adapter を追加する必要はありません。
+
+```text
+Human / Manager
+      |
+   WatchDog
+      |
+existing Codex session
+      |
+Codex subagent
+      |
+model-backed worker / CLI
+(Claude Code / DeepSeek / other)
+```
+
+下流 worker は WatchDog の first-class Agent ではありません。WatchDog はその session、
+routing、progress report、merge authority を所有せず、呼び出し元の Codex が task scope、
+validation、policy、integration の責任を持ち続けます。これは意図した設計です。Codex が
+安全に tool を呼び出せて、user の authentication、quota、privacy、repository policy が
+許可するなら、その能力は WatchDog の control plane を広げずに managed Codex session の
+背後で利用できます。
+
+すぐコピーして使える例として、
+[**codex-use-claude** skill template](examples/skills/codex-use-claude/SKILL.md)
+を同梱しています。基本の役割分担は単純で、Claude が境界の明確な implementation work を
+担当し、Codex が contract の定義、結果の検証、判断、integration authority を保持します。
+同じ pattern は DeepSeek や他の model-backed CLI にも適用できます。
+
+これは**composable / indirect compatibility**であり、WatchDog が Claude、DeepSeek、
+あるいはすべての下流 model session を native に管理するという意味ではありません。
+
 ## メッセージングトランスポート
 
 | Transport | 役割 | 現在の対応状況 |
@@ -282,6 +319,7 @@ Interactive transport selection は `slack`、`lark`、`both`、`onebot`、`slac
 - [Build and release](docs/MANUAL_RELEASE.md) と
   [release history](https://github.com/yesunhuang/codex-watchdog/releases)。
 - [Optional multi-agent project contract](examples/AGENTS.multi-agent.md)。
+- [Codex → Claude delegation skill template](examples/skills/codex-use-claude/SKILL.md)。
 - [Asset provenance](ASSETS.md) と [third-party notices](THIRD_PARTY_NOTICES.md)。
 - [Development / dogfooding history](doc/Progress/)。
 
