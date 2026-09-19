@@ -1488,6 +1488,29 @@ def test_discovery_owner_mismatch_notifies_and_never_substitutes_a_thread(tmp_pa
     assert second.discovery["notifications"][0]["event_fingerprint"] == first.discovery["notifications"][0]["event_fingerprint"]
 
 
+def test_discovery_failure_alert_does_not_claim_listener_health_is_coverage(tmp_path):
+    runtime = tmp_path / 'runtime'
+    class DiscoveryRegistry(FakeRegistry):
+        path = runtime / 'service' / 'workspace-discovery.json'
+        last_snapshot = SimpleNamespace(
+            status='error', issues=('vscode_live_status_unavailable',),
+            effective_workspaces=(), windows=(),
+        )
+    notifier, queue = FakeNotifier(runtime), FakeQueue()
+    service = MvpWatchdogService(
+        runtime, registry=DiscoveryRegistry([]), git_adapter=FakeAdapter({}),
+        notifier=notifier, queue_dispatcher=queue, codex_home=runtime / 'codex-home',
+    )
+    first, second = service.run_once(), service.run_once()
+    assert first.status == second.status == 'partial'
+    assert len(notifier.events) == 2
+    assert 'automatic monitoring unavailable' in notifier.events[0].subject
+    assert 'may not be monitored' in notifier.events[0].message
+    assert notifier.events[0].relay_target is None
+    assert notifier.events[0].event_fingerprint() == notifier.events[1].event_fingerprint()
+    assert queue.remote_calls == queue.resume_calls == []
+
+
 def test_remote_ssh_completion_sends_exact_output_once_with_locality_label(
     tmp_path: Path,
 ) -> None:
