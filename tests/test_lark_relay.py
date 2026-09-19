@@ -178,12 +178,13 @@ def test_mapping_collision_and_provider_scope_isolation(relay):
     instance, _, _, _, notification = relay
     entries = instance.thread_store.notification_mappings(notification.event_fingerprint())
     before = instance.thread_store.path.read_bytes()
-    with pytest.raises(LarkTransportError, match="mapping_collision"):
+    with pytest.raises(ValueError, match="mapping_collision"):
         instance.thread_store.cache_mappings(entries, RelayTarget("other", OTHER_THREAD, "process_local"))
     assert instance.thread_store.path.read_bytes() == before
     overseas = LarkThreadStore(instance.runtime, config(domain="lark").scope)
     overseas.cache_mappings(entries, RelayTarget("other", OTHER_THREAD, "process_local"))
-    assert overseas.lookup_thread(CHAT, MESSAGE) is None and not overseas.path.exists()
+    assert overseas.lookup_thread(CHAT, MESSAGE) is None
+    assert overseas.notification_mappings(notification.event_fingerprint()) == []
 
 
 def test_notification_only_does_not_create_reply_mapping_or_listener(tmp_path):

@@ -120,8 +120,14 @@ def run_control(request):
         with store.guard(token, purpose="queue"):
             _CONTROL_ACTIVE = (store, token)
             try:
+                ticket = control.get("reply_ticket")
+                if ticket is not None and (not isinstance(ticket, str) or
+                        re.fullmatch(r"[0-9a-f]{64}", ticket) is None):
+                    raise ControlError("control_reply_ticket_invalid")
                 receipt = store._once_locked(
-                    token, "relay", request["instruction_id"], sha(request["prompt"]),
+                    token, "relay" if ticket is None else "relay-ticket",
+                    request["instruction_id"] if ticket is None else ticket,
+                    sha(request["prompt"] if ticket is None else request["instruction_id"] + "\0" + request["prompt"]),
                     lambda: dispatch_wake(request, thread),
                 )
             finally:

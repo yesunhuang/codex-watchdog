@@ -520,11 +520,23 @@ class ControlStore:
             path = self.directory / "slack-threads" / (key + ".json")
             if path.exists():
                 continue  # The exact Slack address is immutable routing evidence.
-            control_atomic_json(path, dict(schema_version=1, **{
-                name: entry[name] for name in ("channel_id", "thread_ts", "event_fingerprint")}))
+            mapping = dict(schema_version=1, **{
+                name: entry[name] for name in ("channel_id", "thread_ts", "event_fingerprint")})
+            mapping.update(self._ticket_metadata(entry))
+            control_atomic_json(path, mapping)
 
     def slack_mappings(self):
         return [control_read_json(path) for path in sorted((self.directory / "slack-threads").glob("*.json"))]
+
+    @staticmethod
+    def _ticket_metadata(entry):
+        if "ticket_schema" not in entry:
+            return {}  # Legacy routing evidence stays closed on upgraded import.
+        if (type(entry["ticket_schema"]) is not int or entry["ticket_schema"] != 1
+                or not isinstance(entry.get("created_at"), str)
+                or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z", entry["created_at"]) is None):
+            raise ControlError("control_reply_ticket_metadata_invalid")
+        return dict(ticket_schema=1, created_at=entry["created_at"])
 
     @staticmethod
     def _lark_mapping(entry, event_id=None):
@@ -537,6 +549,7 @@ class ControlStore:
             raise ControlError("control_lark_mapping_invalid")
         value = dict(schema_version=1, **{name: entry[name] for name in (
             "provider", "scope", "chat_id", "message_id", "event_fingerprint")})
+        value.update(ControlStore._ticket_metadata(entry))
         key = hashlib.sha256((value["scope"] + "\0" + value["chat_id"] + "\0" + value["message_id"]).encode()).hexdigest()
         return key, value
 
@@ -555,6 +568,7 @@ class ControlStore:
             raise ControlError("control_onebot_mapping_invalid")
         mapping = dict(schema_version=1, **{name: entry[name] for name in (
             "provider", "scope", "chat_id", "message_id", "event_fingerprint")})
+        mapping.update(ControlStore._ticket_metadata(entry))
         key = hashlib.sha256((mapping["scope"] + "\0" + mapping["chat_id"] + "\0" + mapping["message_id"]).encode()).hexdigest()
         return key, mapping
 

@@ -140,7 +140,7 @@ class LarkReplyRelay(ExactThreadRelay):
             instruction_id = "lark:" + sha256_text(self.config.scope + "\0" + message_key)[:40]
             claimed, previous = self.thread_store.claim_reply(
                 event_key=event_key, message_key=message_key, payload_sha256=fingerprint,
-                instruction_id=instruction_id, text=text)
+                instruction_id=instruction_id, text=text, chat_id=chat_id, parent_id=mapping.message_id)
             if not claimed:
                 return ReplyResult("duplicate", mapping.target.workspace_id, instruction_id, previous, duplicate=True)
         except StoreBusyError:

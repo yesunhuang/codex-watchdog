@@ -146,6 +146,7 @@ def test_both_provider_replies_share_exact_dispatcher_and_separate_dedupe(tmp_pa
     queue = SimpleNamespace(dispatch=lambda *args: (admitted.append(args) or SimpleNamespace(status="enqueued")))
     relay = reply_relay_from_config(tmp_path, config(), queue_dispatcher=queue, remote_ssh_adapter=None)
     slack, lark = relay.relays
+    assert len(relay.thread_store.notification_mappings(EVENT.event_fingerprint())) == 2
     slack_event = dict(type="message", user="U12345678", channel="C12345678", thread_ts="1760000000.000100",
                        ts="1760000001.000200", client_msg_id="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", text="Slack reply")
     lark_event = {"schema":"2.0", "header":{"event_id":"fixture-event-001", "app_id":"cli_fixture000001",
@@ -162,7 +163,9 @@ def test_both_provider_replies_share_exact_dispatcher_and_separate_dedupe(tmp_pa
     mirrored = reply_relay_from_config(tmp_path/"cache", config(), queue_dispatcher=queue, remote_ssh_adapter=None)
     entries = relay.thread_store.mappings_for_threads((THREAD,))
     mirrored.thread_store.cache_mappings(entries, TARGET)
-    assert len(mirrored.thread_store.notification_mappings(EVENT.event_fingerprint())) == 2
+    assert entries == []  # Consumed tickets must not be exported into a new active set.
+    assert mirrored.thread_store.notification_mappings(EVENT.event_fingerprint()) == []
+    assert relay.thread_store.has_notification_mapping(EVENT.event_fingerprint())
 
 
 def test_listener_start_failure_closes_both_and_releases_first():

@@ -53,7 +53,7 @@ class CombinedThreadStores:
         return [entry for store in self.stores for entry in store.notification_mappings(fingerprint)]
 
     def has_notification_mapping(self, fingerprint):
-        return bool(self.notification_mappings(fingerprint))
+        return any(store.has_notification_mapping(fingerprint) for store in self.stores)
 
     def mappings_for_threads(self, thread_ids):
         return [entry for store in self.stores for entry in store.mappings_for_threads(thread_ids)]
@@ -219,7 +219,15 @@ class ExactThreadRelay:
         if old is not None:
             return ReplyResult("duplicate", target.workspace_id, instruction_id,
                                      old.get("delivery_status"), duplicate=True)
-        probe = adapter.probe(remote, control=dict(action="relay", thread_id=target.thread_id),
+        if hasattr(mapping, "thread_ts"):
+            address = mapping.channel_id + "\0" + mapping.thread_ts
+            scope = "slack"
+        else:
+            address = mapping.chat_id + "\0" + mapping.message_id
+            scope = self.reply_source + "\0" + self.config.scope
+        ticket_id = sha256_text(scope + "\0" + address)
+        probe = adapter.probe(remote, control=dict(action="relay", thread_id=target.thread_id,
+                                                   reply_ticket=ticket_id),
                               wake=dict(instruction_id=instruction_id, prompt=text))
         if probe.get("legacy") is True:
             return None
