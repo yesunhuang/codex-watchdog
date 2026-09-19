@@ -58,138 +58,93 @@ class SlackThreadStore:
             raise ValueError("Slack thread timestamp is invalid")
         return sha256_text(f"{channel_id}\0{thread_ts}")
 
-    def record_thread(
-        self,
-        channel_id: str,
-        thread_ts: str,
-        target: SlackRelayTarget,
-        event_fingerprint: str,
-    ) -> None:
+    @property
+    def journal(self):
+        from .reply_tickets import ReplyTickets
+        return ReplyTickets(self.path, self.lock_path, "slack", self.runtime, self._legacy_state)
+
+    def record_thread(self, channel_id, thread_ts, target, event_fingerprint):
         key = self.thread_key(channel_id, thread_ts)
-        if not isinstance(event_fingerprint, str) or len(event_fingerprint) != 64:
+        if not isinstance(event_fingerprint, str) or re.fullmatch(r"[0-9a-f]{64}", event_fingerprint) is None:
             raise ValueError("notification event fingerprint is invalid")
-        with FileLock(self.lock_path):
-            state = self._read_state()
-            state["threads"][key] = {
-                "channel_id": channel_id,
-                "thread_ts": thread_ts,
-                "target": target.to_dict(),
-                "event_fingerprint": event_fingerprint,
-                "created_at": utc_now(),
-            }
-            InstructionStore._atomic_json(self.path, state)
+        journal = self.journal
+        with journal.transaction() as db:
+            journal.record(db, key, dict(channel_id=channel_id, thread_ts=thread_ts,
+                target=target.to_dict(), event_fingerprint=event_fingerprint, created_at=utc_now()))
 
-    def lookup_thread(
-        self, channel_id: str, thread_ts: str
-    ) -> Optional[SlackThreadMapping]:
+    def lookup_thread(self, channel_id, thread_ts):
         key = self.thread_key(channel_id, thread_ts)
-        with FileLock(self.lock_path):
-            entry = self._read_state()["threads"].get(key)
-        if entry is None:
-            return None
-        return SlackThreadMapping(
-            channel_id=entry["channel_id"],
-            thread_ts=entry["thread_ts"],
-            target=SlackRelayTarget.from_dict(entry["target"]),
-        )
+        journal = self.journal
+        with journal.transaction() as db:
+            entry = journal.get(db, "threads", key)
+        return SlackThreadMapping(channel_id, thread_ts, SlackRelayTarget.from_dict(entry["target"])) if entry else None
 
-    def has_notification_mapping(self, event_fingerprint: str) -> bool:
-        if (
-            not isinstance(event_fingerprint, str)
-            or re.fullmatch(r"[0-9a-f]{64}", event_fingerprint) is None
-        ):
-            raise ValueError("notification event fingerprint is invalid")
-        with FileLock(self.lock_path):
-            threads = self._read_state()["threads"].values()
-            return any(
-                entry["event_fingerprint"] == event_fingerprint for entry in threads
-            )
+    def has_notification_mapping(self, event_fingerprint):
+        journal = self.journal
+        with journal.transaction() as db:
+            return bool(journal.mappings(db, fingerprint=event_fingerprint))
 
-    def lookup_reply(self, event_key: str) -> Optional[Dict[str, Any]]:
-        with FileLock(self.lock_path):
-            value = self._read_state()["events"].get(sha256_text(event_key))
-            return dict(value) if value is not None else None
+    def lookup_reply(self, event_key):
+        journal = self.journal
+        with journal.transaction() as db:
+            return journal.get(db, "events", sha256_text(event_key))
 
     def notification_mappings(self, fingerprint):
-        with FileLock(self.lock_path):
-            return [{name: entry[name] for name in ("channel_id", "thread_ts", "event_fingerprint")}
-                    for entry in self._read_state()["threads"].values()
-                    if entry["event_fingerprint"] == fingerprint]
+        journal = self.journal
+        with journal.transaction() as db:
+            return [dict(entry, ticket_schema=1) for entry in journal.mappings(db, fingerprint=fingerprint, active=True)]
 
     def mappings_for_threads(self, thread_ids):
-        with FileLock(self.lock_path):
-            return [dict(thread_id=entry["target"]["thread_id"], **{
-                        name: entry[name] for name in ("channel_id", "thread_ts", "event_fingerprint")})
-                    for entry in self._read_state()["threads"].values()
-                    if entry["target"]["thread_id"] in thread_ids]
+        journal = self.journal
+        with journal.transaction() as db:
+            return [dict(entry, ticket_schema=1, thread_id=entry["target"]["thread_id"])
+                    for entry in journal.mappings(db, thread_ids=thread_ids, active=True)]
 
     def cache_mappings(self, entries, target):
-        """Cache immutable observed routing; delivery still requires the remote fence."""
         for entry in entries:
             if isinstance(entry, dict) and entry.get("provider") in ("lark", "onebot"):
                 continue
-            existing = self.lookup_thread(entry["channel_id"], entry["thread_ts"])
-            if existing is not None:
-                if existing.target.thread_id != target.thread_id:
-                    raise ValueError("Slack thread mapping collision")
-                continue
-            self.record_thread(entry["channel_id"], entry["thread_ts"], target, entry["event_fingerprint"])
+            from .reply_tickets import ticket_time
+            created = ticket_time(entry)
+            key = self.thread_key(entry["channel_id"], entry["thread_ts"])
+            journal = self.journal
+            with journal.transaction() as db:
+                journal.record(db, key, dict(channel_id=entry["channel_id"], thread_ts=entry["thread_ts"],
+                    target=target.to_dict(), event_fingerprint=entry["event_fingerprint"],
+                    created_at=created or utc_now()), active=created is not None)
 
-    def claim_reply(
-        self,
-        *,
-        event_key: str,
-        channel_id: str,
-        thread_ts: str,
-        instruction_id: str,
-        text: str,
-    ) -> Tuple[bool, Optional[str]]:
+    def claim_reply(self, *, event_key, channel_id, thread_ts, instruction_id, text):
         event_digest = sha256_text(event_key)
-        thread_key = self.thread_key(channel_id, thread_ts)
-        with FileLock(self.lock_path):
-            state = self._read_state()
-            previous = state["events"].get(event_digest)
+        key = self.thread_key(channel_id, thread_ts)
+        journal = self.journal
+        with journal.transaction() as db:
+            previous = journal.get(db, "events", event_digest)
             if previous is not None:
+                if previous["thread_key"] != key or previous["text_sha256"] != sha256_text(text):
+                    raise ValueError("reply_ticket_event_collision")
                 return False, previous.get("delivery_status")
-            state["events"][event_digest] = {
-                "thread_key": thread_key,
-                "instruction_id": instruction_id,
-                "text_sha256": sha256_text(text),
-                "text_chars": len(text),
-                "state": "dispatching",
-                "delivery_status": None,
-                "created_at": utc_now(),
-                "updated_at": None,
-                "error_sha256": None,
-            }
-            InstructionStore._atomic_json(self.path, state)
+            if not journal.claim(db, key):
+                return False, "ticket_closed"
+            journal.put(db, "events", event_digest, dict(thread_key=key,
+                instruction_id=instruction_id, text_sha256=sha256_text(text), text_chars=len(text),
+                state="dispatching", delivery_status=None, created_at=utc_now(),
+                updated_at=None, error_sha256=None))
         return True, None
 
-    def finish_reply(
-        self,
-        event_key: str,
-        *,
-        state_value: str,
-        delivery_status: str,
-        error_sha256: Optional[str] = None,
-    ) -> None:
+    def finish_reply(self, event_key, *, state_value, delivery_status, error_sha256=None):
         if state_value not in ("delivered", "uncertain"):
             raise ValueError("Slack reply state is invalid")
-        event_digest = sha256_text(event_key)
-        with FileLock(self.lock_path):
-            state = self._read_state()
-            entry = state["events"].get(event_digest)
+        journal = self.journal
+        with journal.transaction() as db:
+            key = sha256_text(event_key)
+            entry = journal.get(db, "events", key)
             if entry is None:
                 raise ValueError("Slack reply event was not claimed")
-            entry.update(
-                state=state_value,
-                delivery_status=delivery_status,
-                updated_at=utc_now(),
-                error_sha256=error_sha256,
-            )
-            InstructionStore._atomic_json(self.path, state)
+            entry.update(state=state_value, delivery_status=delivery_status,
+                         updated_at=utc_now(), error_sha256=error_sha256)
+            journal.put(db, "events", key, entry)
 
-    def _read_state(self) -> Dict[str, Any]:
+    def _legacy_state(self) -> Dict[str, Any]:
         if not self.path.exists():
             return {
                 "schema_version": SLACK_RELAY_STATE_SCHEMA_VERSION,

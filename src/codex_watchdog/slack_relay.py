@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from types import SimpleNamespace
 
-from .models import sha256_text
+from .models import MAX_PROMPT_CHARS, sha256_text
 from .queue_wake import QueueWakeDispatcher
 from .remote_ssh import RemoteSshAdapter, RemoteSshTarget
 from .slack_mapping import (
@@ -16,7 +16,7 @@ from .slack_mapping import (
     valid_slack_timestamp,
     valid_slack_user_id,
 )
-from .storage import FileLock
+from .storage import FileLock, StoreBusyError
 from .control_state import ControlError, control_read_json
 from .remote_control import RemoteControlClient
 from .notifications import NotificationEvent
@@ -201,29 +201,30 @@ class SlackReplyRelay(ExactThreadRelay):
             message_ts
         ):
             return SlackReplyResult("ignored_not_thread_reply")
+        if message_ts == thread_ts:
+            return SlackReplyResult("ignored_not_thread_reply")
         text = event.get("text")
-        if not isinstance(text, str) or not text.strip():
+        if not isinstance(text, str) or not text.strip() or len(text) > MAX_PROMPT_CHARS:
             return SlackReplyResult("ignored_empty")
-        mapping = self.thread_store.lookup_thread(channel_id, thread_ts)
+        try:
+            mapping = self.thread_store.lookup_thread(channel_id, thread_ts)
+        except StoreBusyError:
+            return SlackReplyResult("deferred")
+        except Exception as exc:
+            return SlackReplyResult("rejected_state_or_collision", error_sha256=self._error_digest(exc))
         if mapping is None:
             return SlackReplyResult("ignored_unknown_thread")
 
         stable_event_id = self._event_key(event, event_id)
         instruction_id = "slack:" + sha256_text(stable_event_id)[:40]
         try:
-            controlled = self._controlled_reply(mapping, stable_event_id, instruction_id, text)
+            claimed, previous_status = self.thread_store.claim_reply(
+                event_key=stable_event_id, channel_id=channel_id, thread_ts=thread_ts,
+                instruction_id=instruction_id, text=text)
+        except StoreBusyError:
+            return SlackReplyResult("deferred")  # No claim or admission occurred.
         except Exception as exc:
-            return SlackReplyResult("deferred", mapping.target.workspace_id, instruction_id,
-                                     error_sha256=self._error_digest(exc))
-        if controlled is not None:
-            return controlled
-        claimed, previous_status = self.thread_store.claim_reply(
-            event_key=stable_event_id,
-            channel_id=channel_id,
-            thread_ts=thread_ts,
-            instruction_id=instruction_id,
-            text=text,
-        )
+            return SlackReplyResult("rejected_state_or_collision", error_sha256=self._error_digest(exc))
         if not claimed:
             return SlackReplyResult(
                 "duplicate",
@@ -234,6 +235,18 @@ class SlackReplyRelay(ExactThreadRelay):
             )
 
         try:
+            controlled = self._controlled_reply(mapping, stable_event_id, instruction_id, text,
+                                                check_legacy_receipt=False)
+            if controlled is not None:
+                # Transport failure may follow an admitted remote wake. Close the
+                # ticket conservatively; never offer a second human reply/replay.
+                self.thread_store.finish_reply(stable_event_id,
+                    state_value="delivered" if controlled.delivery_status in _DELIVERED_STATES else "uncertain",
+                    delivery_status=controlled.delivery_status or controlled.status)
+                if controlled.status == "deferred":
+                    from dataclasses import replace
+                    controlled = replace(controlled, status="uncertain")
+                return controlled
             delivery_status = self._dispatch(mapping, instruction_id, text)
         except Exception as exc:
             digest = self._error_digest(exc)

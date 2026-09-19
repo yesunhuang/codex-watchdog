@@ -12,8 +12,10 @@ from .storage import FileLock, StoreBusyError
 class OneBotThreadStore(LarkThreadStore):
     """Reuse the tested journal in a separate provider namespace and address space.
 
-No existing Slack/Feishu files or behavior are migrated or refactored.
+The shared journal enforces the same four-ticket one-shot bound.
 """
+    provider = "onebot"
+
     def __init__(self, runtime, scope):
         super().__init__(runtime, scope)
         self.path = Path(runtime) / "onebot" / scope / "relay-state.json"
@@ -28,36 +30,6 @@ No existing Slack/Feishu files or behavior are migrated or refactored.
             raise OneBotError("onebot_message_address_invalid")
         return sha256_text(chat_id + "\0" + message_id)
 
-    def _read(self):
-        state = super()._read()
-        if type(state["schema_version"]) is not int:
-            raise OneBotError("onebot_relay_schema_invalid")
-        return state
-
-    def _put_mapping(self, state, key, chat_id, message_id, target, fingerprint):
-        previous = state["threads"].get(key)
-        if previous is not None and previous.get("target") != target.to_dict():
-            raise OneBotError("onebot_thread_mapping_collision")
-        super()._put_mapping(state, key, chat_id, message_id, target, fingerprint)
-
-    def _envelope(self, entry):
-        return {**super()._envelope(entry), "provider": "onebot"}
-
-    def cache_mappings(self, entries, target):
-        with FileLock(self.lock_path):
-            state = self._read()
-            changed = False
-            for entry in entries:
-                if entry.get("provider") != "onebot" or entry.get("scope") != self.scope:
-                    continue
-                if not self._digest(entry.get("event_fingerprint")):
-                    raise OneBotError("onebot_mapping_fingerprint_invalid")
-                key = self._address(entry.get("chat_id"), entry.get("message_id"))
-                self._put_mapping(state, key, entry["chat_id"], entry["message_id"],
-                                  target, entry["event_fingerprint"])
-                changed = True
-            if changed:
-                self._write(state)
 
 
 def human_message(payload, self_id):
@@ -154,7 +126,8 @@ class OneBotReplyRelay(ExactThreadRelay):
             instruction_id = "onebot:" + sha256_text(self.config.scope + "\0" + message_key)[:40]
             claimed, previous = self.thread_store.claim_reply(event_key=instruction_id,
                 message_key=message_key, payload_sha256=fingerprint,
-                instruction_id=instruction_id, text=value["text"])
+                instruction_id=instruction_id, text=value["text"],
+                chat_id=value["chat_id"], parent_id=value["reply_to"])
             if not claimed:
                 return ReplyResult("duplicate", mapping.target.workspace_id, instruction_id,
                                    previous, duplicate=True)

@@ -92,7 +92,8 @@ def test_reply_arriving_while_listener_offline_is_delivered_once_across_restart(
     assert deliveries[0][2] == event()["text"]
     assert SlackReplyPoller(relay, api=api).poll_once() == []
     assert len(deliveries) == 1
-    assert calls[-1][1]["oldest"] == REPLY
+    assert len([call for call in calls if call[0] == "conversations.replies"]) == 1
+    assert relay.thread_store.poll_mappings() == {}
     acknowledgements = [params for method, params in calls if method == "chat.postMessage"]
     assert len(acknowledgements) == 1
     assert acknowledgements[0]["text"] == "WatchDog host: poller-a.example\nQueued for the exact existing Codex thread."
@@ -122,7 +123,7 @@ def test_uncertain_delivery_is_not_replayed_when_cursor_write_failed(tmp_path):
     poller = SlackReplyPoller(relay, api=lambda *args: dict(messages=[event()]))
     assert poller.poll_once()[0]["status"] == "uncertain"
     poller.path.unlink()  # Simulate cursor loss after the durable delivery receipt.
-    assert poller.poll_once()[0]["status"] == "duplicate"
+    assert poller.poll_once() == []  # Closed tickets are not polled, even after cursor loss.
     assert len(deliveries) == 1
 
 

@@ -18,9 +18,11 @@ class LarkThreadMapping:
 
 
 class LarkThreadStore:
+    provider = "lark"
     def __init__(self, runtime, scope):
         if not isinstance(scope, str) or re.fullmatch(r"[0-9a-f]{64}", scope) is None:
             raise ValueError("Lark scope is invalid")
+        self.runtime = Path(runtime)
         self.scope = scope
         self.path = Path(runtime) / "lark" / scope / "relay-state.json"
         self.lock_path = Path(runtime) / "locks" / ("lark-relay-" + scope + ".lock")
@@ -31,7 +33,7 @@ class LarkThreadStore:
             raise ValueError("Lark message address is invalid")
         return sha256_text(chat_id + "\0" + message_id)
 
-    def _read(self):
+    def _legacy_state(self):
         if not self.path.exists():
             return {"schema_version": 1, "scope": self.scope, "threads": {},
                     "notifications": {}, "events": {}, "messages": {}}
@@ -73,96 +75,90 @@ class LarkThreadStore:
     def _digest(value):
         return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
-    def _write(self, state):
-        InstructionStore._atomic_json(self.path, state)
+    @property
+    def journal(self):
+        from .reply_tickets import ReplyTickets
+        return ReplyTickets(self.path, self.lock_path, self.provider, self.runtime, self._legacy_state)
 
     def prepare_notification(self, fingerprint, payload_sha256):
         if not self._digest(fingerprint) or not self._digest(payload_sha256):
             raise ValueError("Lark notification fingerprint is invalid")
-        with FileLock(self.lock_path):
-            state = self._read()
-            previous = state["notifications"].get(fingerprint)
+        journal = self.journal
+        with journal.transaction() as db:
+            previous = journal.get(db, "notifications", fingerprint)
             if previous is not None:
                 if previous["payload_sha256"] != payload_sha256:
                     raise LarkTransportError("lark_notification_id_collision")
                 if previous["state"] != "sent":
                     raise LarkTransportError("lark_notification_outcome_uncertain")
                 return dict(previous)
-            state["notifications"][fingerprint] = {
-                "payload_sha256": payload_sha256, "state": "uncertain", "created_at": utc_now(),
-            }
-            self._write(state)
+            journal.put(db, "notifications", fingerprint, dict(payload_sha256=payload_sha256,
+                        state="uncertain", created_at=utc_now()))
         return None
 
     def finish_notification(self, fingerprint, chat_id, message_id, target=None):
         key = self._address(chat_id, message_id)
-        with FileLock(self.lock_path):
-            state = self._read()
-            receipt = state["notifications"][fingerprint]
+        journal = self.journal
+        with journal.transaction() as db:
+            receipt = journal.get(db, "notifications", fingerprint)
             if target is not None:
-                self._put_mapping(state, key, chat_id, message_id, target, fingerprint)
+                journal.record(db, key, dict(chat_id=chat_id, message_id=message_id,
+                    target=target.to_dict(), event_fingerprint=fingerprint, created_at=utc_now()))
             receipt.update(state="sent", chat_id=chat_id, message_id=message_id)
-            self._write(state)
-
-    def _put_mapping(self, state, key, chat_id, message_id, target, fingerprint):
-        previous = state["threads"].get(key)
-        if previous is not None:
-            if (previous["target"]["thread_id"] != target.thread_id
-                    or previous["event_fingerprint"] != fingerprint):
-                raise LarkTransportError("lark_thread_mapping_collision")
-            return
-        state["threads"][key] = {"chat_id": chat_id, "message_id": message_id,
-                                 "target": target.to_dict(), "event_fingerprint": fingerprint,
-                                 "created_at": utc_now()}
+            journal.put(db, "notifications", fingerprint, receipt)
 
     def lookup_thread(self, chat_id, message_id):
         key = self._address(chat_id, message_id)
-        with FileLock(self.lock_path):
-            entry = self._read()["threads"].get(key)
+        journal = self.journal
+        with journal.transaction() as db:
+            entry = journal.get(db, "threads", key)
         if entry is None:
             return None
         return LarkThreadMapping(chat_id, message_id, RelayTarget.from_dict(entry["target"]))
 
     def notification_mappings(self, fingerprint):
-        with FileLock(self.lock_path):
-            return [self._envelope(entry) for entry in self._read()["threads"].values()
-                    if entry["event_fingerprint"] == fingerprint]
+        journal = self.journal
+        with journal.transaction() as db:
+            return [self._envelope(entry) for entry in journal.mappings(db, fingerprint=fingerprint, active=True)]
 
     def has_notification_mapping(self, fingerprint):
-        return bool(self.notification_mappings(fingerprint))
+        journal = self.journal
+        with journal.transaction() as db:
+            return bool(journal.mappings(db, fingerprint=fingerprint))
 
     def _envelope(self, entry):
-        return {"provider": "lark", "scope": self.scope, **{
-            key: entry[key] for key in ("chat_id", "message_id", "event_fingerprint")}}
+        return {"provider": self.provider, "scope": self.scope, "ticket_schema": 1, **{
+            key: entry[key] for key in ("chat_id", "message_id", "event_fingerprint", "created_at")}}
 
     def mappings_for_threads(self, thread_ids):
-        with FileLock(self.lock_path):
+        journal = self.journal
+        with journal.transaction() as db:
             return [dict(self._envelope(entry), thread_id=entry["target"]["thread_id"])
-                    for entry in self._read()["threads"].values() if entry["target"]["thread_id"] in thread_ids]
+                    for entry in journal.mappings(db, thread_ids=thread_ids, active=True)]
 
     def cache_mappings(self, entries, target):
-        with FileLock(self.lock_path):
-            state = self._read()
-            changed = False
+        journal = self.journal
+        with journal.transaction() as db:
             for entry in entries:
-                if entry.get("provider") != "lark" or entry.get("scope") != self.scope:
+                if entry.get("provider") != self.provider or entry.get("scope") != self.scope:
                     continue
                 if not self._digest(entry.get("event_fingerprint")):
                     raise ValueError("Lark mapping fingerprint is invalid")
                 key = self._address(entry.get("chat_id"), entry.get("message_id"))
-                self._put_mapping(state, key, entry["chat_id"], entry["message_id"],
-                                  target, entry["event_fingerprint"])
-                changed = True
-            if changed:
-                self._write(state)
+                from .reply_tickets import ticket_time
+                created = ticket_time(entry)
+                journal.record(db, key, dict(chat_id=entry["chat_id"], message_id=entry["message_id"],
+                    target=target.to_dict(), event_fingerprint=entry["event_fingerprint"],
+                    created_at=created or utc_now()), active=created is not None)
 
-    def claim_reply(self, *, event_key, message_key, payload_sha256, instruction_id, text):
-        event_digest = sha256_text(event_key)
-        message_digest = sha256_text(message_key)
-        with FileLock(self.lock_path):
-            state = self._read()
-            previous = state["events"].get(event_digest)
-            message = state["messages"].get(message_digest)
+    def claim_reply(self, *, event_key, message_key, payload_sha256, instruction_id, text,
+                    chat_id, parent_id):
+        event_digest, message_digest = sha256_text(event_key), sha256_text(message_key)
+        ticket = self._address(chat_id, parent_id)
+        journal = self.journal
+        with journal.transaction() as db:
+            previous = journal.get(db, "events", event_digest)
+            message = journal.get(db, "messages", message_digest)
             if previous is not None:
                 if previous["payload_sha256"] != payload_sha256 or previous["message_key"] != message_digest:
                     raise LarkTransportError("lark_event_id_collision")
@@ -170,23 +166,23 @@ class LarkThreadStore:
             if message is not None:
                 if message["payload_sha256"] != payload_sha256:
                     raise LarkTransportError("lark_message_id_collision")
-                return False, state["events"][message["event_key"]].get("delivery_status")
-            state["events"][event_digest] = {
-                "payload_sha256": payload_sha256, "message_key": message_digest,
-                "instruction_id": instruction_id, "text_sha256": sha256_text(text),
-                "text_chars": len(text), "state": "dispatching", "delivery_status": None,
-                "created_at": utc_now(), "error_sha256": None,
-            }
-            state["messages"][message_digest] = {"event_key": event_digest, "payload_sha256": payload_sha256}
-            self._write(state)
+                return False, journal.get(db, "events", message["event_key"]).get("delivery_status")
+            if not journal.claim(db, ticket):
+                return False, "ticket_closed"
+            journal.put(db, "events", event_digest, dict(payload_sha256=payload_sha256,
+                message_key=message_digest, thread_key=ticket, instruction_id=instruction_id,
+                text_sha256=sha256_text(text), text_chars=len(text), state="dispatching",
+                delivery_status=None, created_at=utc_now(), error_sha256=None))
+            journal.put(db, "messages", message_digest, dict(event_key=event_digest, payload_sha256=payload_sha256))
         return True, None
 
     def finish_reply(self, event_key, *, state_value, delivery_status, error_sha256=None):
         if state_value not in ("delivered", "uncertain"):
             raise ValueError("Lark reply state is invalid")
-        with FileLock(self.lock_path):
-            state = self._read()
-            entry = state["events"][sha256_text(event_key)]
+        journal = self.journal
+        with journal.transaction() as db:
+            key = sha256_text(event_key)
+            entry = journal.get(db, "events", key)
             entry.update(state=state_value, delivery_status=delivery_status,
                          error_sha256=error_sha256, updated_at=utc_now())
-            self._write(state)
+            journal.put(db, "events", key, entry)

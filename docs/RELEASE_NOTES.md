@@ -1,5 +1,18 @@
 # Release notes
 
+## v1.1.1
+
+- Slack, Feishu/Lark and QQ now retain at most four active reply tickets per
+  runtime. Each notification accepts one authorized reply; older and consumed
+  notifications cannot wake a conversation again.
+- Slack polling no longer scans lifetime notification history. Indexed receipts
+  retain duplicate suppression, including uncertain dispatch and ownership handoff.
+- Upgrade preserves settings, credentials, hooks and conversations. Legacy reply
+  mappings are backed up and retired on first access; use a new completion
+  notification for subsequent replies. See [reply-ticket migration](REPLY_TICKETS.md).
+- Existing polling cadence and provider backoff remain unchanged. Windows live
+  acceptance passed; platform package and upgrade receipts describe each build.
+
 ## v1.1.0
 
 - Adds optional QQ messaging through an external authenticated OneBot 11

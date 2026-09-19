@@ -37,8 +37,9 @@ class SlackPollingThreadStore(SlackThreadStore):
         pass  # Never import or replay another transport's historical replies.
 
     def poll_mappings(self):
-        with FileLock(self.lock_path):
-            return self._read_state()["threads"]
+        journal = self.journal
+        with journal.transaction() as db:
+            return journal.active(db)
 
 
 class SlackReplyPoller:
@@ -84,6 +85,10 @@ class SlackReplyPoller:
         state = self._read()
         mappings = self.relay.thread_store.poll_mappings()
         keys = sorted(mappings)
+        retained = {key: value for key, value in state["threads"].items() if key in mappings}
+        if retained != state["threads"]:
+            state["threads"] = retained
+            InstructionStore._atomic_json(self.path, state)
         if not keys:
             self._health("waiting_for_mapped_notification")
             return []
@@ -120,6 +125,8 @@ class SlackReplyPoller:
             InstructionStore._atomic_json(self.path, state)
             self.relay.acknowledge(event, result, SimpleNamespace(
                 chat_postMessage=lambda **params: self.api("chat.postMessage", params)))
+            if key not in self.relay.thread_store.poll_mappings():
+                break  # The first claim closes this parent, including uncertain delivery.
         state["after"] = key
         InstructionStore._atomic_json(self.path, state)
         self._health("polling", mapped_threads=len(keys), results=results)

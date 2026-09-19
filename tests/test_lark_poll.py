@@ -49,7 +49,8 @@ def setup(root, *, parent=ROOT, tid=THREAD, api=None):
     queue = SimpleNamespace(dispatch=lambda *args: calls.append(args) or SimpleNamespace(status="enqueued"))
     relay = LarkReplyRelay(root, cfg, queue_dispatcher=queue, remote_ssh_adapter=None, api=api)
     relay.thread_store.cache_mappings([dict(provider="lark", scope=cfg.scope, chat_id=CHAT,
-        message_id=parent, event_fingerprint="a" * 64)], RelayTarget("workspace", tid, "process_local"))
+        message_id=parent, event_fingerprint="a" * 64, ticket_schema=1,
+        created_at="2026-09-18T00:00:00Z")], RelayTarget("workspace", tid, "process_local"))
     clock = [100]
     poller = LarkReplyPoller(relay, api=api, clock=lambda: clock[0])
     poller._read()
@@ -126,7 +127,7 @@ def test_page_token_and_window_are_retained_across_restart(tmp_path):
     api.pages.append(page(message("om_reply00000002", created=102000)))
     restarted.poll_once()
     assert api.calls == [(100, 108, None), (100, 108, "fixture-token")]
-    assert restarted._read()["after"] == 108 and len(calls) == 2
+    assert restarted._read()["after"] == 108 and len(calls) == 1  # One reply per notification.
 
 
 @pytest.mark.parametrize("change", ["chat", "message_id", "timestamp", "sender", "deleted", "page"])

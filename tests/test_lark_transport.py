@@ -213,6 +213,7 @@ def test_real_sdk_history_shared_chat_keeps_independent_runtime_routes(provider,
         relay = LarkReplyRelay(tmp_path / label, provider.config, queue_dispatcher=queue,
                               remote_ssh_adapter=None, api=provider.api())
         relay.thread_store.cache_mappings([dict(provider="lark", scope=provider.config.scope,
+            ticket_schema=1, created_at="2026-09-18T00:00:00Z",
             chat_id=CHAT, message_id=parent, event_fingerprint="a" * 64)],
             RelayTarget(label, THREAD, "process_local"))
         clock = [100]

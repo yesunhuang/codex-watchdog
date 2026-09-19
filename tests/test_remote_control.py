@@ -244,7 +244,7 @@ def test_controlled_slack_reply_and_ack_are_once_across_handoff(helper, tmp_path
     relay._handle_bolt_message(event, {"event_id": "EvOne"}, slack)
     assert len(sent) == len(acknowledgements) == 1
     assert store.read()["epoch"] == remote["epoch"] == 2
-    assert not relay.thread_store.lookup_reply("event:EvOne")
+    assert relay.thread_store.lookup_reply("event:EvOne")["state"] == "delivered"
 
 
 def test_stale_slack_ack_cannot_send_after_queue_handoff(helper, tmp_path, monkeypatch):
@@ -263,6 +263,29 @@ def test_stale_slack_ack_cannot_send_after_queue_handoff(helper, tmp_path, monke
     relay._handle_bolt_message(dict(channel="C12345678", thread_ts="1760000000.000100"), {},
                                SimpleNamespace(chat_postMessage=lambda **kw: sent.append(kw)))
     assert sent == []
+
+
+def test_two_runtime_copies_cannot_admit_two_replies_to_one_remote_ticket(helper, tmp_path):
+    from codex_watchdog.slack_relay import SlackReplyRelay
+    from codex_watchdog.slack_mapping import SlackRelayTarget
+    adapter, target, store, clock, writer = helper
+    RemoteControlClient(adapter, tmp_path).acquire(target, {})
+    sent = []
+    adapter.namespace["dispatch_wake"] = lambda request, thread: (
+        sent.append((thread, request["prompt"])) or dict(state="enqueued"))
+    relays = []
+    for name in ("first", "second"):
+        relay = SlackReplyRelay(tmp_path / name, bot_token="xoxb-fixture", app_token="xapp-fixture",
+            channel_id="C12345678", allowed_user_ids=("U12345678",),
+            remote_ssh_adapter=adapter, queue_dispatcher=SimpleNamespace())
+        relay.thread_store.record_thread("C12345678", "1760000000.000100", SlackRelayTarget(
+            "test", THREAD, "remote_ssh", target.authority, REPO, target.storage_key), "a" * 64)
+        relays.append(relay)
+    event = dict(type="message", user="U12345678", channel="C12345678",
+                 thread_ts="1760000000.000100", ts="1760000001.000200", text="first")
+    assert relays[0].handle_message(event).status == "queued"
+    assert relays[1].handle_message(dict(event, ts="1760000002.000300", text="second")).status == "uncertain"
+    assert sent == [(THREAD, "first")]
 
 
 def test_healthy_standby_and_control_transport_error_are_distinct(helper, tmp_path):
