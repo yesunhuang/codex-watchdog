@@ -1,5 +1,16 @@
 # Release notes
 
+## v1.1.2
+
+- Restore macOS and Linux desktop workspace discovery when VS Code's status
+  process listing omits a live extension host or Codex child. Native parentage,
+  stable process generations and the extension host's open log must agree;
+  ambiguous evidence never selects a conversation.
+- Send a deduplicated monitoring-coverage alert when live VS Code discovery
+  is unavailable. Messaging listener health alone is not monitoring coverage.
+- Existing settings, credentials, conversations and registrations are reused.
+  Windows discovery and native Linux detached ownership remain unchanged.
+
 ## v1.1.1
 
 - Slack, Feishu/Lark and QQ now retain at most four active reply tickets per

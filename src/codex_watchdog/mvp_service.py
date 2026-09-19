@@ -362,6 +362,23 @@ class MvpWatchdogService:
 
     def _discovery_attention_notifications(self, snapshot: Any) -> List[Dict[str, Any]]:
         notifications = []
+        if "vscode_live_status_unavailable" in getattr(snapshot, "issues", ()):
+            label = notification_workspace_label("vscode-discovery", None)
+            notifications.append(self._safe_notify(NotificationEvent(
+                workspace_id="vscode-discovery",
+                event_type="workspace_discovery_attention",
+                transition_fingerprint=self._fingerprint({
+                    "reason": "vscode_live_status_unavailable",
+                }),
+                subject=f"[Codex Watchdog] {label} automatic monitoring unavailable",
+                message=(
+                    "WatchDog cannot verify live VS Code windows. Automatically "
+                    "discovered conversations may not be monitored or receive wakes. "
+                    "Explicitly registered conversations continue to be checked. "
+                    "Check VS Code and WatchDog discovery; messaging listeners "
+                    "running alone does not establish conversation coverage."
+                ),
+            )))
         reasons = {
             "vscode_thread_owned_by_another_window",
             "vscode_thread_owner_unverified",

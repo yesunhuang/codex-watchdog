@@ -24,6 +24,7 @@ from .platform_adapters import (
 from .storage import InstructionStore
 from .workspace_registry import TrackedWorkspace, WorkspaceRegistry
 from .writer_process import writer_lock_process
+from .vscode_processes import NativeVSCodeHost, native_vscode_hosts
 
 
 DISCOVERY_SCHEMA_VERSION = 1
@@ -279,17 +280,16 @@ class VSCodeLiveWindowIndex:
         user_data_root: Path,
         *,
         status_runner: CodeStatusRunner = _default_code_status,
+        native_runner: Callable[[], Optional[Tuple[NativeVSCodeHost, ...]]] = native_vscode_hosts,
     ) -> None:
         self.user_data_root = _canonical_local_path(user_data_root)
         self.status_runner = status_runner
+        self.native_runner = native_runner
 
     def snapshot(self) -> Optional[Dict[str, LiveVSCodeWindow]]:
         status = self.status_runner()
-        if not isinstance(status, str) or not status:
-            return None
-        processes = self._parse_status(status)
-        if not processes:
-            return None
+        processes = self._parse_status(status) if isinstance(status, str) else {}
+        native_hosts = self.native_runner() or ()
         by_storage: Dict[str, List[LiveVSCodeWindow]] = {}
         logs_root = self.user_data_root.parent / "logs"
         try:
@@ -300,8 +300,32 @@ class VSCodeLiveWindowIndex:
             )
         except OSError:
             return None
+        native_matches = {}
+        conflicts = set()
+        for host in native_hosts:
+            try:
+                parts = host.log.resolve().relative_to(logs_root.resolve()).parts
+            except (OSError, ValueError):
+                continue
+            if (len(parts) != 4 or not re.fullmatch(r'window[0-9]+', parts[1])
+                    or parts[2:] != ('exthost', 'exthost.log')):
+                continue
+            number = parts[1][6:]
+            match = self._latest_window_log([logs_root / parts[0]], number, host.pid)
+            if match is None:
+                continue
+            pair = (host.pid, host.codex_pid)
+            previous = processes.get(number)
+            if number in native_matches or previous not in (None, pair, (host.pid, None)):
+                conflicts.add(number)
+            processes[number] = pair
+            native_matches[number] = match
+        if not processes:
+            return None
         for window_number, (extension_host_pid, codex_pid) in processes.items():
-            match = self._latest_window_log(
+            if window_number in conflicts:
+                continue
+            match = native_matches.get(window_number) or self._latest_window_log(
                 log_sessions, window_number, extension_host_pid
             )
             if match is None:
