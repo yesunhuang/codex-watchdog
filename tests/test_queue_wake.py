@@ -59,6 +59,42 @@ def create_queue_database(path: Path, revision: int = 0) -> None:
         )
 
 
+def test_extension_upgrade_refreshes_auto_executable_before_new_wake(tmp_path, monkeypatch):
+    current = ["old-extension/codex.exe"]
+    monkeypatch.setattr(queue_wake, "_resolve_codex_executable", lambda: current[0])
+    runner = FakeRunner()
+    dispatcher = QueueWakeDispatcher(tmp_path, runner=runner)
+    current[0] = "new-extension/codex.exe"
+    assert dispatcher.dispatch(THREAD_ID, "upgrade-1", "Resume", "manual").status == "enqueued"
+    assert runner.calls[0][0][0] == current[0]
+    current[0] = "next-extension/codex.exe"
+    assert dispatcher.dispatch(THREAD_ID, "upgrade-2", "Resume", "manual").status == "enqueued"
+    assert runner.calls[1][0][0] == current[0]
+
+
+def test_extension_refresh_preserves_explicit_executable(tmp_path, monkeypatch):
+    monkeypatch.setattr(queue_wake, "_resolve_codex_executable",
+                        lambda: pytest.fail("explicit executable must not be rediscovered"))
+    runner = FakeRunner()
+    dispatcher = QueueWakeDispatcher(tmp_path, codex_executable="selected-codex", runner=runner)
+    dispatcher.dispatch(THREAD_ID, "explicit-1", "Resume", "manual")
+    assert runner.calls[0][0][0] == "selected-codex"
+
+
+def test_extension_refresh_does_not_retry_uncertain_wake(tmp_path, monkeypatch):
+    monkeypatch.setattr(queue_wake, "_resolve_codex_executable", lambda: "old-codex")
+    calls = []
+    def missing(argv, **kwargs):
+        calls.append(argv)
+        raise FileNotFoundError("executable removed during upgrade")
+    dispatcher = QueueWakeDispatcher(tmp_path, runner=missing)
+    assert dispatcher.dispatch(THREAD_ID, "missing-1", "Resume", "manual").status == "uncertain"
+    monkeypatch.setattr(queue_wake, "_resolve_codex_executable",
+                        lambda: pytest.fail("uncertain receipt must not launch again"))
+    receipt = dispatcher.dispatch(THREAD_ID, "missing-1", "Resume", "manual")
+    assert receipt.status == "uncertain" and receipt.deduplicated and len(calls) == 1
+
+
 def test_codex_executable_on_path_wins_over_extension_fallback(tmp_path: Path,) -> None:
     path_executable = tmp_path / "path" / "codex.exe"
 

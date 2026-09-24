@@ -19,7 +19,6 @@ from .mvp_service import MvpWatchdogService
 from .remote_ssh import RemoteSshTarget, _REMOTE_SCRIPT
 from .storage import FileLock, StoreBusyError, InstructionStore
 from .workspace_registry import TrackedWorkspace, WorkspaceRegistry
-from .slack_mapping import SlackRelayTarget
 from .node_observation import NodeObservation
 
 
@@ -161,10 +160,14 @@ class LinuxAutoWatchdog:
                                             auto_discovery=False)
             relay = getattr(service, "slack_reply_relay", None)
             if relay is not None:
-                relay.thread_store.cache_mappings(
-                    store.relay_mappings(),
-                    SlackRelayTarget(canonical_id, store.thread_id, "process_local"),
-                )
+                mappings = store.relay_mappings()
+                if mappings:
+                    # Native observation creates notifications through the same
+                    # remote-control target used by _cycle. Executing the helper
+                    # on this host does not turn those immutable tickets local.
+                    relay.thread_store.cache_mappings(
+                        mappings, MvpWatchdogService._remote_relay_target(target, store.thread_id),
+                    )
                 relay.start()
                 locks.callback(relay.close)
             owner_options = {"renew_lease": True} if self.renew_lease else {}

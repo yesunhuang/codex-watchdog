@@ -211,6 +211,101 @@ def test_slack_configured_native_controller_starts_and_restarts(scenario, monkey
     assert not clients and not calls
 
 
+@pytest.fixture
+def lark_handoff(scenario):
+    """CP170: a current ticket and its redundant target-free handoff copy."""
+    from codex_watchdog.lark_mapping import LarkThreadStore
+    from codex_watchdog.models import sha256_text
+    from codex_watchdog.relay import RelayTarget
+
+    store, local, writer, clock, clients, make_agent = scenario
+    with store.guard(local) as value:
+        # A remote routing path is POSIX even when the unit test runs on Windows.
+        value["remote_target"]["repo_path"] = "/fixture/repo"
+        control_atomic_json(store.path, value)
+    runtime = Path(store.read()["runtime_path"])
+    target = RelayTarget("control-" + sha256_text(THREAD + "\0" + str(store.repo_path))[:32],
+                         THREAD, "remote_ssh", "ssh-remote+example.invalid", "/fixture/repo", "a" * 32)
+    tickets = LarkThreadStore(runtime, "b" * 64)
+    chat = "oc_fixture000001"
+    envelopes = []
+    for n in range(6):
+        fingerprint = sha256_text("notice-" + str(n))
+        tickets.prepare_notification(fingerprint, fingerprint)
+        tickets.finish_notification(fingerprint, chat, "om_notice00000" + str(n), target)
+        envelopes.extend(tickets.notification_mappings(fingerprint))
+    # Persist copies when sent, including copies whose tickets were later retired.
+    store.merge_relay_mappings(store.read(), envelopes)
+    starts = []
+    agent = make_agent()
+    agent.service_factory = lambda runtime, **kwargs: SimpleNamespace(
+        notifier=EnvironmentNotifier(runtime, config=NotificationConfig()),
+        slack_reply_relay=SimpleNamespace(thread_store=tickets,
+                                         start=lambda: starts.append(True), close=lambda: None))
+    return agent, store, tickets, target, starts, clients, chat
+
+
+def ticket_rows(store):
+    with store.journal.transaction() as db:
+        return db.execute("SELECT * FROM records ORDER BY namespace,kind,key").fetchall()
+
+
+def test_current_lark_handoff_restart_keeps_exact_target_and_ticket_state(lark_handoff):
+    agent, store, tickets, target, starts, clients, chat = lark_handoff
+    assert all(v["ticket_schema"] == 1 and "target" not in v for v in store.relay_mappings())
+    with tickets.journal.transaction() as db:
+        assert len(tickets.journal.active(db)) == 4
+    before = ticket_rows(tickets)
+    for _ in range(2):
+        assert agent.step(observe=False)[0]["state"] == "observing"
+        assert ticket_rows(tickets) == before
+        assert tickets.lookup_thread(chat, "om_notice000005").target == target
+        agent.controllers[THREAD]["owner"].release_requested = True
+        assert agent.step(observe=False)[0]["state"] == "released"
+    # Admit once, retain an uncertain receipt, then restart once more.
+    reply = dict(event_key="event-1", message_key="message-1", payload_sha256="c" * 64,
+                 instruction_id="lark-reply-1", text="resume", chat_id=chat, parent_id="om_notice000005")
+    assert tickets.claim_reply(**reply) == (True, None)
+    tickets.finish_reply("event-1", state_value="uncertain", delivery_status="uncertain")
+    before = ticket_rows(tickets)
+    assert agent.step(observe=False)[0]["state"] == "observing"
+    assert ticket_rows(tickets) == before
+    assert tickets.claim_reply(**reply) == (False, "uncertain")
+    assert tickets.claim_reply(**dict(reply, event_key="event-2", message_key="message-2")) == (False, "ticket_closed")
+    with tickets.journal.transaction() as db:
+        assert len(tickets.journal.active(db)) == 3
+    assert len(starts) == 3 and not clients  # Never take over the VS Code writer.
+
+
+@pytest.mark.parametrize("field,value", [
+    ("workspace_id", "another-workspace"),
+    ("thread_id", "99999999-aaaa-4bbb-8ccc-dddddddddddd"),
+    ("remote_authority", "ssh-remote+another.invalid"),
+    ("remote_repo_path", "/another/repo"),
+    ("remote_storage_key", "c" * 32),
+    ("event_fingerprint", "d" * 64),
+    ("execution_locality", "process_local"),
+])
+def test_lark_handoff_restart_rejects_real_identity_mismatch(lark_handoff, field, value):
+    from codex_watchdog.relay import RelayTarget
+    agent, store, tickets, target, starts, clients, chat = lark_handoff
+    journal = tickets.journal
+    with journal.transaction() as db:
+        key = tickets._address(chat, "om_notice000000")
+        entry = journal.get(db, "threads", key)
+        if field == "event_fingerprint":
+            entry[field] = value
+        elif field == "execution_locality":
+            entry["target"] = RelayTarget(target.workspace_id, THREAD, value).to_dict()
+        else:
+            entry["target"][field] = value
+        journal.put(db, "threads", key, entry)
+    before = ticket_rows(tickets)
+    result = agent.step(observe=False)[0]
+    assert result["state"] == "blocked"
+    assert ticket_rows(tickets) == before and not agent.controllers and not starts and not clients
+
+
 def test_desktop_crash_takeover_and_remote_crash_restart_keep_same_thread(scenario):
     store, local, writer, clock, clients, make_agent = scenario
     first = make_agent()

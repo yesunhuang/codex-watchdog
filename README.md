@@ -212,6 +212,8 @@ in the tested backend and is therefore not accepted for control replies. See
 [OneBot 11 / QQ](docs/ONEBOT_QQ.md) for setup, security boundaries, and exact
 acceptance limits.
 
+Reply `bind #channel` to a mapped Slack notification to route that exact session to another channel; `unbind` restores its default inbox. A successful bind posts a reply-enabled hello in the destination. See [session destinations](docs/SESSION_DESTINATIONS.md) for permissions and historical-message polling delays.
+
 ## Supported topologies
 
 | Platform | Recommended workflow | Status and limits |

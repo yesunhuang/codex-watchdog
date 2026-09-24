@@ -192,6 +192,8 @@ WatchDog **永远不会猜测回复应该送到哪个 thread**。官方 QQ 的�
 回复来源。具体配置、安全边界和验收范围见
 [OneBot 11 / QQ 指南](docs/ONEBOT_QQ.md)。
 
+回复已映射的 Slack 通知 `bind #channel`，即可将该会话的后续消息发送到指定频道；`unbind` 恢复默认收件箱。绑定成功后，新频道会收到一条可回复的欢迎消息。权限要求与历史消息轮询延迟见[会话消息目的地](docs/SESSION_DESTINATIONS.md)。
+
 ## 支持的部署方式
 
 | 平台 | 推荐工作流 | 状态与限制 |

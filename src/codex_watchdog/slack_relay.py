@@ -44,6 +44,7 @@ class SlackReplyRelay(ExactThreadRelay):
         remote_ssh_adapter: RemoteSshAdapter,
         thread_store: Optional[SlackThreadStore] = None,
         reply_mode: str = "socket",
+        route_api: Optional[Any] = None,
     ) -> None:
         if not isinstance(bot_token, str) or not bot_token.startswith("xoxb-"):
             raise ValueError("Slack bot token is invalid")
@@ -68,6 +69,7 @@ class SlackReplyRelay(ExactThreadRelay):
         self.thread_store = (
             thread_store if thread_store is not None else SlackThreadStore(runtime)
         )
+        self._route_api = route_api
         self._app = None
         self._handler = None
         self._listener_lock: Optional[FileLock] = None
@@ -159,6 +161,16 @@ class SlackReplyRelay(ExactThreadRelay):
             and valid_slack_channel_id(channel)
             and valid_slack_timestamp(thread_ts)
         ):
+            hello_ok = None
+            if result.status == "route_bound":
+                hello_ok = self._send_binding_hello(result.instruction_id, client)
+            if result.status in ("route_bound", "route_unbound"):
+                from .session_routes import SessionRoutes
+                routes = SessionRoutes(self.thread_store, scope=self.channel_id)
+                if not routes.claim_ack(result.instruction_id):
+                    return
+                if hello_ok is False:
+                    response = self._response_text_hello_failed(result)
             response = slack_message_with_host(response)
 
             def send_ack(_event):
@@ -178,6 +190,53 @@ class SlackReplyRelay(ExactThreadRelay):
                     # A stale or uncertain acknowledgement is never resent.
                     return
 
+    def _send_binding_hello(self, event_key: str, client: Any) -> bool:
+        """Post a top-level hello to the destination channel and record the mapping.
+
+        Returns True only when the send succeeded and record_thread was called.
+        Sets hello_status=uncertain on any failure; never re-sends on second call.
+        """
+        from .session_routes import SessionRoutes
+        routes = SessionRoutes(self.thread_store, scope=self.channel_id)
+        claim = routes.claim_binding_hello(event_key)
+        if claim is None:
+            return False
+        target, destination, fingerprint = claim
+        text = slack_message_with_host(
+            f"Hello! Binding successful. "
+            f"Workspace: {target.workspace_id}, Session: {target.thread_id}. "
+            f"Reply in this thread to send messages to this exact Codex session."
+        )
+        try:
+            resp = client.chat_postMessage(
+                channel=destination,
+                text=text,
+                unfurl_links=False,
+                unfurl_media=False,
+            )
+        except Exception:
+            routes.finish_binding_hello(event_key, status="uncertain")
+            return False
+        if isinstance(resp, dict):
+            resp_dict = resp
+        elif hasattr(resp, "data") and isinstance(resp.data, dict):
+            resp_dict = resp.data
+        else:
+            resp_dict = {}
+        if (resp_dict.get("ok") is not True
+                or resp_dict.get("channel") != destination
+                or not valid_slack_timestamp(resp_dict.get("ts"))):
+            routes.finish_binding_hello(event_key, status="uncertain")
+            return False
+        new_ts = resp_dict["ts"]
+        try:
+            self.thread_store.record_thread(destination, new_ts, target, fingerprint)
+        except Exception:
+            routes.finish_binding_hello(event_key, status="uncertain")
+            return False
+        routes.finish_binding_hello(event_key, status="sent")
+        return True
+
     def handle_message(
         self, event: Any, *, event_id: Optional[str] = None
     ) -> SlackReplyResult:
@@ -193,7 +252,7 @@ class SlackReplyRelay(ExactThreadRelay):
         if user_id not in self.allowed_user_ids:
             return SlackReplyResult("ignored_unauthorized")
         channel_id = event.get("channel")
-        if channel_id != self.channel_id:
+        if not valid_slack_channel_id(channel_id):
             return SlackReplyResult("ignored_channel")
         thread_ts = event.get("thread_ts")
         message_ts = event.get("ts")
@@ -213,9 +272,26 @@ class SlackReplyRelay(ExactThreadRelay):
         except Exception as exc:
             return SlackReplyResult("rejected_state_or_collision", error_sha256=self._error_digest(exc))
         if mapping is None:
+            if channel_id != self.channel_id:
+                return SlackReplyResult("ignored_channel")
             return SlackReplyResult("ignored_unknown_thread")
 
         stable_event_id = self._event_key(event, event_id)
+
+        from .slack_route_commands import parse_route_command
+        try:
+            route_cmd = parse_route_command(text)
+        except ValueError as exc:
+            return SlackReplyResult(
+                "rejected_route_command",
+                workspace_id=mapping.target.workspace_id,
+                delivery_status=str(exc),
+            )
+        if route_cmd is not None:
+            return self._handle_route_command(
+                event, stable_event_id, route_cmd, mapping, channel_id, thread_ts, user_id, text,
+            )
+
         instruction_id = "slack:" + sha256_text(stable_event_id)[:40]
         try:
             claimed, previous_status = self.thread_store.claim_reply(
@@ -279,6 +355,91 @@ class SlackReplyRelay(ExactThreadRelay):
 
 
 
+    def _handle_route_command(
+        self,
+        event: Any,
+        event_key: str,
+        route_cmd: tuple,
+        mapping: Any,
+        channel_id: str,
+        thread_ts: str,
+        user_id: str,
+        text: str,
+    ) -> "SlackReplyResult":
+        from .session_routes import SessionRoutes
+        from .slack_route_commands import resolve_destination
+        operation, argument = route_cmd
+        routes = SessionRoutes(self.thread_store, provider="slack", scope=self.channel_id)
+
+        destination: Optional[str] = None
+        try:
+            if operation == "bind":
+                destination = resolve_destination(argument, self._get_route_api())
+            result = routes.apply(
+                event_key, channel_id, thread_ts, user_id, text, destination,
+                command_ts=event.get("ts"),
+            )
+        except StoreBusyError:
+            return SlackReplyResult("deferred")
+        except Exception as exc:
+            from urllib.error import HTTPError
+            if isinstance(exc, HTTPError) and exc.code == 429:
+                raise  # Preserve the poller's provider Retry-After handling.
+            if isinstance(exc, ValueError) and str(exc) == "route_destination_missing_scope":
+                return SlackReplyResult(
+                    "rejected_route_command",
+                    workspace_id=mapping.target.workspace_id,
+                    delivery_status="route_destination_missing_scope",
+                )
+            return SlackReplyResult(
+                "rejected_route_command",
+                workspace_id=mapping.target.workspace_id,
+                delivery_status="route_validation_failed",
+                error_sha256=self._error_digest(exc),
+            )
+
+        apply_status = result["status"]
+
+        if apply_status == "stale":
+            return SlackReplyResult(
+                "route_stale",
+                workspace_id=mapping.target.workspace_id,
+                instruction_id=event_key,
+                duplicate=True,
+            )
+
+        if apply_status == "duplicate":
+            return SlackReplyResult(
+                "duplicate",
+                workspace_id=mapping.target.workspace_id,
+                instruction_id=event_key,
+                duplicate=True,
+            )
+
+        if apply_status in ("bound", "unbound"):
+            status = "route_bound" if apply_status == "bound" else "route_unbound"
+            return SlackReplyResult(
+                status,
+                workspace_id=mapping.target.workspace_id,
+                instruction_id=event_key,
+                delivery_status=destination,
+            )
+
+        return SlackReplyResult(
+            "rejected_route_command",
+            workspace_id=mapping.target.workspace_id,
+            delivery_status="route_apply_unexpected_status",
+        )
+
+    def _get_route_api(self):
+        if self._route_api is not None:
+            return self._route_api
+        from .slack_route_commands import slack_conversations_get
+        bot_token = self.bot_token
+        def _api(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+            return slack_conversations_get(bot_token, method, params)
+        return _api
+
     @staticmethod
     def _event_key(event: Dict[str, Any], event_id: Optional[str]) -> str:
         if isinstance(event_id, str) and event_id:
@@ -289,6 +450,15 @@ class SlackReplyRelay(ExactThreadRelay):
         return "message:" + str(event["channel"]) + ":" + str(event["ts"])
 
     @staticmethod
+    def _response_text_hello_failed(result: SlackReplyResult) -> Optional[str]:
+        dest = result.delivery_status
+        mention = f"<#{dest}>" if dest else "the destination channel"
+        return (
+            f"Session route bound to {mention}. "
+            f"Binding saved, but the destination hello could not be confirmed."
+        )
+
+    @staticmethod
     def _response_text(result: SlackReplyResult) -> Optional[str]:
         if result.status == "queued":
             return "Queued for the exact existing Codex thread."
@@ -297,4 +467,19 @@ class SlackReplyRelay(ExactThreadRelay):
                 "WatchDog could not confirm exact-thread delivery and will not "
                 "blindly resend this reply."
             )
+        if result.status == "route_bound":
+            dest = result.delivery_status
+            mention = f"<#{dest}>" if dest else "the destination channel"
+            return f"Session route bound to {mention}."
+        if result.status == "route_unbound":
+            return "Session route unbound. Notifications return to the default channel."
+        if result.status == "rejected_route_command":
+            if result.delivery_status == "route_destination_missing_scope":
+                return (
+                    "WatchDog cannot verify this channel: the bot is missing a required Slack scope. "
+                    "Add channels:read (public) or groups:read (private) under Bot Token Scopes "
+                    "and reinstall the existing Slack app to authorize, then retry."
+                )
+            return ("WatchDog could not change this session's destination. "
+                    "Use bind #channel or unbind, and check that the bot can access the channel.")
         return None

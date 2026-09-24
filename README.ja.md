@@ -203,6 +203,8 @@ WatchDog は**返信先 thread を推測しません**。公式 QQ の quoted re
 TIM は control reply 用として受け入れていません。設定、安全境界、acceptance limit は
 [OneBot 11 / QQ](docs/ONEBOT_QQ.md) を参照してください。
 
+対応する Slack 通知に `bind #channel` と返信すると、そのセッションの送信先を変更できます。`unbind` で既定の受信先に戻ります。バインド成功時は、新しいチャンネルに返信可能な挨拶を送信します。権限と過去の通知のポーリング遅延は[セッションの送信先](docs/SESSION_DESTINATIONS.md)をご覧ください。
+
 ## 対応する構成
 
 | プラットフォーム | 推奨ワークフロー | 状況と制限 |

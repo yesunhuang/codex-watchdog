@@ -865,12 +865,22 @@ class EnvironmentNotifier:
                     "\n\n_Reply in this Slack thread to send text to this exact "
                     "existing Codex thread._"
                 )
+            bound_channel: Optional[str] = None
+            if relay_target is not None:
+                from .session_routes import SessionRoutes
+                routes = SessionRoutes(
+                    self.slack_thread_store,
+                    provider="slack",
+                    scope=self.config.slack_channel_id,
+                )
+                bound_channel = routes.destination(relay_target.thread_id)
+            target_channel = bound_channel or self.config.slack_channel_id
             try:
                 result = self.slack_api_post(
                     self.config.slack_bot_token,
                     "chat.postMessage",
                     {
-                        "channel": self.config.slack_channel_id,
+                        "channel": target_channel,
                         "text": relay_text,
                         "unfurl_links": False,
                         "unfurl_media": False,
@@ -878,6 +888,8 @@ class EnvironmentNotifier:
                     self.config.timeout_seconds,
                 )
             except Exception:
+                if bound_channel is not None:
+                    raise
                 if self.config.slack_webhook_url is None:
                     raise
                 self._send_slack_webhook(
@@ -888,7 +900,7 @@ class EnvironmentNotifier:
             channel_id = result.get("channel")
             thread_ts = result.get("ts")
             if (
-                channel_id != self.config.slack_channel_id
+                channel_id != target_channel
                 or not valid_slack_channel_id(channel_id)
                 or not valid_slack_timestamp(thread_ts)
             ):

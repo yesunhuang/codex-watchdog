@@ -1,5 +1,19 @@
 # Release notes
 
+## v1.1.3
+
+- Bind an exact existing Codex session to a Slack channel with `bind #channel`;
+  `unbind` restores its default inbox. Other sessions keep their own routes.
+- Successful binding posts a new, reply-enabled hello in the destination and
+  acknowledges the original control message. No Codex turn is started.
+- Slack channel lookup uses the correct GET query parameters and reports missing
+  channel-read scopes. Saved credentials and pairings are retained.
+- Restore exact-thread discovery for CLI-assisted desktop wake and canonical
+  native Linux relay mappings. Existing ownership fences remain in force.
+- Historical bind commands use bounded polling; large closed-message histories
+  can delay discovery. Prefer a recent notification. See
+  [session destinations](SESSION_DESTINATIONS.md).
+
 ## v1.1.2
 
 - Restore macOS and Linux desktop workspace discovery when VS Code's status

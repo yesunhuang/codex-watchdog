@@ -152,6 +152,7 @@ class QueueWakeDispatcher:
             if codex_executable is not None
             else _resolve_codex_executable()
         )
+        self._discover_codex_executable = codex_executable is None
         self.runner = runner
         self.codex_home = (
             Path(
@@ -294,6 +295,11 @@ class QueueWakeDispatcher:
 
         wrapped = f"{marker}\n{prompt}"
         try:
+            # Extension upgrades can remove the path found when this long-lived
+            # monitor started. Refresh only for a new dispatch, never a retry of
+            # an uncertain send, and preserve explicitly configured executables.
+            if self._discover_codex_executable:
+                self.codex_executable = _resolve_codex_executable()
             environment = codex_process_environment(self.codex_home)
             completed = self.runner(
                 [
