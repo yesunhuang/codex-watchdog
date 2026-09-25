@@ -200,10 +200,12 @@ class ReplyTickets:
             return
         db.execute("UPDATE records SET active=1 WHERE namespace=? AND kind='threads' AND key=?",
                    (self.namespace, key))
+        # Equal timestamps are possible on coarse clocks. Persisted insertion
+        # order breaks ties across namespaces; mapping refreshes retain rowid.
         excess = db.execute("""SELECT namespace,key FROM records INDEXED BY session_active_tickets
             WHERE active=1 AND kind='threads'
             AND thread_id COLLATE NOCASE=?
-            ORDER BY created_at DESC,namespace DESC,key DESC LIMIT -1 OFFSET ?""",
+            ORDER BY created_at DESC,rowid DESC LIMIT -1 OFFSET ?""",
             (canonical, ACTIVE_TICKET_LIMIT)).fetchall()
         for namespace, old_key in excess:
             db.execute("UPDATE records SET active=0 WHERE namespace=? AND kind='threads' AND key=?",

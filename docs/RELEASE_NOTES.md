@@ -15,8 +15,10 @@ are removed without reopening closed tickets. Older binaries cannot read the new
 journal. Do not restore old ticket backups after admitting new replies.
 
 The release candidate passed user-confirmed production testing across Windows,
-Linux and macOS, including reply and binding tests. This stable release retains
-the tested application code. All four packages are rebuilt from one revision:
+Linux and macOS, including reply and binding tests. Final release checks caught
+an equal-timestamp edge case: retirement now uses persisted insertion order to
+break timestamp ties, preserving the oldest-first rule across restarts and
+provider scopes. All four packages are rebuilt from one revision:
 Windows x64, Linux x64, Linux ARM64 and macOS ARM64 preview. The macOS package
 retains its preview support designation.
 

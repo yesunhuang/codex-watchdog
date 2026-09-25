@@ -108,6 +108,24 @@ def test_fifth_retires_oldest_and_each_exact_thread_wakes_only_once(tmp_path, pr
 
 
 @pytest.mark.parametrize("provider", ["slack-poll", "slack-socket", "lark", "onebot"])
+def test_equal_timestamps_retire_first_inserted_ticket_after_restart(tmp_path, provider, monkeypatch):
+    for module in ("slack_mapping", "lark_mapping"):
+        monkeypatch.setattr("codex_watchdog." + module + ".utc_now",
+                            lambda: "2026-09-25T09:00:00Z")
+    relay, _ = fixture(tmp_path, provider)
+    for n in range(1, 5):
+        record(relay.thread_store, provider, n, session=1)
+    relay, calls = fixture(tmp_path, provider)
+    record(relay.thread_store, provider, 1, session=1)  # Refresh keeps original order.
+    record(relay.thread_store, provider, 5, session=1)
+    reply(relay, provider, 1)
+    assert not calls
+    for n in range(2, 6):
+        assert reply(relay, provider, n, n).status == "queued"
+    assert len(calls) == 4 and active(relay.thread_store) == {}
+
+
+@pytest.mark.parametrize("provider", ["slack-poll", "slack-socket", "lark", "onebot"])
 def test_concurrent_different_replies_can_claim_only_once(tmp_path, provider):
     relay, calls = fixture(tmp_path, provider)
     record(relay.thread_store, provider, 1)
