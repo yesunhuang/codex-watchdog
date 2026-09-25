@@ -279,6 +279,24 @@ class SlackReplyRelay(ExactThreadRelay):
         stable_event_id = self._event_key(event, event_id)
 
         from .slack_route_commands import parse_route_command
+        previous = None
+        if text.strip().split(None, 1)[0].lower() in ("bind", "unbind"):
+            from .session_routes import SessionRoutes
+            try:
+                previous = SessionRoutes(self.thread_store, scope=self.channel_id).command_source(
+                    stable_event_id, channel_id, thread_ts)
+            except StoreBusyError:
+                return SlackReplyResult("deferred")
+            except Exception as exc:
+                if isinstance(exc, ValueError) and str(exc) == "route_source_closed":
+                    return SlackReplyResult("ignored_closed_ticket", workspace_id=mapping.target.workspace_id)
+                return SlackReplyResult("rejected_state_or_collision", error_sha256=self._error_digest(exc))
+        if previous is not None:
+            # Validate the retained receipt before parsing changed text or doing
+            # provider lookup. Closed history can only deduplicate this event.
+            return self._handle_route_command(
+                event, stable_event_id, ("duplicate", None), mapping,
+                channel_id, thread_ts, user_id, text, previous=previous)
         try:
             route_cmd = parse_route_command(text)
         except ValueError as exc:
@@ -290,6 +308,7 @@ class SlackReplyRelay(ExactThreadRelay):
         if route_cmd is not None:
             return self._handle_route_command(
                 event, stable_event_id, route_cmd, mapping, channel_id, thread_ts, user_id, text,
+                previous=previous,
             )
 
         instruction_id = "slack:" + sha256_text(stable_event_id)[:40]
@@ -365,6 +384,7 @@ class SlackReplyRelay(ExactThreadRelay):
         thread_ts: str,
         user_id: str,
         text: str,
+        previous: Optional[dict] = None,
     ) -> "SlackReplyResult":
         from .session_routes import SessionRoutes
         from .slack_route_commands import resolve_destination
@@ -373,7 +393,9 @@ class SlackReplyRelay(ExactThreadRelay):
 
         destination: Optional[str] = None
         try:
-            if operation == "bind":
+            if previous is not None:
+                destination = previous["destination"]
+            elif operation == "bind":
                 destination = resolve_destination(argument, self._get_route_api())
             result = routes.apply(
                 event_key, channel_id, thread_ts, user_id, text, destination,
@@ -383,6 +405,10 @@ class SlackReplyRelay(ExactThreadRelay):
             return SlackReplyResult("deferred")
         except Exception as exc:
             from urllib.error import HTTPError
+            if previous is not None:
+                return SlackReplyResult("rejected_state_or_collision", error_sha256=self._error_digest(exc))
+            if isinstance(exc, ValueError) and str(exc) == "route_source_closed":
+                return SlackReplyResult("ignored_closed_ticket", workspace_id=mapping.target.workspace_id)
             if isinstance(exc, HTTPError) and exc.code == 429:
                 raise  # Preserve the poller's provider Retry-After handling.
             if isinstance(exc, ValueError) and str(exc) == "route_destination_missing_scope":

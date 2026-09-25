@@ -110,6 +110,20 @@ class SessionRoutes:
         self._validate_route(entry, canonical)
         return entry["destination"]
 
+    def command_source(self, event_key: str, channel_id: str, parent_ts: str):
+        """Check active admission before lookup; retained receipts only deduplicate."""
+        key = self.thread_store.thread_key(channel_id, parent_ts)
+        journal = self.thread_store.journal
+        with journal.transaction() as db:
+            receipt = journal.get(db, _KIND_COMMANDS, self._command_key(event_key))
+            if receipt is not None:
+                self._validate_command(receipt)
+                return receipt  # apply() still verifies every collision field.
+            if not db.execute("SELECT 1 FROM records WHERE namespace=? AND kind='threads' "
+                              "AND key=? AND active=1", (journal.namespace, key)).fetchone():
+                raise ValueError("route_source_closed")
+        return None
+
     def apply(
         self,
         event_key: str,
@@ -185,6 +199,10 @@ class SessionRoutes:
                     "ack_pending": ack_claimed is False,
                 }
 
+            if not db.execute("SELECT 1 FROM records WHERE namespace=? AND kind='threads' "
+                              "AND key=? AND active=1", (journal.namespace, source_key)).fetchone():
+                raise ValueError("route_source_closed")
+
             # Validate existing route schema before overwriting; stale check
             existing_route = journal.get(db, _KIND_ROUTES, route_key)
             if existing_route is not None:
@@ -212,11 +230,9 @@ class SessionRoutes:
                         "ack_pending": False,
                     }
 
-            # Close only the exact source ticket; historical closed tickets are idempotent
-            db.execute(
-                "UPDATE records SET active=0 WHERE namespace=? AND kind='threads' AND key=?",
-                (journal.namespace, source_key),
-            )
+            # The route and its one-shot active source are changed atomically.
+            if not journal.claim(db, source_key):
+                raise ValueError("route_source_closed")
 
             # Upsert route for bind or tombstone for unbind (preserves last_command_ts)
             route_entry = {

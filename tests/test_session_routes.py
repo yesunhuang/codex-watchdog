@@ -32,10 +32,11 @@ def thread_ts(n: int) -> str:
     return "1789111600.{:06d}".format(n)
 
 
-def record_ticket(store: SlackThreadStore, n: int, channel: str = CHANNEL) -> str:
+def record_ticket(store: SlackThreadStore, n: int, channel: str = CHANNEL, *, session: int = None) -> str:
     fp = sha256_text("notice:" + str(n))
-    store.record_thread(channel, thread_ts(n), target(n), fp)
-    return target(n).thread_id
+    session = n if session is None else session
+    store.record_thread(channel, thread_ts(n), target(session), fp)
+    return target(session).thread_id
 
 
 def make_routes(store: SlackThreadStore) -> SessionRoutes:
@@ -86,17 +87,20 @@ def test_bind_active_ticket_closes_it(tmp_path):
     assert active_count(store) == 0
 
 
-def test_bind_closed_ticket_accepted_for_control(tmp_path):
+@pytest.mark.parametrize("text,destination", [("bind " + DEST, DEST), ("unbind", None)])
+def test_closed_ticket_cannot_control_route(tmp_path, text, destination):
     store = SlackThreadStore(tmp_path)
     record_ticket(store, 1)
     close_ticket(store, 1)
-    assert active_count(store) == 0
-
     routes = make_routes(store)
-    result = routes.apply("event:E001", CHANNEL, thread_ts(1), USER, "bind " + DEST, DEST,
-                          command_ts=TS_100)
-    assert result["status"] == "bound"
-    assert routes.destination(target(1).thread_id) == DEST
+    with pytest.raises(ValueError, match="route_source_closed"):
+        routes.apply("event:E001", CHANNEL, thread_ts(1), USER, text, destination,
+                     command_ts=TS_100)
+    assert routes.destination(target(1).thread_id) is None
+    assert active_count(store) == 0
+    with store.journal.transaction() as db:
+        assert db.execute("SELECT COUNT(*) FROM records WHERE kind='route_commands'").fetchone()[0] == 0
+
 
 
 # ── 4-ticket count invariant ─────────────────────────────────────────────────
@@ -151,11 +155,12 @@ def test_duplicate_event_key_returns_duplicate_does_not_reopen(tmp_path):
 def test_duplicate_does_not_overwrite_later_route_change(tmp_path):
     store = SlackThreadStore(tmp_path)
     record_ticket(store, 1)
+    record_ticket(store, 3, session=1)
     routes = make_routes(store)
 
     routes.apply("event:E001", CHANNEL, thread_ts(1), USER, "bind " + DEST, DEST,
                  command_ts=TS_100)
-    routes.apply("event:E002", CHANNEL, thread_ts(1), USER, "unbind", None,
+    routes.apply("event:E002", CHANNEL, thread_ts(3), USER, "unbind", None,
                  command_ts=TS_200)
     assert routes.destination(target(1).thread_id) is None
 
@@ -186,6 +191,7 @@ def test_second_session_independent(tmp_path):
 def test_unbind_only_removes_one_route(tmp_path):
     store = SlackThreadStore(tmp_path)
     record_ticket(store, 1)
+    record_ticket(store, 3, session=1)
     record_ticket(store, 2)
     routes = make_routes(store)
 
@@ -194,7 +200,7 @@ def test_unbind_only_removes_one_route(tmp_path):
     routes.apply("event:E002", CHANNEL, thread_ts(2), USER, "bind " + DEST2, DEST2,
                  command_ts=TS_200)
 
-    r = routes.apply("event:E003", CHANNEL, thread_ts(1), USER, "unbind", None,
+    r = routes.apply("event:E003", CHANNEL, thread_ts(3), USER, "unbind", None,
                      command_ts=TS_300)
     assert r["status"] == "unbound"
     assert routes.destination(target(1).thread_id) is None
@@ -354,13 +360,14 @@ def test_destination_none_when_no_route(tmp_path):
 def test_unbind_stores_tombstone_destination_is_none(tmp_path):
     store = SlackThreadStore(tmp_path)
     record_ticket(store, 1)
+    record_ticket(store, 3, session=1)
     routes = make_routes(store)
 
     routes.apply("event:E001", CHANNEL, thread_ts(1), USER, "bind " + DEST, DEST,
                  command_ts=TS_100)
     assert routes.destination(target(1).thread_id) == DEST
 
-    routes.apply("event:E002", CHANNEL, thread_ts(1), USER, "unbind", None,
+    routes.apply("event:E002", CHANNEL, thread_ts(3), USER, "unbind", None,
                  command_ts=TS_200)
     assert routes.destination(target(1).thread_id) is None
 
@@ -420,6 +427,7 @@ def test_apply_raises_on_unknown_schema_in_existing_route(tmp_path):
     """Unknown/malformed persisted schema must never be silently overwritten."""
     store = SlackThreadStore(tmp_path)
     record_ticket(store, 1)
+    record_ticket(store, 3, session=1)
     routes = make_routes(store)
     routes.apply("event:E001", CHANNEL, thread_ts(1), USER, "bind " + DEST, DEST,
                  command_ts=TS_100)
@@ -436,7 +444,7 @@ def test_apply_raises_on_unknown_schema_in_existing_route(tmp_path):
         journal.put(db, "session_routes", key, entry)
 
     with pytest.raises(ValueError, match="session_route_schema_invalid"):
-        routes.apply("event:E002", CHANNEL, thread_ts(1), USER, "unbind", None,
+        routes.apply("event:E002", CHANNEL, thread_ts(3), USER, "unbind", None,
                      command_ts=TS_200)
 
 
@@ -459,16 +467,18 @@ def test_newer_unbind_then_older_new_bind_remains_unbound(tmp_path):
     """Older previously-unseen bind cannot override a newer unbind."""
     store = SlackThreadStore(tmp_path)
     record_ticket(store, 1)
+    record_ticket(store, 3, session=1)
+    record_ticket(store, 4, session=1)
     routes = make_routes(store)
 
     routes.apply("event:E001", CHANNEL, thread_ts(1), USER, "bind " + DEST, DEST,
                  command_ts=TS_100)
-    routes.apply("event:E002", CHANNEL, thread_ts(1), USER, "unbind", None,
+    routes.apply("event:E002", CHANNEL, thread_ts(3), USER, "unbind", None,
                  command_ts=TS_200)
     assert routes.destination(target(1).thread_id) is None
 
     # Old bind event arrives late (never seen before, but ts < unbind ts)
-    r = routes.apply("event:E003", CHANNEL, thread_ts(1), USER, "bind " + DEST, DEST,
+    r = routes.apply("event:E003", CHANNEL, thread_ts(4), USER, "bind " + DEST, DEST,
                      command_ts=TS_050)
     assert r["status"] == "stale"
     assert r["ack_pending"] is False
@@ -481,6 +491,7 @@ def test_newer_bind_then_older_new_unbind_remains_bound(tmp_path):
     """Older previously-unseen unbind cannot override a newer bind."""
     store = SlackThreadStore(tmp_path)
     record_ticket(store, 1)
+    record_ticket(store, 3, session=1)
     routes = make_routes(store)
 
     routes.apply("event:E001", CHANNEL, thread_ts(1), USER, "bind " + DEST, DEST,
@@ -488,7 +499,7 @@ def test_newer_bind_then_older_new_unbind_remains_bound(tmp_path):
     assert routes.destination(target(1).thread_id) == DEST
 
     # Old unbind event arrives late (never seen, ts < bind ts)
-    r = routes.apply("event:E002", CHANNEL, thread_ts(1), USER, "unbind", None,
+    r = routes.apply("event:E002", CHANNEL, thread_ts(3), USER, "unbind", None,
                      command_ts=TS_050)
     assert r["status"] == "stale"
     assert r["ack_pending"] is False
@@ -499,12 +510,13 @@ def test_stale_equal_timestamp_different_event_fails_closed(tmp_path):
     """Equal timestamps with different events fail closed via stale."""
     store = SlackThreadStore(tmp_path)
     record_ticket(store, 1)
+    record_ticket(store, 3, session=1)
     routes = make_routes(store)
 
     routes.apply("event:E001", CHANNEL, thread_ts(1), USER, "bind " + DEST, DEST,
                  command_ts=TS_100)
 
-    r = routes.apply("event:E002", CHANNEL, thread_ts(1), USER, "unbind", None,
+    r = routes.apply("event:E002", CHANNEL, thread_ts(3), USER, "unbind", None,
                      command_ts=TS_100)
     assert r["status"] == "stale"
     assert routes.destination(target(1).thread_id) == DEST  # unchanged
@@ -514,17 +526,18 @@ def test_stale_repeat_never_acks_or_mutates(tmp_path):
     """A second arrival of a stale event also returns stale without mutation."""
     store = SlackThreadStore(tmp_path)
     record_ticket(store, 1)
+    record_ticket(store, 3, session=1)
     routes = make_routes(store)
 
     routes.apply("event:E001", CHANNEL, thread_ts(1), USER, "bind " + DEST, DEST,
                  command_ts=TS_200)
 
-    r1 = routes.apply("event:E002", CHANNEL, thread_ts(1), USER, "unbind", None,
+    r1 = routes.apply("event:E002", CHANNEL, thread_ts(3), USER, "unbind", None,
                       command_ts=TS_050)
     assert r1["status"] == "stale"
 
     # Second arrival of the same stale event: dedupe receipt already written
-    r2 = routes.apply("event:E002", CHANNEL, thread_ts(1), USER, "unbind", None,
+    r2 = routes.apply("event:E002", CHANNEL, thread_ts(3), USER, "unbind", None,
                       command_ts=TS_050)
     assert r2["status"] == "duplicate"
     assert r2["ack_pending"] is False  # stale receipt has ack_claimed=True
@@ -559,6 +572,7 @@ def test_apply_invalid_command_ts_raises(tmp_path):
 def test_corrupt_route_blocks_both_read_and_overwrite_without_ticket_change(tmp_path, patch):
     store = SlackThreadStore(tmp_path)
     record_ticket(store, 1)
+    record_ticket(store, 3, session=1)
     routes = make_routes(store)
     routes.apply("first", CHANNEL, thread_ts(1), USER, "bind #first", DEST,
                  command_ts=TS_100)
@@ -571,7 +585,7 @@ def test_corrupt_route_blocks_both_read_and_overwrite_without_ticket_change(tmp_
     with pytest.raises(ValueError):
         routes.destination(target(1).thread_id)
     with pytest.raises(ValueError):
-        routes.apply("second", CHANNEL, thread_ts(1), USER, "unbind", None,
+        routes.apply("second", CHANNEL, thread_ts(3), USER, "unbind", None,
                      command_ts=TS_200)
     with journal.transaction() as db:
         assert journal.get(db, "session_routes", key) == entry
@@ -581,10 +595,11 @@ def test_corrupt_route_blocks_both_read_and_overwrite_without_ticket_change(tmp_
 def test_numeric_timestamp_equality_cannot_reverse_unbind(tmp_path):
     store = SlackThreadStore(tmp_path)
     record_ticket(store, 1)
+    record_ticket(store, 3, session=1)
     routes = make_routes(store)
     routes.apply("new", CHANNEL, thread_ts(1), USER, "unbind", None,
                  command_ts="1789111601.1")
-    result = routes.apply("old", CHANNEL, thread_ts(1), USER, "bind #old", DEST,
+    result = routes.apply("old", CHANNEL, thread_ts(3), USER, "bind #old", DEST,
                           command_ts="1789111601.10")
     assert result["status"] == "stale"
     assert routes.destination(target(1).thread_id) is None
@@ -637,10 +652,11 @@ def test_claim_binding_hello_returns_none_for_absent(tmp_path):
 def test_claim_binding_hello_returns_none_for_unbind(tmp_path):
     store = SlackThreadStore(tmp_path)
     record_ticket(store, 1)
+    record_ticket(store, 3, session=1)
     routes = make_routes(store)
     routes.apply("event:E001", CHANNEL, thread_ts(1), USER, "bind " + DEST, DEST,
                  command_ts=TS_100)
-    routes.apply("event:E002", CHANNEL, thread_ts(1), USER, "unbind", None,
+    routes.apply("event:E002", CHANNEL, thread_ts(3), USER, "unbind", None,
                  command_ts=TS_200)
     # E002 is an unbind, no hello
     assert routes.claim_binding_hello("event:E002") is None
@@ -649,10 +665,11 @@ def test_claim_binding_hello_returns_none_for_unbind(tmp_path):
 def test_claim_binding_hello_returns_none_for_stale(tmp_path):
     store = SlackThreadStore(tmp_path)
     record_ticket(store, 1)
+    record_ticket(store, 3, session=1)
     routes = make_routes(store)
     routes.apply("event:E001", CHANNEL, thread_ts(1), USER, "bind " + DEST, DEST,
                  command_ts=TS_200)
-    r = routes.apply("event:E002", CHANNEL, thread_ts(1), USER, "bind " + DEST, DEST,
+    r = routes.apply("event:E002", CHANNEL, thread_ts(3), USER, "bind " + DEST, DEST,
                      command_ts=TS_050)
     assert r["status"] == "stale"
     assert routes.claim_binding_hello("event:E002") is None
@@ -662,11 +679,12 @@ def test_claim_binding_hello_returns_none_for_superseded(tmp_path):
     """A newer bind overwrites the route; the older command's hello is denied."""
     store = SlackThreadStore(tmp_path)
     record_ticket(store, 1)
+    record_ticket(store, 3, session=1)
     routes = make_routes(store)
     routes.apply("event:E001", CHANNEL, thread_ts(1), USER, "bind " + DEST, DEST,
                  command_ts=TS_100)
     # Supersede with a different destination
-    routes.apply("event:E002", CHANNEL, thread_ts(1), USER, "bind " + DEST2, DEST2,
+    routes.apply("event:E002", CHANNEL, thread_ts(3), USER, "bind " + DEST2, DEST2,
                  command_ts=TS_200)
     assert routes.claim_binding_hello("event:E001") is None
 

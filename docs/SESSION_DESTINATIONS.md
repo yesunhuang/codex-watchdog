@@ -4,7 +4,7 @@ Each Codex session uses the configured provider inbox until an authorized user
 binds that exact session to another destination. Other conversations in the same
 repository, including newly created ones, keep their existing destination.
 
-For the Slack MVP, reply to a known WatchDog notification:
+For the Slack MVP, reply to an active WatchDog notification:
 
 ```text
 bind #channel
@@ -27,8 +27,13 @@ These are WatchDog control commands. They never become Codex prompts. A successf
 command closes its source notification's wake ticket and sends a short confirmation
 in that Slack thread. A successful bind also posts a new, reply-enabled hello in
 the destination channel for that exact session, without waking Codex. It does not
-repost the original completion. A known closed
-notification may establish a binding without reopening its wake ticket.
+repost the original completion. Closed notifications cannot bind, unbind or wake
+Codex; they remain only for audit and deduplication.
+
+Each provider gives each exact Codex session up to four recent active reply
+tickets. A fifth notification retires only that session's oldest active ticket.
+Other sessions keep their tickets, including other conversations in the same
+repository. Slack, Feishu/Lark and OneBot have independent budgets.
 
 ## State and safety
 
@@ -50,29 +55,25 @@ A known exact channel-and-parent mapping is required for replies there. A channe
 name or repository name in arbitrary text grants no routing authority. Failed
 bound Slack delivery must not use the default-inbox webhook as a fallback.
 
-## Historical command polling
+## Active notification polling
 
-The integration keeps the existing polling transport and one reply page
-per tick. Four ticks serve the active ticket set; every fifth tick can inspect
-one closed parent for control commands only. Selection and historical cursors
-are indexed in SQLite rather than loading lifetime history into memory. Closed
-parents never regain plain-text wake authority. This avoids a competing socket
-listener and does not increase the normal reply-page request rate.
-When no closed parent exists, that tick continues active polling. Successful
-confirmation and destination hello are each attempted at most once; a timeout or
-crash can lose a confirmation
+The integration keeps the existing polling transport and one reply page per
+tick. Every tick serves the active ticket set; closed history is never polled.
+The SQLite active index separates polling from audit history. The next page
+rotates across active notifications belonging to the monitored sessions.
+
+At the normal ten-second cadence, three sessions with four active tickets each
+take about two minutes for a full rotation before pagination, API time or backoff.
+Closed history adds no polling delay. Successful confirmation and destination
+hello are each attempted at most once; a timeout or crash can lose a confirmation
 without undoing the saved binding. Repeating the same provider event neither
-changes the route nor sends another confirmation.
+changes the route nor sends another confirmation. An uncertain hello is not
+automatically resent; the saved binding still applies to later notifications.
 
-There is a latency tradeoff: with closed history present, a full rotation of four
-active tickets can take five ticks. A historical parent's command may wait for
-the closed-parent rotation and pagination; that delay grows with stored history.
-At the normal ten-second cadence, 100 closed parents can take about 83 minutes
-for one rotation, before pagination or backoff. Prefer a recent active
-notification when prompt configuration feedback matters.
-Provider rate limiting and backoff can add delay. This is not immediate command
-delivery. An uncertain hello is not automatically resent; the saved binding still
-applies to later notifications.
+Upgrade preserves existing active/closed state and saved routes. The previous
+database and historical cursor file are backed up before obsolete control cursor
+state is removed. Closed tickets are never reopened during migration; use a new
+notification if an older version already retired a useful reply surface.
 
 Slack lookup/access checks use
 [conversations.list](https://docs.slack.dev/reference/methods/conversations.list/)

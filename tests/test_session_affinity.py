@@ -42,10 +42,11 @@ def _target(n: int) -> RelayTarget:
     )
 
 
-def _record(store: SlackThreadStore, n: int, channel: str = DEFAULT_CHANNEL) -> str:
+def _record(store: SlackThreadStore, n: int, channel: str = DEFAULT_CHANNEL, *, session: int = None) -> str:
     fp = sha256_text("notice:" + str(n))
-    store.record_thread(channel, _ts(n), _target(n), fp)
-    return _target(n).thread_id
+    session = n if session is None else session
+    store.record_thread(channel, _ts(n), _target(session), fp)
+    return _target(session).thread_id
 
 
 def _make_event(channel: str, thread_ts: str, ts: str, text: str, user: str = USER) -> dict:
@@ -101,12 +102,13 @@ def test_relay_bind_returns_route_bound(tmp_path):
 def test_relay_unbind_returns_route_unbound(tmp_path):
     relay = _make_relay(tmp_path, route_api=_info_api(BOUND_CHANNEL))
     _record(relay.thread_store, 1)
+    _record(relay.thread_store, 3, session=1)
 
-    bind_ts = _ts(1) + "1"
+    bind_ts = _ts(100)
     relay.handle_message(_make_event(DEFAULT_CHANNEL, _ts(1), bind_ts, f"bind <#{BOUND_CHANNEL}|general>"))
 
-    unbind_ts = _ts(1) + "2"
-    result = relay.handle_message(_make_event(DEFAULT_CHANNEL, _ts(1), unbind_ts, "unbind"))
+    unbind_ts = _ts(300)
+    result = relay.handle_message(_make_event(DEFAULT_CHANNEL, _ts(3), unbind_ts, "unbind"))
 
     assert result.status == "route_unbound"
     assert result.duplicate is False
@@ -206,9 +208,10 @@ def test_relay_stale_bind_after_unbind_ignored(tmp_path):
     """
     relay = _make_relay(tmp_path, route_api=_info_api(BOUND_CHANNEL))
     _record(relay.thread_store, 1)
+    _record(relay.thread_store, 3, session=1)
 
-    unbind_ts = _ts(1) + "9"  # higher timestamp
-    bind_ts = _ts(1) + "1"    # lower timestamp
+    unbind_ts = _ts(200)  # higher timestamp
+    bind_ts = _ts(100)    # lower timestamp
 
     # Process newer unbind first
     unbind_event = _make_event(DEFAULT_CHANNEL, _ts(1), unbind_ts, "unbind")
@@ -216,7 +219,7 @@ def test_relay_stale_bind_after_unbind_ignored(tmp_path):
     assert r_unbind.status == "route_unbound"
 
     # Now process older bind: should be stale
-    bind_event = _make_event(DEFAULT_CHANNEL, _ts(1), bind_ts, f"bind <#{BOUND_CHANNEL}|general>")
+    bind_event = _make_event(DEFAULT_CHANNEL, _ts(3), bind_ts, f"bind <#{BOUND_CHANNEL}|general>")
     r_bind = relay.handle_message(bind_event)
     assert r_bind.status == "route_stale"
     assert r_bind.duplicate is True
@@ -323,12 +326,13 @@ def test_relay_unbind_only_removes_one(tmp_path):
 
     relay = _make_relay(tmp_path, route_api=route_api)
     _record(relay.thread_store, 1)
+    _record(relay.thread_store, 3, session=1)
     _record(relay.thread_store, 2)
 
-    relay.handle_message(_make_event(DEFAULT_CHANNEL, _ts(1), _ts(1) + "1", f"bind <#{BOUND_CHANNEL}|g>"))
+    relay.handle_message(_make_event(DEFAULT_CHANNEL, _ts(1), _ts(100), f"bind <#{BOUND_CHANNEL}|g>"))
     relay.handle_message(_make_event(DEFAULT_CHANNEL, _ts(2), _ts(2) + "1", f"bind <#{BOUND_CHANNEL2}|g>"))
 
-    relay.handle_message(_make_event(DEFAULT_CHANNEL, _ts(1), _ts(1) + "2", "unbind"))
+    relay.handle_message(_make_event(DEFAULT_CHANNEL, _ts(3), _ts(300), "unbind"))
 
     routes = SessionRoutes(relay.thread_store, provider="slack", scope=DEFAULT_CHANNEL)
     assert routes.destination(_target(1).thread_id) is None
@@ -569,309 +573,128 @@ def test_uncertain_route_ack_cannot_be_resent(tmp_path):
     assert len(attempts) == 2
 
 
-def test_poll_fifth_tick_keeps_active_polling_without_history(tmp_path):
-    from codex_watchdog.slack_poll import SlackReplyPoller, SlackPollingThreadStore
-    relay = _make_relay(tmp_path)
-    relay.thread_store = SlackPollingThreadStore(tmp_path)
-    _record(relay.thread_store, 1)
-    calls = []
-    def api(method, params):
-        calls.append(method)
-        return {"ok": True, "messages": []}
-    poller = SlackReplyPoller(relay, api=api)
-    for _ in range(5):
-        poller.poll_once()
-    assert calls == ["conversations.replies"] * 5
-
-
-def test_malformed_historical_cursor_fails_before_provider_access(tmp_path):
-    from codex_watchdog.slack_poll import SlackReplyPoller, SlackPollingThreadStore
-    relay = _make_relay(tmp_path)
-    relay.thread_store = SlackPollingThreadStore(tmp_path)
+@pytest.mark.parametrize("text", ["bind <#C99999999>", "unbind", "bind", "hello"])
+def test_closed_notification_is_inert_for_control_and_wake(tmp_path, text):
+    api = MagicMock(side_effect=AssertionError("Closed ticket must not access provider"))
+    relay = _make_relay(tmp_path, route_api=api)
     _record(relay.thread_store, 1)
     journal = relay.thread_store.journal
-    key = relay.thread_store.thread_key(DEFAULT_CHANNEL, _ts(1))
     with journal.transaction() as db:
-        journal.claim(db, key)
-        journal.put(db, "route_poll_cursors", key, {"schema_version": 1, "cursor": "NaN"})
+        journal.claim(db, relay.thread_store.thread_key(DEFAULT_CHANNEL, _ts(1)))
+    event = _make_event(DEFAULT_CHANNEL, _ts(1), "1789111700.000001", text)
+    result = relay.handle_message(event)
+    client = SimpleNamespace(chat_postMessage=MagicMock())
+    relay.acknowledge(event, result, client)
+    assert result.status in ("ignored_closed_ticket", "duplicate")
+    assert not api.called and not client.chat_postMessage.called
+    assert not relay.queue_dispatcher.dispatch.called
+    assert SessionRoutes(relay.thread_store, scope=DEFAULT_CHANNEL).destination(_target(1).thread_id) is None
+
+
+def test_every_poll_tick_uses_only_active_parents(tmp_path):
+    from codex_watchdog.slack_poll import SlackReplyPoller, SlackPollingThreadStore
+    relay = _make_relay(tmp_path)
+    relay.thread_store = SlackPollingThreadStore(tmp_path)
+    for n in range(1, 4):
+        _record(relay.thread_store, n)
+    journal = relay.thread_store.journal
+    with journal.transaction() as db:
+        journal.claim(db, relay.thread_store.thread_key(DEFAULT_CHANNEL, _ts(3)))
     calls = []
-    poller = SlackReplyPoller(relay, api=lambda *args: calls.append(args))
-    with pytest.raises(ValueError, match="cursor"):
-        poller._poll_closed_once()
-    assert calls == []
-
-
-# ── Poll: bounded SQL query – no full-table scan ──────────────────────────────
-
-def test_poll_closed_once_queries_one_row(tmp_path):
-    """_poll_closed_once must issue bounded SQL, not load all mappings."""
-    from codex_watchdog.slack_poll import SlackPollingThreadStore, SlackReplyPoller
-    from unittest.mock import MagicMock
-
-    store = SlackPollingThreadStore(tmp_path)
-    for n in range(1, 6):
-        fp = sha256_text("fp:" + str(n))
-        store.record_thread(DEFAULT_CHANNEL, _ts(n), _target(n), fp)
-    # Close all tickets
-    journal = store.journal
-    with journal.transaction() as db:
-        db.execute("UPDATE records SET active=0 WHERE kind='threads'")
-
-    api_calls: list = []
-    def mock_api(method, params):
-        api_calls.append(dict(method=method, params=dict(params)))
+    def api(method, params):
+        calls.append(params["ts"])
         return {"ok": True, "messages": []}
-
-    qd = MagicMock()
-    qd.codex_home = None
-    ssh = MagicMock()
-    ssh.supports_control = False
-    relay = SlackReplyRelay(tmp_path, bot_token=BOT_TOKEN, app_token=APP_TOKEN,
-                            channel_id=DEFAULT_CHANNEL, allowed_user_ids=(USER,),
-                            queue_dispatcher=qd, remote_ssh_adapter=ssh, thread_store=store,
-                            reply_mode="poll")
-    relay.thread_store = store
-    poller = SlackReplyPoller(relay, api=mock_api)
-
-    poller._poll_closed_once()
-    replies_calls = [c for c in api_calls if c["method"] == "conversations.replies"]
-    assert len(replies_calls) == 1  # exactly one page per closed-parent tick
-
-
-# ── Poll: active count and closed-parent rotation ────────────────────────────
-
-def test_poll_five_ticks_one_closed_poll(tmp_path):
-    """Every 5th poll_once call invokes _poll_closed_once; first 4 are active-only."""
-    from codex_watchdog.slack_poll import SlackPollingThreadStore, SlackReplyPoller
-    from unittest.mock import MagicMock, patch
-
-    store = SlackPollingThreadStore(tmp_path)
-    qd = MagicMock()
-    qd.codex_home = None
-    ssh = MagicMock()
-    ssh.supports_control = False
-    relay = SlackReplyRelay(tmp_path, bot_token=BOT_TOKEN, app_token=APP_TOKEN,
-                            channel_id=DEFAULT_CHANNEL, allowed_user_ids=(USER,),
-                            queue_dispatcher=qd, remote_ssh_adapter=ssh, thread_store=store,
-                            reply_mode="poll")
-    relay.thread_store = store
-
-    active_ticks = []
-    closed_ticks = []
-
-    def mock_api(method, params):
-        return {"ok": True, "messages": []}
-
-    poller = SlackReplyPoller(relay, api=mock_api)
-
-    original_poll_closed = poller._poll_closed_once
-    def track_closed():
-        closed_ticks.append(poller._tick_count)
-    poller._poll_closed_once = track_closed
-
-    for _ in range(5):
+    poller = SlackReplyPoller(relay, api=api)
+    for _ in range(10):
         poller.poll_once()
-
-    assert 5 in closed_ticks
-    assert len(closed_ticks) == 1
-
-
-# ── Poll: ordinary reply on closed parent never dispatches ───────────────────
-
-def test_poll_closed_parent_ordinary_text_not_dispatched(tmp_path):
-    """Ordinary text in a closed parent must not wake Codex."""
-    from codex_watchdog.slack_poll import SlackPollingThreadStore, SlackReplyPoller
-    from unittest.mock import MagicMock
-
-    store = SlackPollingThreadStore(tmp_path)
-    fp = sha256_text("fp:close1")
-    store.record_thread(DEFAULT_CHANNEL, _ts(1), _target(1), fp)
-    journal = store.journal
-    with journal.transaction() as db:
-        db.execute("UPDATE records SET active=0 WHERE kind='threads'")
-
-    dispatch_calls: list = []
-    qd = MagicMock()
-    qd.codex_home = None
-    qd.dispatch.side_effect = lambda *a, **kw: dispatch_calls.append(a) or SimpleNamespace(status="enqueued")
-    ssh = MagicMock()
-    ssh.supports_control = False
-
-    relay = SlackReplyRelay(tmp_path, bot_token=BOT_TOKEN, app_token=APP_TOKEN,
-                            channel_id=DEFAULT_CHANNEL, allowed_user_ids=(USER,),
-                            queue_dispatcher=qd, remote_ssh_adapter=ssh, thread_store=store,
-                            reply_mode="poll")
-    relay.thread_store = store
-
-    reply_ts = _ts(1) + "5"
-    def mock_api(method, params):
-        if method == "conversations.replies":
-            return {"ok": True, "messages": [
-                dict(ts=reply_ts, thread_ts=_ts(1), user=USER, text="hello codex"),
-            ]}
-        return {"ok": True, "ts": "1789999999.000001", "channel": DEFAULT_CHANNEL}
-
-    poller = SlackReplyPoller(relay, api=mock_api)
-    poller._poll_closed_once()
-    assert not dispatch_calls
+    assert len(calls) == 10 and set(calls) == {_ts(1), _ts(2)}
+    assert calls.count(_ts(1)) == calls.count(_ts(2)) == 5
+    assert not hasattr(poller, "_poll_closed_once")
 
 
-# ── Poll: historical bind is processed ───────────────────────────────────────
-
-def test_poll_closed_parent_bind_command_processed(tmp_path):
-    """A bind command in a closed parent's history is processed by the relay."""
-    from codex_watchdog.slack_poll import SlackPollingThreadStore, SlackReplyPoller
-    from unittest.mock import MagicMock
-
-    store = SlackPollingThreadStore(tmp_path)
-    fp = sha256_text("fp:close2")
-    store.record_thread(DEFAULT_CHANNEL, _ts(5), _target(5), fp)
-    journal = store.journal
-    with journal.transaction() as db:
-        db.execute("UPDATE records SET active=0 WHERE kind='threads'")
-
-    qd = MagicMock()
-    qd.codex_home = None
-    qd.dispatch.return_value = SimpleNamespace(status="enqueued")
-    ssh = MagicMock()
-    ssh.supports_control = False
-
-    relay = SlackReplyRelay(tmp_path, bot_token=BOT_TOKEN, app_token=APP_TOKEN,
-                            channel_id=DEFAULT_CHANNEL, allowed_user_ids=(USER,),
-                            queue_dispatcher=qd, remote_ssh_adapter=ssh, thread_store=store,
-                            reply_mode="poll", route_api=_info_api(BOUND_CHANNEL))
-    relay.thread_store = store
-
-    bind_ts = _ts(5) + "3"
-    def mock_api(method, params):
-        if method == "conversations.replies":
-            return {"ok": True, "messages": [
-                dict(type="message", ts=bind_ts, thread_ts=_ts(5), user=USER,
-                     text=f"bind <#{BOUND_CHANNEL}|g>"),
-            ]}
-        return {"ok": True, "ts": "1789999999.000001", "channel": DEFAULT_CHANNEL}
-
-    poller = SlackReplyPoller(relay, api=mock_api)
-    poller._poll_closed_once()
-
-    routes = SessionRoutes(store, provider="slack", scope=DEFAULT_CHANNEL)
-    assert routes.destination(_target(5).thread_id) == BOUND_CHANNEL
+def test_noisy_session_does_not_prevent_other_session_reply_after_restart(tmp_path):
+    from codex_watchdog.slack_poll import SlackReplyPoller, SlackPollingThreadStore
+    relay = _make_relay(tmp_path)
+    relay.thread_store = SlackPollingThreadStore(tmp_path)
+    for session in (1, 2, 3):
+        for n in range(session * 10, session * 10 + 4):
+            _record(relay.thread_store, n, session=session)
+    _record(relay.thread_store, 14, session=1)
+    relay.thread_store = SlackPollingThreadStore(tmp_path)  # Real journal reopen.
+    parents = {v["thread_ts"] for v in relay.thread_store.poll_mappings().values()}
+    assert len(parents) == 12 and _ts(10) not in parents and _ts(20) in parents
+    calls = []
+    def api(method, params):
+        if method == "chat.postMessage":
+            return {"ok": True, "channel": params["channel"], "ts": _ts(999)}
+        calls.append(params["ts"])
+        messages = ([] if params["ts"] != _ts(20) else [
+            dict(type="message", ts=_ts(100), thread_ts=_ts(20), user=USER, text="continue")])
+        return {"ok": True, "messages": messages}
+    poller = SlackReplyPoller(relay, api=api)
+    for _ in range(12):
+        poller.poll_once()
+    relay.queue_dispatcher.dispatch.assert_called_once()
+    call = relay.queue_dispatcher.dispatch.call_args
+    assert _target(2).thread_id in str(call)
+    event = _make_event(DEFAULT_CHANNEL, _ts(20), _ts(100), "continue")
+    assert relay.handle_message(event).duplicate is True
+    relay.queue_dispatcher.dispatch.assert_called_once()
+    assert _ts(10) not in calls
+    assert _ts(20) not in {v["thread_ts"] for v in relay.thread_store.poll_mappings().values()}
 
 
-# ── Poll: repeated command after restart is idempotent ────────────────────────
-
-def test_poll_repeated_bind_after_restart_idempotent(tmp_path):
-    """Re-processing a bind command after restart returns duplicate, not an error."""
-    from codex_watchdog.slack_poll import SlackPollingThreadStore, SlackReplyPoller
-    from unittest.mock import MagicMock
-
-    store = SlackPollingThreadStore(tmp_path)
-    fp = sha256_text("fp:restart1")
-    store.record_thread(DEFAULT_CHANNEL, _ts(7), _target(7), fp)
-    journal = store.journal
-    with journal.transaction() as db:
-        db.execute("UPDATE records SET active=0 WHERE kind='threads'")
-
-    qd = MagicMock()
-    qd.codex_home = None
-    qd.dispatch.return_value = SimpleNamespace(status="enqueued")
-    ssh = MagicMock()
-    ssh.supports_control = False
-
-    bind_ts = _ts(7) + "1"
-
-    def make_relay(store):
-        return SlackReplyRelay(
-            tmp_path, bot_token=BOT_TOKEN, app_token=APP_TOKEN,
-            channel_id=DEFAULT_CHANNEL, allowed_user_ids=(USER,),
-            queue_dispatcher=qd, remote_ssh_adapter=ssh, thread_store=store,
-            reply_mode="poll", route_api=_info_api(BOUND_CHANNEL))
-
-    def mock_api(method, params):
-        if method == "conversations.replies":
-            return {"ok": True, "messages": [
-                dict(type="message", ts=bind_ts, thread_ts=_ts(7), user=USER,
-                     text=f"bind <#{BOUND_CHANNEL}|g>"),
-            ]}
-        return {"ok": True, "ts": "1789999999.000001", "channel": DEFAULT_CHANNEL}
-
-    relay1 = make_relay(store)
-    relay1.thread_store = store
-    poller1 = SlackReplyPoller(relay1, api=mock_api)
-    poller1._poll_closed_once()
-
-    # Simulate restart by creating new store/relay pointing to same tmp_path
-    store2 = SlackPollingThreadStore(tmp_path)
-    relay2 = make_relay(store2)
-    relay2.thread_store = store2
-
-    # Erase cursor so it replays from the beginning
-    journal2 = store2.journal
-    with journal2.transaction() as db:
-        db.execute("DELETE FROM records WHERE kind='route_poll_cursors'")
-
-    poller2 = SlackReplyPoller(relay2, api=mock_api)
-    poller2._poll_closed_once()
-
-    routes = SessionRoutes(store2, provider="slack", scope=DEFAULT_CHANNEL)
-    assert routes.destination(_target(7).thread_id) == BOUND_CHANNEL
+def test_ticket_closed_during_destination_lookup_cannot_bind(tmp_path):
+    relay = _make_relay(tmp_path)
+    _record(relay.thread_store, 1)
+    def api(method, params):
+        journal = relay.thread_store.journal
+        with journal.transaction() as db:
+            assert journal.claim(db, relay.thread_store.thread_key(DEFAULT_CHANNEL, _ts(1)))
+        return _info_api(BOUND_CHANNEL)(method, params)
+    relay._route_api = api
+    event = _make_event(DEFAULT_CHANNEL, _ts(1), _ts(100), f"bind <#{BOUND_CHANNEL}>")
+    result = relay.handle_message(event)
+    assert result.status == "ignored_closed_ticket"
+    assert SessionRoutes(relay.thread_store, scope=DEFAULT_CHANNEL).destination(_target(1).thread_id) is None
+    relay.queue_dispatcher.dispatch.assert_not_called()
 
 
-# ── Poll: route cursor persists independently ─────────────────────────────────
-
-def test_poll_route_cursor_stored_in_sqlite_not_json(tmp_path):
-    """route_poll_cursors kind must be in SQLite, not in the JSON cursors file."""
-    from codex_watchdog.slack_poll import SlackPollingThreadStore, SlackReplyPoller
-    from unittest.mock import MagicMock
-
-    store = SlackPollingThreadStore(tmp_path)
-    fp = sha256_text("fp:cursor1")
-    store.record_thread(DEFAULT_CHANNEL, _ts(3), _target(3), fp)
-    journal = store.journal
-    with journal.transaction() as db:
-        db.execute("UPDATE records SET active=0 WHERE kind='threads'")
-
-    qd = MagicMock()
-    qd.codex_home = None
-    qd.dispatch.return_value = SimpleNamespace(status="enqueued")
-    ssh = MagicMock()
-    ssh.supports_control = False
-
-    relay = SlackReplyRelay(tmp_path, bot_token=BOT_TOKEN, app_token=APP_TOKEN,
-                            channel_id=DEFAULT_CHANNEL, allowed_user_ids=(USER,),
-                            queue_dispatcher=qd, remote_ssh_adapter=ssh, thread_store=store,
-                            reply_mode="poll", route_api=_info_api(BOUND_CHANNEL))
-    relay.thread_store = store
-
-    bind_ts = _ts(3) + "2"
-    def mock_api(method, params):
-        if method == "conversations.replies":
-            return {"ok": True, "messages": [
-                dict(ts=bind_ts, thread_ts=_ts(3), user=USER,
-                     text=f"bind <#{BOUND_CHANNEL}|g>"),
-            ]}
-        return {"ok": True, "ts": "1789999999.000001", "channel": DEFAULT_CHANNEL}
-
-    poller = SlackReplyPoller(relay, api=mock_api)
-    poller._poll_closed_once()
-
-    # The JSON cursors file must not contain per-parent reply cursors
-    state = json.loads(poller.path.read_text(encoding="utf-8"))
-    assert "route_poll_cursors" not in state
-    assert "threads" in state  # active-ticket cursors are still there
-
-    # The SQLite record must exist
-    with journal.transaction() as db:
-        count = db.execute(
-            "SELECT COUNT(*) FROM records WHERE kind='route_poll_cursors'"
-        ).fetchone()[0]
-    assert count >= 1
+@pytest.mark.parametrize("text", ["bind", f"bind <#{BOUND_CHANNEL2}>", "unbind"])
+def test_closed_route_receipt_collision_neither_acknowledges_nor_reapplies(tmp_path, text):
+    api = MagicMock(side_effect=_info_api(BOUND_CHANNEL))
+    relay = _make_relay(tmp_path, route_api=api)
+    _record(relay.thread_store, 1)
+    event = _make_event(DEFAULT_CHANNEL, _ts(1), _ts(100), f"bind <#{BOUND_CHANNEL}>")
+    assert relay.handle_message(event, event_id="E001").status == "route_bound"
+    calls = api.call_count
+    changed = dict(event, text=text)
+    result = relay.handle_message(changed, event_id="E001")
+    client = MagicMock()
+    relay.acknowledge(changed, result, client)
+    assert result.status == "rejected_state_or_collision"
+    assert api.call_count == calls
+    client.chat_postMessage.assert_not_called()
+    assert SessionRoutes(relay.thread_store, scope=DEFAULT_CHANNEL).destination(_target(1).thread_id) == BOUND_CHANNEL
+    relay.queue_dispatcher.dispatch.assert_not_called()
 
 
-# ── Wire-level default _get_route_api tests ───────────────────────────────────
-# These tests create the relay without an injected route_api so the default
-# slack_conversations_get path is exercised. urllib.request.urlopen is patched
-# at the module boundary in slack_route_commands.
+def test_obsolete_cursor_removed_with_exact_backup_and_active_state_preserved(tmp_path):
+    from codex_watchdog.slack_poll import SlackReplyPoller, SlackPollingThreadStore
+    relay = _make_relay(tmp_path)
+    relay.thread_store = SlackPollingThreadStore(tmp_path)
+    _record(relay.thread_store, 1)
+    poller = SlackReplyPoller(relay)
+    key = relay.thread_store.thread_key(DEFAULT_CHANNEL, _ts(1))
+    before = dict(schema_version=1, after=key, threads={key: "1789111700.000001"},
+                  closed_cursor="obsolete", future_setting={"keep": True})
+    poller.path.write_text(json.dumps(before), encoding="utf-8")
+    original = poller.path.read_bytes()
+    after = poller._read()
+    assert after == {k: v for k, v in before.items() if k != "closed_cursor"}
+    assert poller.path.with_name(poller.path.name + ".historical-v1-backup").read_bytes() == original
+    assert poller._read() == after
+
 
 def _wire_urlopen_ok(channel_id: str):
     """Return a fake urlopen that serves a successful conversations.info response."""
@@ -1147,16 +970,17 @@ def test_hello_not_sent_for_unbind(tmp_path):
     """route_unbound never triggers a destination hello."""
     relay = _make_relay(tmp_path, route_api=_info_api(BOUND_CHANNEL))
     _record(relay.thread_store, 1)
+    _record(relay.thread_store, 3, session=1)
     hello_ts = "1789600000.000004"
     msgs: list = []
     client = _hello_client(msgs, channel_ts=hello_ts)
 
-    bind_event = _make_event(DEFAULT_CHANNEL, _ts(1), _ts(1) + "1", f"bind <#{BOUND_CHANNEL}|g>")
+    bind_event = _make_event(DEFAULT_CHANNEL, _ts(1), _ts(100), f"bind <#{BOUND_CHANNEL}|g>")
     r1 = relay.handle_message(bind_event)
     relay.acknowledge(bind_event, r1, client)
     msgs.clear()
 
-    unbind_event = _make_event(DEFAULT_CHANNEL, _ts(1), _ts(1) + "2", "unbind")
+    unbind_event = _make_event(DEFAULT_CHANNEL, _ts(3), _ts(300), "unbind")
     r2 = relay.handle_message(unbind_event)
     relay.acknowledge(unbind_event, r2, client)
     assert r2.status == "route_unbound"
@@ -1169,18 +993,19 @@ def test_hello_not_sent_for_stale_command(tmp_path):
     """A stale command must never produce a destination hello."""
     relay = _make_relay(tmp_path, route_api=_info_api(BOUND_CHANNEL))
     _record(relay.thread_store, 1)
+    _record(relay.thread_store, 3, session=1)
     hello_ts = "1789600000.000005"
     msgs: list = []
     client = _hello_client(msgs, channel_ts=hello_ts)
 
     # Bind with higher ts
-    bind_event = _make_event(DEFAULT_CHANNEL, _ts(1), _ts(1) + "9", f"bind <#{BOUND_CHANNEL}|g>")
+    bind_event = _make_event(DEFAULT_CHANNEL, _ts(1), _ts(200), f"bind <#{BOUND_CHANNEL}|g>")
     r1 = relay.handle_message(bind_event)
     relay.acknowledge(bind_event, r1, client)
     msgs.clear()
 
     # Stale command (lower ts, never seen before)
-    stale_event = _make_event(DEFAULT_CHANNEL, _ts(1), _ts(1) + "1", f"bind <#{BOUND_CHANNEL}|g>")
+    stale_event = _make_event(DEFAULT_CHANNEL, _ts(3), _ts(100), f"bind <#{BOUND_CHANNEL}|g>")
     r_stale = relay.handle_message(stale_event)
     assert r_stale.status == "route_stale"
     relay.acknowledge(stale_event, r_stale, client)

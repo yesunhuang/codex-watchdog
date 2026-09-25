@@ -212,7 +212,7 @@ in the tested backend and is therefore not accepted for control replies. See
 [OneBot 11 / QQ](docs/ONEBOT_QQ.md) for setup, security boundaries, and exact
 acceptance limits.
 
-Reply `bind #channel` to a mapped Slack notification to route that exact session to another channel; `unbind` restores its default inbox. A successful bind posts a reply-enabled hello in the destination. See [session destinations](docs/SESSION_DESTINATIONS.md) for permissions and historical-message polling delays.
+Reply `bind #channel` to an active mapped Slack notification to route that exact session to another channel; `unbind` restores its default inbox. A successful bind posts a reply-enabled hello in the destination. See [session destinations](docs/SESSION_DESTINATIONS.md) for permissions and active-ticket polling. Each provider retains four active reply tickets per exact session; closed notifications are audit history only.
 
 ## Supported topologies
 

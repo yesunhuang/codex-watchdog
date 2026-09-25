@@ -1,9 +1,10 @@
 # Bounded one-shot replies
 
-Starting with v1.1.1, each reply-enabled notification grants one
-reply ticket. Slack, Feishu/Lark and QQ each retain at most **four active tickets
-per runtime**, across provider scopes/transports. Creating a fifth active ticket
-retires the oldest. Different tickets keep their exact Codex destinations.
+Each reply-enabled notification grants one reply ticket. Starting with the 2.0
+candidate, Slack, Feishu/Lark and QQ each retain at most **four active tickets per
+exact Codex session**, across that provider's scopes/transports within the runtime.
+Creating a fifth active ticket retires only the oldest ticket for that session.
+Other sessions keep their active reply surfaces. Provider budgets are independent.
 
 The first authorized, correlated plain-text reply claims its ticket durably before
 local queue admission or a remote ownership RPC. A second reply cannot wake Codex,
@@ -20,7 +21,8 @@ to the ticket journal; existing queue persistence remains unchanged.
 
 Slack polling requests one page for one active ticket per tick and removes closed
 parents from its cursor set. The 10-second cadence and HTTP429 `Retry-After`
-handling remain. With four active tickets the rotation is at most four ticks,
+handling remain. Each active ticket gets a turn in the rotation; three sessions
+with four active tickets each take twelve ticks,
 plus request/dispatch time and any backoff. Provider history visibility and Codex
 start time are separate from queue-admission latency. The app's API allowance can
 be shared by several machines, so this change does not increase request rates.
@@ -30,13 +32,23 @@ and [workspace/app rate limits](https://docs.slack.dev/apis/web-api/rate-limits/
 ## Persistence and migration
 
 Each provider uses a standard-library SQLite journal at
-`<runtime>/<provider>/reply-tickets.sqlite3` with `user_version=1`, rollback
+`<runtime>/<provider>/reply-tickets.sqlite3` with `user_version=2`, rollback
 journaling and full synchronization. A partial index holds only active tickets;
 indexed mapping/event/message/notification history preserves collision checks and
 send deduplication without scanning lifetime history during polling or admission.
 Provider scopes and Slack socket/poll namespaces remain separate routing domains.
+Closed notifications cannot wake, bind or unbind. They remain audit/deduplication
+history and never participate in normal polling.
 
-On first access, validate the old schema-1 JSON journal, atomically retain its exact
+Version-1 SQLite journals receive a no-clobber SQLite backup before migration.
+Migration preserves all active/closed states, routes, receipts and unrelated
+records; it removes only obsolete historical-control cursor records and adds
+session-scoped active indexes. The JSON marker records `active_scope=provider_session`
+and retains unknown fields. Its previous bytes and the obsolete Slack cursor file
+are backed up before modification. Migration is idempotent. Previously closed
+tickets are never reopened; a new notification creates a fresh reply surface.
+
+For older installations still using a schema-1 JSON journal, validate it and retain its exact
 bytes in `relay-state.json.v1-backup` (or the corresponding poll filename), then
 import its mappings and receipts in a transaction. **All legacy tickets are
 retired.** Old Lark/QQ reply receipts do not identify the parent ticket, and old
