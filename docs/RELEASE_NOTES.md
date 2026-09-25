@@ -1,6 +1,6 @@
-# Codex WatchDog 2.0.0-rc.1
+# Codex WatchDog 2.0.0
 
-This prerelease corrects reply-ticket retention: every exact Codex session keeps
+This release corrects reply-ticket retention: every exact Codex session keeps
 up to four active tickets per provider. A busy session's fifth notification retires
 only its own oldest ticket. Slack, Feishu/Lark and OneBot budgets remain separate.
 
@@ -14,10 +14,16 @@ The SQLite journal migrates to schema 2 with a backup; obsolete historical curso
 are removed without reopening closed tickets. Older binaries cannot read the new
 journal. Do not restore old ticket backups after admitting new replies.
 
-Windows upgrade and live reply checks passed before expanding this candidate to
-the remote fleet. Native package gates cover Windows x64, Linux x64/ARM64 and the
-macOS ARM64 preview. Fresh human bind acceptance and remote production testing
-remain candidate acceptance work; this is not the stable 2.0.0 release.
+The release candidate passed user-confirmed production testing across Windows,
+Linux and macOS, including reply and binding tests. This stable release retains
+the tested application code. All four packages are rebuilt from one revision:
+Windows x64, Linux x64, Linux ARM64 and macOS ARM64 preview. The macOS package
+retains its preview support designation.
+
+Existing users can upgrade in place without re-entering compatible messaging
+configuration. Native gates verify fresh startup and the immediately previous
+public Windows release upgrade, the embedded Windows icon, provider integrations,
+Linux compatibility and package privacy before publication.
 
 Slack polls one active parent per ten-second tick. With three sessions holding
 four tickets each, a full rotation takes about two minutes plus request time,

@@ -1,7 +1,7 @@
 # Bounded one-shot replies
 
-Each reply-enabled notification grants one reply ticket. Starting with the 2.0
-candidate, Slack, Feishu/Lark and QQ each retain at most **four active tickets per
+Each reply-enabled notification grants one reply ticket. Starting with version
+2.0, Slack, Feishu/Lark and QQ each retain at most **four active tickets per
 exact Codex session**, across that provider's scopes/transports within the runtime.
 Creating a fifth active ticket retires only the oldest ticket for that session.
 Other sessions keep their active reply surfaces. Provider budgets are independent.
