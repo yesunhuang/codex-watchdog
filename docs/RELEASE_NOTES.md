@@ -1,32 +1,29 @@
-# Codex WatchDog 2.0.0
+# Codex WatchDog 2.1.0
 
-This release corrects reply-ticket retention: every exact Codex session keeps
-up to four active tickets per provider. A busy session's fifth notification retires
-only its own oldest ticket. Slack, Feishu/Lark and OneBot budgets remain separate.
+Feishu/Lark and OneBot now support exact-session destination binding. Reply `bind`
+to an active notification, then post the returned five-minute code as a new
+message in the destination bot conversation using the same authorized account.
+WatchDog saves the route and sends one reply-enabled hello. `unbind` returns that
+provider/session to its default. Other sessions and providers remain independent.
+Slack's existing `bind #channel` flow is unchanged.
 
-Slack bind/unbind now require an active mapped notification. Closed notifications
-are retained only for audit and deduplication; they cannot wake or change routing.
-The historical control polling lane is removed. Successful binding still posts a
-new reply-enabled hello in the destination.
+Feishu/Lark discovers codes through bounded authenticated group-list/history
+requests only while a challenge is pending. Group-list permission such as
+`im:chat:read` is required in addition to existing messaging access. An existing
+app can grant it without repeating WatchDog pairing or changing credentials.
+Polling can discover bot groups and the configured default conversation, not
+arbitrary new direct chats. QQ uses the existing authenticated OneBot event stream.
 
-Upgrade reuses saved messaging settings, credentials, routes and ticket states.
-The SQLite journal migrates to schema 2 with a backup; obsolete historical cursors
-are removed without reopening closed tickets. Older binaries cannot read the new
-journal. Do not restore old ticket backups after admitting new replies.
+Routes, tickets and settings survive upgrades. There is no new routing database
+or credential migration. Binding controls never become Codex prompts. Wrong-user,
+expired, modified, ambiguous and replayed confirmations cannot redirect a session.
+Source identity and one-shot effect receipts remain enforced. Bound sends require
+provider-confirmed destination identity; uncertain sends are not blindly retried.
+OneBot backends lacking exact destination evidence in `get_msg` fail closed.
 
-The release candidate passed user-confirmed production testing across Windows,
-Linux and macOS, including reply and binding tests. Final release checks caught
-an equal-timestamp edge case: retirement now uses persisted insertion order to
-break timestamp ties, preserving the oldest-first rule across restarts and
-provider scopes. All four packages are rebuilt from one revision:
-Windows x64, Linux x64, Linux ARM64 and macOS ARM64 preview. The macOS package
-retains its preview support designation.
-
-Existing users can upgrade in place without re-entering compatible messaging
-configuration. Native gates verify fresh startup and the immediately previous
-public Windows release upgrade, the embedded Windows icon, provider integrations,
-Linux compatibility and package privacy before publication.
-
-Slack polls one active parent per ten-second tick. With three sessions holding
-four tickets each, a full rotation takes about two minutes plus request time,
-pagination and backoff. Closed audit history no longer adds polling work.
+The Windows candidate passed a human Feishu binding, destination-hello and
+same-session reply test. QQ/OneBot binding has automated coverage only; human QQ
+acceptance was explicitly excluded. Native package and source gates cover Windows
+x64, Linux x64/ARM64 and macOS ARM64 preview from one revision. Windows upgrade
+acceptance uses the immediately previous public 2.0.0 package and verifies that
+saved settings and runtime are reused. The macOS package remains a preview.

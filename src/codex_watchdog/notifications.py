@@ -932,15 +932,24 @@ class EnvironmentNotifier:
         if target is not None:
             text += "\n\nReply to this message to send text to this exact existing Codex thread."
         fingerprint = event.event_fingerprint()
+        bound_destination = None
+        if event.relay_target is not None:
+            from .session_routes import SessionRoutes
+            routes = SessionRoutes(self.lark_thread_store, provider="lark", scope=self.config.lark.scope)
+            bound_destination = routes.destination(event.relay_target.thread_id)
+        resolved_destination = bound_destination or self.config.lark.chat_id
         payload_digest = sha256_text(json.dumps(
-            [text, self.config.lark.chat_id, target.to_dict() if target else None],
+            [text, resolved_destination, target.to_dict() if target else None],
             ensure_ascii=False, sort_keys=True, separators=(",", ":")))
         store = self.lark_thread_store
         if store.prepare_notification(fingerprint, payload_digest) is not None:
             return
         api = self.lark_api or LarkApi(self.config.lark, self.config.timeout_seconds)
-        result = api.send(text, fingerprint)
-        if result.get("chat_id") != self.config.lark.chat_id:
+        if bound_destination is not None:
+            result = api.send(text, fingerprint, destination=bound_destination)
+        else:
+            result = api.send(text, fingerprint)
+        if result.get("chat_id") != resolved_destination:
             raise RuntimeError("lark_response_destination_mismatch")
         store.finish_notification(fingerprint, result["chat_id"], result["message_id"], target)
 
@@ -961,15 +970,24 @@ class EnvironmentNotifier:
         if target is not None:
             text += "\n\nQuote/reply to this message to send text to this exact existing Codex thread."
         fingerprint = event.event_fingerprint()
+        bound_destination = None
+        if event.relay_target is not None:
+            from .session_routes import SessionRoutes
+            routes = SessionRoutes(self.onebot_thread_store, provider="onebot", scope=config.scope)
+            bound_destination = routes.destination(event.relay_target.thread_id)
+        resolved_destination = bound_destination or config.destination
         payload_digest = sha256_text(json.dumps(
-            [text, config.destination, target.to_dict() if target else None],
+            [text, resolved_destination, target.to_dict() if target else None],
             ensure_ascii=False, sort_keys=True, separators=(",", ":")))
         store = self.onebot_thread_store
         if store.prepare_notification(fingerprint, payload_digest) is not None:
             return
         api = self.onebot_api or OneBotApi(config, self.config.timeout_seconds)
-        result = api.send(text, fingerprint)
-        if result.get("chat_id") != config.destination:
+        if bound_destination is not None:
+            result = api.send(text, fingerprint, destination=bound_destination)
+        else:
+            result = api.send(text, fingerprint)
+        if result.get("chat_id") != resolved_destination:
             raise RuntimeError("onebot_response_destination_mismatch")
         store.finish_notification(fingerprint, result["chat_id"], result["message_id"], target)
 

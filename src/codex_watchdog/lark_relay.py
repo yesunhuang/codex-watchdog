@@ -2,6 +2,7 @@
 import json
 from pathlib import Path
 import re
+import time
 from types import SimpleNamespace
 
 from .lark_mapping import LarkThreadStore
@@ -15,7 +16,8 @@ class LarkReplyRelay(ExactThreadRelay):
     reply_source = "lark_reply"
 
     def __init__(self, runtime, config, *, queue_dispatcher, remote_ssh_adapter,
-                 timeout=10.0, thread_store=None, api=None, connection_factory=LarkConnection):
+                 timeout=10.0, thread_store=None, api=None, connection_factory=LarkConnection,
+                 clock=time.time):
         if not config.relay_configured:
             raise ValueError("Lark relay requires a configured bot, chat and user allowlist")
         self.runtime = Path(runtime)
@@ -29,6 +31,12 @@ class LarkReplyRelay(ExactThreadRelay):
         self._connection = None
         self._listener_lock = None
         self._poller = None
+        from .destination_binding import DestinationBinding
+        self.binding = DestinationBinding(self, "lark", self._send_control, clock=clock)
+
+    def _send_control(self, text, operation_id, destination, *, reply_to=None):
+        api = self.api or LarkApi(self.config, self.timeout)
+        return api.send(text, operation_id, reply_to=reply_to, destination=destination)
 
     def start(self):
         if self._connection is not None or self._poller is not None:
@@ -63,15 +71,20 @@ class LarkReplyRelay(ExactThreadRelay):
         # This entry point is registered only on the SDK's authenticated socket.
         result = self.handle_event(payload)
         if result.status == "queued":
-            self.acknowledge(payload["event"]["message"].get("message_id"), result)
+            message = payload["event"]["message"]
+            self.acknowledge(message.get("message_id"), result, message.get("chat_id"))
 
-    def acknowledge(self, message_id, result):
+    def acknowledge(self, message_id, result, chat_id=None):
         if result.status != "queued":
             return
         def send_ack(_event):
             api = self.api or LarkApi(self.config, self.timeout)
+            # Replies can now originate in a mapped bound chat. The original
+            # source message is the immutable reply address; carry its chat too.
+            destination = chat_id
+            kwargs = {} if destination is None or destination == self.config.chat_id else {"destination": destination}
             api.send("Queued for the exact existing Codex thread.", "ack:" + result.instruction_id,
-                     reply_to=message_id)
+                     reply_to=message_id, **kwargs)
             return SimpleNamespace(to_dict=lambda: {"status": "sent", "channel": "lark"})
         try:
             if result.control is None:
@@ -105,7 +118,7 @@ class LarkReplyRelay(ExactThreadRelay):
                 or sender_ids.get("open_id") not in self.config.allowed_user_ids):
             return ReplyResult("ignored_unauthorized")
         chat_id, message_id = message.get("chat_id"), message.get("message_id")
-        if chat_id != self.config.chat_id:
+        if not valid_id(chat_id, "oc"):
             return ReplyResult("ignored_chat")
         if not valid_id(message_id, "om"):
             return ReplyResult("ignored_message_identity")
@@ -118,6 +131,23 @@ class LarkReplyRelay(ExactThreadRelay):
         text = body.get("text") if isinstance(body, dict) else None
         if not isinstance(text, str) or not text.strip() or len(text) > MAX_PROMPT_CHARS:
             return ReplyResult("ignored_empty_or_oversize")
+        from .destination_binding import binding_control
+        operation = binding_control(text)
+        if operation is not None:
+            if message.get("edited") or message.get("deleted"):
+                return ReplyResult("rejected_route_command")
+            try:
+                raw_created = message.get("create_time", header.get("create_time"))
+                if not isinstance(raw_created, (str, int)) or isinstance(raw_created, bool):
+                    raise ValueError()
+                created_at = int(raw_created) / 1000
+            except (ValueError, TypeError):
+                return ReplyResult("rejected_route_command")
+            if operation == "challenge":
+                if message.get("root_id") or message.get("parent_id") or message.get("mentions"):
+                    return ReplyResult("rejected_route_challenge")
+                return self.binding.confirm(text, sender_ids["open_id"], chat_id,
+                                            message_id=message_id, created_at=created_at)
         addresses = [message.get(key) for key in ("root_id", "parent_id") if message.get(key)]
         if (not addresses or any(not valid_id(address, "om") for address in addresses)
                 or message_id in addresses):
@@ -126,7 +156,7 @@ class LarkReplyRelay(ExactThreadRelay):
             mappings = [self.thread_store.lookup_thread(chat_id, address) for address in set(addresses)]
             mappings = [mapping for mapping in mappings if mapping is not None]
             if not mappings:
-                return ReplyResult("ignored_unknown_thread")
+                return ReplyResult("ignored_unknown_thread" if chat_id == self.config.chat_id else "ignored_chat")
             if len({mapping.target for mapping in mappings}) != 1:
                 return ReplyResult("ignored_ambiguous_thread")
             mapping = mappings[0]
@@ -136,6 +166,10 @@ class LarkReplyRelay(ExactThreadRelay):
                         "thread_id": mapping.target.thread_id}
             fingerprint = sha256_text(json.dumps(identity, sort_keys=True, separators=(",", ":")))
             event_key = "lark:" + self.config.scope + ":" + event_id
+            if operation is not None:
+                return self.binding.command(operation, event_key=event_key, chat_id=chat_id,
+                    parent_id=mapping.message_id, user_id=sender_ids["open_id"], text=text,
+                    message_id=message_id, created_at=created_at)
             message_key = chat_id + "\0" + message_id
             instruction_id = "lark:" + sha256_text(self.config.scope + "\0" + message_key)[:40]
             claimed, previous = self.thread_store.claim_reply(

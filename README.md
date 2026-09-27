@@ -214,6 +214,8 @@ acceptance limits.
 
 Reply `bind #channel` to an active mapped Slack notification to route that exact session to another channel; `unbind` restores its default inbox. A successful bind posts a reply-enabled hello in the destination. See [session destinations](docs/SESSION_DESTINATIONS.md) for permissions and active-ticket polling. Each provider retains four active reply tickets per exact session; closed notifications are audit history only.
 
+Feishu/Lark and OneBot use a confirmation code: reply `bind` to an active session notification, then post the returned code as a new message in the destination group using the same account. WatchDog sends a reply-enabled hello there; `unbind` restores the default. See [Feishu/Lark and QQ binding](docs/SESSION_BINDING.md) for permissions and limits.
+
 ## Supported topologies
 
 | Platform | Recommended workflow | Status and limits |

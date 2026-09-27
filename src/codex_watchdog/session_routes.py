@@ -1,4 +1,4 @@
-"""Runtime-local exact Codex session destination bindings for Slack.
+"""Runtime-local exact Codex session destinations for Slack, Lark and OneBot.
 
 Routes are scoped to (provider, scope) so two relay configurations never share
 route state.  All mutations happen in a single FileLock-protected SQLite
@@ -12,7 +12,9 @@ import uuid
 from decimal import Decimal
 from typing import Any, Optional
 
+from .lark_transport import valid_id as _valid_lark_id
 from .models import sha256_text, utc_now
+from .onebot_transport import identifier as _onebot_identifier
 from .relay import RelayTarget
 from .slack_mapping import valid_slack_channel_id, valid_slack_timestamp, valid_slack_user_id
 
@@ -35,6 +37,30 @@ def _valid_slack_ts(value: Any) -> bool:
     return valid_slack_timestamp(value)
 
 
+def _valid_destination_for_provider(provider: str, value: Any) -> bool:
+    """A route destination is either None (default) or a canonical provider address."""
+    if value is None:
+        return True
+    if not isinstance(value, str):
+        return False
+    if provider == "slack":
+        return valid_slack_channel_id(value)
+    if provider == "lark":
+        return _valid_lark_id(value, "oc")
+    if provider == "onebot":
+        parts = value.split(":")
+        return (len(parts) == 2 and parts[0] in ("private", "group")
+                and _onebot_identifier(parts[1]) == parts[1])
+    return False
+
+
+def _valid_last_command_ts(provider: str, value: Any) -> bool:
+    """Slack uses its fractional-second timestamp; other providers use integer ms."""
+    if provider == "slack":
+        return _valid_slack_ts(value)
+    return isinstance(value, str) and re.fullmatch(r"[0-9]+", value) is not None
+
+
 class SessionRoutes:
     """Exact Codex-session destination bindings backed by an existing ReplyTickets journal."""
 
@@ -45,6 +71,8 @@ class SessionRoutes:
         if not isinstance(scope, str) or not scope or "\0" in scope:
             raise ValueError("session_routes_scope_invalid")
         if provider == "slack" and not valid_slack_channel_id(scope):
+            raise ValueError("session_routes_scope_invalid")
+        if provider in ("lark", "onebot") and re.fullmatch(r"[0-9a-f]{64}", scope) is None:
             raise ValueError("session_routes_scope_invalid")
         self.thread_store = thread_store
         self.provider = provider
@@ -69,10 +97,9 @@ class SessionRoutes:
         if (entry.get("provider") != self.provider or entry.get("scope") != self.scope
                 or entry.get("thread_id") != canonical):
             raise ValueError("session_route_identity_mismatch")
-        if ("destination" not in entry or (entry["destination"] is not None
-                and not valid_slack_channel_id(entry["destination"]))):
+        if "destination" not in entry or not _valid_destination_for_provider(self.provider, entry["destination"]):
             raise ValueError("session_route_destination_invalid")
-        if (not _valid_slack_ts(entry.get("last_command_ts"))
+        if (not _valid_last_command_ts(self.provider, entry.get("last_command_ts"))
                 or not isinstance(entry.get("created_at"), str) or not entry["created_at"]):
             raise ValueError("session_route_state_invalid")
 

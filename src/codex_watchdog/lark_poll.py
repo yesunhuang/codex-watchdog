@@ -7,6 +7,7 @@ does not consume that event and reuses the existing message-id admission fence.
 import json
 import threading
 import time
+from datetime import datetime
 
 from .lark_transport import LarkApi, LarkTransportError, valid_id
 from .models import sha256_text, utc_now
@@ -27,19 +28,24 @@ class LarkReplyPoller:
         self.health_path = base / ("poll-health-" + self.chat_hash + ".json")
         self.stop = threading.Event()
         self.thread = None
+        self._chat_offset = 0
+        self._binding_discovery = None
 
-    def _read(self):
-        if not self.path.exists():
-            state = dict(schema_version=1, scope=self.relay.config.scope, chat_sha256=self.chat_hash,
-                         not_before_ms=self.started_ms, after=self.started_ms // 1000,
+    def _read(self, chat_id=None, baseline_ms=None):
+        chat_hash = self.chat_hash if chat_id is None else sha256_text(chat_id)
+        path = self.path.with_name("poll-cursor-" + chat_hash + ".json")
+        baseline = self.started_ms if baseline_ms is None else baseline_ms
+        if not path.exists():
+            state = dict(schema_version=1, scope=self.relay.config.scope, chat_sha256=chat_hash,
+                         not_before_ms=baseline, after=baseline // 1000,
                          window_end=None, page_token=None)
             # A first switch from socket mode does not replay historical commands.
             # Subsequent restarts resume the retained cursor, including downtime.
-            InstructionStore._atomic_json(self.path, state)
+            InstructionStore._atomic_json(path, state)
             return state
-        state = json.loads(self.path.read_text(encoding="utf-8"))
+        state = json.loads(path.read_text(encoding="utf-8"))
         if (not isinstance(state, dict) or state.get("schema_version") != 1 or state.get("scope") != self.relay.config.scope
-                or state.get("chat_sha256") != self.chat_hash
+                or state.get("chat_sha256") != chat_hash
                 or any(type(state.get(k)) is not int or state[k] < 0 for k in ("not_before_ms", "after"))
                 or (state.get("window_end") is not None and
                     (type(state["window_end"]) is not int or state["window_end"] < state["after"]))
@@ -54,8 +60,42 @@ class LarkReplyPoller:
             dict(schema_version=1, checked_at=utc_now(), status=status, device_label=self.device_label, **fields))
 
     def poll_once(self):
-        """One page per tick; the relay owns the runtime's listener lock."""
-        state = self._read()
+        """Default page plus one active mapped chat; discovery only while binding."""
+        results = self._poll_chat(self.relay.config.chat_id)
+        if any(r.get("status") == "deferred" for r in results):
+            return results
+        journal = self.relay.thread_store.journal
+        with journal.transaction() as db:
+            mappings = journal.mappings(db, active=True)
+        chats = {}
+        for mapping in mappings:
+            chat = mapping["chat_id"]
+            if chat == self.relay.config.chat_id:
+                continue
+            if not valid_id(chat, "oc"):
+                raise LarkTransportError("lark_mapping_chat_invalid")
+            # The durable ticket predates any accepted reply; keep downtime
+            # replies when this chat first appears after a monitor restart.
+            try:
+                timestamp = datetime.fromisoformat(mapping["created_at"].replace("Z", "+00:00"))
+                if timestamp.tzinfo is None:
+                    raise ValueError()
+                baseline = int(timestamp.timestamp() * 1000)
+            except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
+                raise LarkTransportError("lark_mapping_time_invalid") from None
+            chats[chat] = min(chats.get(chat, baseline), baseline)
+        if chats:
+            chat = sorted(chats)[self._chat_offset % len(chats)]
+            self._chat_offset += 1
+            results.extend(self._poll_chat(chat, chats[chat]))
+        if self._binding_discovery is None:
+            from .lark_binding import LarkBindingDiscovery
+            self._binding_discovery = LarkBindingDiscovery(self.relay, self.api, clock=self.clock)
+        results.extend(self._binding_discovery.poll_once())
+        return results
+
+    def _poll_chat(self, chat_id, baseline_ms=None):
+        state = self._read(chat_id, baseline_ms)
         end = state["window_end"]
         if end is None:
             end = min(int(self.clock()) - 2, state["after"] + 300)
@@ -64,7 +104,8 @@ class LarkReplyPoller:
             return []
         # A short overlap catches messages becoming visible near a page boundary.
         start = max(state["not_before_ms"] // 1000, state["after"] - 5)
-        page = self.api.history(start, end, state["page_token"])
+        kwargs = {} if chat_id == self.relay.config.chat_id else {"destination": chat_id}
+        page = self.api.history(start, end, state["page_token"], **kwargs)
         items = page.get("items") if isinstance(page, dict) else None
         more = page.get("has_more") if isinstance(page, dict) else None
         token = page.get("page_token") if isinstance(page, dict) else None
@@ -74,7 +115,7 @@ class LarkReplyPoller:
             raise LarkTransportError("lark_history_page_invalid")
         for message in items:
             if (not isinstance(message, dict) or not valid_id(message.get("message_id"), "om")
-                    or message.get("chat_id") != self.relay.config.chat_id
+                    or message.get("chat_id") != chat_id
                     or not str(message.get("create_time", "")).isdigit()
                     or not start * 1000 <= int(message["create_time"]) < (end + 1) * 1000
                     or type(message.get("deleted")) is not bool
@@ -88,6 +129,10 @@ class LarkReplyPoller:
             sender = message["sender"]
             if sender.get("id_type") != "open_id":
                 continue
+            if not message.get("root_id") and not message.get("parent_id"):
+                # Top-level confirmation is handled by the bounded complete
+                # discovery scan, which detects competing destinations first.
+                continue
             # This envelope is an internal adapter from the authenticated SDK
             # history response, not a fabricated inbound provider event. The
             # shared relay validates sender/chat/root/parent and existing owner.
@@ -97,18 +142,21 @@ class LarkReplyPoller:
                 "sender": {"sender_type": sender.get("sender_type"), "sender_id": {"open_id": sender.get("id")}},
                 "message": {"message_id": message["message_id"], "chat_id": message["chat_id"],
                     "message_type": message.get("msg_type"), "content": message["body"].get("content"),
-                    "root_id": message.get("root_id"), "parent_id": message.get("parent_id")}}}
+                    "root_id": message.get("root_id"), "parent_id": message.get("parent_id"),
+                    "create_time": message.get("create_time"), "edited": message.get("edited"),
+                    "deleted": message.get("deleted"), "mentions": message.get("mentions")}}}
             result = self.relay.handle_event(payload)
             results.append(result.to_dict())
             if result.status == "deferred":
                 self._health("deferred", results=results)
                 return results  # Do not advance an unadmitted reply past the cursor.
-            self.relay.acknowledge(message["message_id"], result)
+            self.relay.acknowledge(message["message_id"], result, chat_id)
         if more:
             state.update(window_end=end, page_token=token)
         else:
             state.update(after=end, window_end=None, page_token=None)
-        InstructionStore._atomic_json(self.path, state)
+        path = self.path.with_name("poll-cursor-" + sha256_text(chat_id) + ".json")
+        InstructionStore._atomic_json(path, state)
         self._health("polling", results=results)
         return results
 

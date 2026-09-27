@@ -158,7 +158,7 @@ try {
     }
     $packageDocs = Join-Path $packageDirectory "docs"
     New-Item -ItemType Directory -Path $packageDocs -Force | Out-Null
-    foreach ($name in @("PLATFORM_SUPPORT.md", "AUTOMATIC_REMOTE_HANDOFF.md", "FEISHU_LARK.md", "MESSAGING_SETUP.md", "SETUP.md", "ONEBOT_QQ.md", "ONEBOT_REUSE.md")) {
+    foreach ($name in @("PLATFORM_SUPPORT.md", "AUTOMATIC_REMOTE_HANDOFF.md", "FEISHU_LARK.md", "MESSAGING_SETUP.md", "SETUP.md", "ONEBOT_QQ.md", "ONEBOT_REUSE.md", "SESSION_BINDING.md")) {
         Copy-Item -LiteralPath (Join-Path $repoRoot "docs\$name") -Destination $packageDocs
     }
     $packageImages = Join-Path $packageDirectory "images"

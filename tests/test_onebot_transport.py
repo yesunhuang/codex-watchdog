@@ -101,6 +101,126 @@ def test_backend_identity_mismatch_prevents_send():
     asyncio.run(exercise())
 
 
+def test_bound_destination_send_confirmed_by_get_msg_and_default_unchanged():
+    async def exercise():
+        calls = []
+        async def backend(ws):
+            async for raw in ws:
+                request = json.loads(raw)
+                calls.append(request["action"])
+                if request["action"] == "get_login_info":
+                    await response(ws, request, {"user_id": 12345})
+                elif request["action"] == "send_msg":
+                    await response(ws, request, {"message_id": 555})
+                elif request["action"] == "get_msg":
+                    assert request["params"] == {"message_id": 555}
+                    await response(ws, request, {"message_id": 555, "message_type": "group",
+                        "group_id": 11111, "sender": {"user_id": 12345}})
+        async with serve(backend, "127.0.0.1", 0) as server:
+            cfg = config("ws://127.0.0.1:" + str(server.sockets[0].getsockname()[1]))
+            result = await asyncio.to_thread(OneBotApi(cfg).send, "bound text", "op-bound",
+                                             destination="group:11111")
+            assert result == {"chat_id": "group:11111", "message_id": "555"}
+            assert calls == ["get_login_info", "send_msg", "get_msg"]
+        calls.clear()
+        async def default_backend(ws):
+            async for raw in ws:
+                request = json.loads(raw)
+                calls.append(request["action"])
+                await response(ws, request, {"user_id": 12345} if request["action"] == "get_login_info"
+                              else {"message_id": 556})
+        async with serve(default_backend, "127.0.0.1", 0) as server:
+            cfg = config("ws://127.0.0.1:" + str(server.sockets[0].getsockname()[1]))
+            result = await asyncio.to_thread(OneBotApi(cfg).send, "default text", "op-default")
+            assert result == {"chat_id": "group:67890", "message_id": "556"}
+            assert calls == ["get_login_info", "send_msg"]  # no get_msg for the unbound default path
+    asyncio.run(exercise())
+
+
+def test_bound_destination_invalid_format_rejected_before_any_network():
+    async def exercise():
+        async def backend(ws):
+            async for raw in ws:
+                pass
+        async with serve(backend, "127.0.0.1", 0) as server:
+            cfg = config("ws://127.0.0.1:" + str(server.sockets[0].getsockname()[1]))
+            with pytest.raises(OneBotError, match="^onebot_destination_invalid$"):
+                await asyncio.to_thread(OneBotApi(cfg).send, "text", "op", destination="not-a-destination")
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("proof", [
+    {"message_id": 555, "message_type": "group", "group_id": 99999, "sender": {"user_id": 12345}},  # wrong group
+    {"message_id": 555, "message_type": "group", "sender": {"user_id": 12345}},  # missing group_id proof
+    {"message_id": 555, "message_type": "group", "group_id": 11111, "sender": {"user_id": 99999}},  # wrong bot identity
+    {"message_id": 999, "message_type": "group", "group_id": 11111, "sender": {"user_id": 12345}},  # wrong message id
+    {"message_id": 555, "message_type": "private", "group_id": 11111, "sender": {"user_id": 12345}},  # wrong message_type
+])
+def test_bound_destination_ambiguous_or_wrong_proof_is_uncertain_without_resend(proof):
+    async def exercise():
+        calls = []
+        async def backend(ws):
+            async for raw in ws:
+                request = json.loads(raw)
+                calls.append(request["action"])
+                if request["action"] == "get_login_info":
+                    await response(ws, request, {"user_id": 12345})
+                elif request["action"] == "send_msg":
+                    await response(ws, request, {"message_id": 555})
+                elif request["action"] == "get_msg":
+                    await response(ws, request, proof)
+        async with serve(backend, "127.0.0.1", 0) as server:
+            cfg = config("ws://127.0.0.1:" + str(server.sockets[0].getsockname()[1]))
+            with pytest.raises(OneBotError, match="^onebot_bound_send_outcome_uncertain$"):
+                await asyncio.to_thread(OneBotApi(cfg).send, "bound text", "op-bound", destination="group:11111")
+            assert calls == ["get_login_info", "send_msg", "get_msg"]  # exactly one attempt, never resent
+    asyncio.run(exercise())
+
+
+def test_bound_destination_get_msg_timeout_is_uncertain_without_resend():
+    async def exercise():
+        calls = []
+        async def backend(ws):
+            async for raw in ws:
+                request = json.loads(raw)
+                calls.append(request["action"])
+                if request["action"] == "get_login_info":
+                    await response(ws, request, {"user_id": 12345})
+                elif request["action"] == "send_msg":
+                    await response(ws, request, {"message_id": 555})
+                # get_msg deliberately receives no response: backend goes silent.
+        async with serve(backend, "127.0.0.1", 0) as server:
+            cfg = config("ws://127.0.0.1:" + str(server.sockets[0].getsockname()[1]))
+            with pytest.raises(OneBotError, match="outcome_uncertain"):
+                await asyncio.to_thread(OneBotApi(cfg, timeout=0.05).send, "bound text", "op-bound",
+                                        destination="group:11111")
+            assert calls == ["get_login_info", "send_msg", "get_msg"]
+    asyncio.run(exercise())
+
+
+def test_bound_destination_private_uses_target_id_never_sender_id():
+    async def exercise():
+        async def backend(ws):
+            async for raw in ws:
+                request = json.loads(raw)
+                if request["action"] == "get_login_info":
+                    await response(ws, request, {"user_id": 12345})
+                elif request["action"] == "send_msg":
+                    assert request["params"]["user_id"] == 54321
+                    await response(ws, request, {"message_id": 777})
+                elif request["action"] == "get_msg":
+                    # Backend exposes only the sender (the bot itself), never a
+                    # separate authoritative recipient field for this private chat.
+                    await response(ws, request, {"message_id": 777, "message_type": "private",
+                        "sender": {"user_id": 12345}})
+        async with serve(backend, "127.0.0.1", 0) as server:
+            cfg = config("ws://127.0.0.1:" + str(server.sockets[0].getsockname()[1]))
+            with pytest.raises(OneBotError, match="^onebot_bound_send_outcome_uncertain$"):
+                await asyncio.to_thread(OneBotApi(cfg).send, "bound text", "op-bound",
+                                        destination="private:54321")
+    asyncio.run(exercise())
+
+
 def test_send_timeout_is_not_retried_by_transport():
     async def exercise():
         calls = []

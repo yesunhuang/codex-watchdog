@@ -81,3 +81,5 @@ and [conversations.info](https://docs.slack.dev/reference/methods/conversations.
 Those methods require appropriate conversation-read permissions. Ordinary
 unbound notification delivery must not require new lookup calls or re-pairing.
 Feishu/Lark and OneBot route commands are outside this first implementation.
+
+See [Feishu/Lark and OneBot exact-session binding](SESSION_BINDING.md) for the confirmation-code flow, permissions and limits.

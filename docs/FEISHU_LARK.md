@@ -178,3 +178,5 @@ After an uncertain send or admission, inspect the chat and Codex conversation
 before sending a new explicit reply. Keep existing receipts; deleting them to
 force retries can cause duplicates. A provider acknowledgement and a recorded
 admission cannot guarantee delivery across every possible process crash.
+
+See [Feishu/Lark and OneBot exact-session binding](SESSION_BINDING.md) for the confirmation-code flow, permissions and limits.

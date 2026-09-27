@@ -33,6 +33,19 @@ def identifier(value, *, message=False):
     return value if -(2**63) <= int(value) < 2**63 else None
 
 
+def parse_destination(value):
+    """Canonical private:<id>/group:<id> only; any other shape is not a destination."""
+    if not isinstance(value, str):
+        return None
+    kind, sep, raw_id = value.partition(":")
+    if not sep or kind not in ("private", "group"):
+        return None
+    chat_id = identifier(raw_id)
+    if chat_id is None:
+        return None
+    return kind, chat_id
+
+
 def valid_endpoint(value):
     try:
         parts = urlsplit(value)
@@ -167,24 +180,54 @@ class OneBotApi:
             raise OneBotError("onebot_configuration_incomplete")
         self.config, self.timeout = config, timeout
 
-    def send(self, text, operation_id, *, reply_to=None):
+    def send(self, text, operation_id, *, reply_to=None, destination=None):
+        """destination=None keeps the configured chat exactly as before.
+
+        An explicit destination is validated as canonical private:<id>/group:<id>
+        before any network use. Because send_msg only returns a message_id, a
+        bound send is confirmed by an authenticated get_msg lookup that must
+        report the same message_id, this bot's own self_id as sender, the same
+        message_type, and the same destination via a backend-exposed field
+        (group_id for group; target_id for private, never the sender's own id).
+        Missing or ambiguous destination proof is reported uncertain without
+        ever resending.
+        """
         if not isinstance(text, str) or not text.strip():
             raise OneBotError("onebot_message_invalid")
+        if destination is not None:
+            parsed = parse_destination(destination)
+            if parsed is None:
+                raise OneBotError("onebot_destination_invalid")
+            bound_type, bound_id = parsed
         async def perform():
             config = self.config
+            message_type = bound_type if destination is not None else config.chat_type
+            chat_id = bound_id if destination is not None else config.chat_id
             async with connect_once(config.ws_url, config.access_token, config.self_id, self.timeout) as (connection, _):
                 segments = [{"type": "text", "data": {"text": text}}]
                 if reply_to is not None:
                     if identifier(reply_to, message=True) is None:
                         raise OneBotError("onebot_reply_address_invalid")
                     segments.insert(0, {"type": "reply", "data": {"id": reply_to}})
-                params = {"message_type": config.chat_type, "message": segments,
-                          ("group_id" if config.chat_type == "group" else "user_id"): int(config.chat_id)}
+                params = {"message_type": message_type, "message": segments,
+                          ("group_id" if message_type == "group" else "user_id"): int(chat_id)}
                 result = await action(connection, "send_msg", params, self.timeout)
                 message_id = identifier(result.get("message_id"), message=True)
                 if message_id is None:
                     raise OneBotError("onebot_response_identity_invalid")
-                return {"chat_id": config.destination, "message_id": message_id}
+                if destination is None:
+                    return {"chat_id": config.destination, "message_id": message_id}
+                proof = await action(connection, "get_msg", {"message_id": int(message_id)}, self.timeout)
+                sender = proof.get("sender")
+                if (identifier(proof.get("message_id"), message=True) != message_id
+                        or proof.get("message_type") != message_type
+                        or not isinstance(sender, dict) or identifier(sender.get("user_id")) != config.self_id):
+                    raise OneBotError("onebot_bound_send_outcome_uncertain")
+                recipient = (identifier(proof.get("group_id")) if message_type == "group"
+                             else identifier(proof.get("target_id")))
+                if recipient is None or recipient != chat_id:
+                    raise OneBotError("onebot_bound_send_outcome_uncertain")
+                return {"chat_id": destination, "message_id": message_id}
         try:
             # operation_id is fenced by the durable WatchDog ledger. OneBot has
             # no standard idempotency key; never retry a send or invent one.

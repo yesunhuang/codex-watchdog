@@ -90,3 +90,5 @@ The small MIT-licensed upstream connection component supplies action/echo
 correlation, receive dispatch and cleanup. `websockets` 15.0.1 supplies framing,
 authentication headers and connection backoff. See [the reuse audit](ONEBOT_REUSE.md)
 and the packaged third-party inventory for exact revisions, licenses and changes.
+
+See [Feishu/Lark and OneBot exact-session binding](SESSION_BINDING.md) for the confirmation-code flow, permissions and limits.

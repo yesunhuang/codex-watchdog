@@ -18,6 +18,7 @@ from codex_watchdog.relay import RelayTarget
 
 
 CHAT = "oc_loopback000001"
+CHAT2 = "oc_loopback000002"
 USER = "ou_loopback000001"
 ROOT_MESSAGE = "om_notification01"
 THREAD = "11111111-2222-4333-8444-555555555555"
@@ -338,6 +339,55 @@ def test_lark_credentials_are_not_inherited_by_codex(monkeypatch, tmp_path):
     assert child["UNRELATED_USER_SETTING"] == "retained"
     import os
     assert os.environ["CODEX_WATCHDOG_LARK_APP_SECRET"] == "provider-private"
+
+
+def test_bound_destination_send_and_reply_ack_verify_response_identity(provider):
+    api = provider.api()
+    provider.message_chat = CHAT2
+    result = api.send("bound text", "op-bound", destination=CHAT2)
+    assert result == {"chat_id": CHAT2, "message_id": ROOT_MESSAGE}
+    ack = api.send("ack", "op-bound-ack", reply_to=ROOT_MESSAGE, destination=CHAT2)
+    assert ack == {"chat_id": CHAT2, "message_id": "om_ack0000000001"}
+    messages = [post for post in provider.posts if "/im/v1/messages" in post[0]]
+    assert messages[0][2]["receive_id"] == CHAT2
+    assert messages[1][0] == "/open-apis/im/v1/messages/" + ROOT_MESSAGE + "/reply"
+    # Default (destination=None) semantics are unaffected by any bound call above.
+    provider.message_chat = CHAT
+    assert api.send("default text", "op-default") == {"chat_id": CHAT, "message_id": ROOT_MESSAGE}
+
+
+def test_bound_destination_mismatched_response_is_rejected(provider):
+    api = provider.api()
+    with pytest.raises(LarkTransportError, match="^lark_response_identity_invalid$"):
+        api.send("bound text", "op-bad", destination=CHAT2)  # provider still answers with CHAT
+    messages = [post for post in provider.posts if "/im/v1/messages" in post[0]]
+    assert len(messages) == 1 and messages[0][2]["receive_id"] == CHAT2
+
+
+def test_bound_destination_invalid_format_rejected_before_any_network_use(provider):
+    api = provider.api()
+    with pytest.raises(LarkTransportError, match="^lark_destination_invalid$"):
+        api.send("text", "op", destination="not-an-oc-id")
+    assert not provider.posts and not provider.gets
+
+
+def test_history_optional_destination_reads_other_chat_default_unchanged(provider):
+    api = provider.api()
+    api.history(100, 108)
+    api.history(100, 108, destination=CHAT2)
+    reads = [parse_qs(urlparse(path).query) for path in provider.gets if "/messages?" in path]
+    assert reads[0]["container_id"] == [CHAT]
+    assert reads[1]["container_id"] == [CHAT2]
+    with pytest.raises(LarkTransportError, match="^lark_destination_invalid$"):
+        api.history(100, 108, destination="not-an-oc-id")
+
+
+def test_conversations_reuses_pairing_api_with_existing_authenticated_client(provider):
+    api = provider.api()
+    assert api.conversations() == [(CHAT, "Pairing group")]
+    assert any("/im/v1/chats?" in path for path in provider.gets)
+    assert not any(path == "/callback/ws/endpoint" for path, *_ in provider.posts)
+    assert len([p for p in provider.posts if "/auth/" in p[0]]) == 1
 
 
 def test_real_sdk_pairing_chat_discovery_and_history_without_socket(provider):

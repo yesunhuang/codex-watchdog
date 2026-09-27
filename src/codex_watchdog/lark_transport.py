@@ -104,12 +104,27 @@ class LarkApi:
             sdk.Client.builder().app_id(config.app_id).app_secret(config.app_secret)
             .domain(DOMAINS[config.domain]).timeout(timeout).build())
 
-    def history(self, start, end, page_token=None):
-        """Read one bounded page from the authenticated, configured conversation."""
+    def conversations(self):
+        """Bounded discovery reused from first-use pairing; never a standing loop."""
+        from .messaging_profile import PREFIX
+        from .pairing_api import PairingApi
+        values = {PREFIX + "LARK_APP_ID": self.config.app_id, PREFIX + "LARK_APP_SECRET": self.config.app_secret,
+                  PREFIX + "LARK_DOMAIN": self.config.domain}
+        return PairingApi("lark", values, client=self.client).conversations()
+
+    def history(self, start, end, page_token=None, *, destination=None):
+        """Read one bounded page from the authenticated conversation.
+
+        destination=None reads the configured chat exactly as before; an explicit
+        destination reads that other authenticated chat_id instead.
+        """
+        if destination is not None and not valid_id(destination, "oc"):
+            raise LarkTransportError("lark_destination_invalid")
+        container_id = destination if destination is not None else self.config.chat_id
         import json
         from lark_channel.api.im.v1.model.list_message_request import ListMessageRequest
         request = (ListMessageRequest.builder().container_id_type("chat")
-                   .container_id(self.config.chat_id).start_time(str(start)).end_time(str(end))
+                   .container_id(container_id).start_time(str(start)).end_time(str(end))
                    .sort_type("ByCreateTimeAsc").page_size(50))
         if page_token is not None:
             request.page_token(page_token)
@@ -127,7 +142,16 @@ class LarkApi:
         except Exception:
             raise LarkTransportError("lark_history_failed_or_timed_out") from None
 
-    def send(self, text, operation_id, *, reply_to=None):
+    def send(self, text, operation_id, *, reply_to=None, destination=None):
+        """destination=None keeps the configured chat exactly as before.
+
+        An explicit destination is an immutable other chat_id: it is used as the
+        receive_id for a fresh message, and the response chat_id (create or
+        reply acknowledgment) must equal it exactly before this call succeeds.
+        """
+        if destination is not None and not valid_id(destination, "oc"):
+            raise LarkTransportError("lark_destination_invalid")
+        expected_chat = destination if destination is not None else self.config.chat_id
         from lark_channel.api.im.v1.model.create_message_request import CreateMessageRequest
         from lark_channel.api.im.v1.model.create_message_request_body import CreateMessageRequestBody
         from lark_channel.api.im.v1.model.reply_message_request import ReplyMessageRequest
@@ -139,7 +163,7 @@ class LarkApi:
             if reply_to is None:
                 request = (CreateMessageRequest.builder().receive_id_type("chat_id")
                            .request_body(CreateMessageRequestBody.builder()
-                                         .receive_id(self.config.chat_id).msg_type("text")
+                                         .receive_id(expected_chat).msg_type("text")
                                          .content(body).uuid(message_uuid).build()).build())
                 response = self.client.im.v1.message.create(request)
             else:
@@ -152,7 +176,7 @@ class LarkApi:
             if not response.success() or not 200 <= response.raw.status_code < 300:
                 raise LarkTransportError("lark_message_rejected")
             data = response.data
-            if data.chat_id != self.config.chat_id or not valid_id(data.message_id, "om"):
+            if data.chat_id != expected_chat or not valid_id(data.message_id, "om"):
                 raise LarkTransportError("lark_response_identity_invalid")
             return {"chat_id": data.chat_id, "message_id": data.message_id}
         except LarkTransportError:

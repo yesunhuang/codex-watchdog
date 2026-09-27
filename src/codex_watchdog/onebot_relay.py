@@ -1,6 +1,7 @@
 """OneBot-specific validation using the existing routing and admission ledgers."""
 from pathlib import Path
 import json
+import time
 
 from .lark_mapping import LarkThreadStore
 from .models import MAX_PROMPT_CHARS, sha256_text
@@ -73,7 +74,8 @@ class OneBotReplyRelay(ExactThreadRelay):
     reply_source = "onebot_reply"
 
     def __init__(self, runtime, config, *, queue_dispatcher, remote_ssh_adapter,
-                 timeout=10.0, thread_store=None, connection_factory=OneBotConnection):
+                 timeout=10.0, thread_store=None, connection_factory=OneBotConnection,
+                 api=None, clock=time.time):
         if not config.relay_configured:
             raise OneBotError("onebot_relay_configuration_incomplete")
         self.runtime, self.config = Path(runtime), config
@@ -81,6 +83,14 @@ class OneBotReplyRelay(ExactThreadRelay):
         self.thread_store = thread_store or OneBotThreadStore(runtime, config.scope)
         self.timeout, self.connection_factory = timeout, connection_factory
         self._connection = self._listener_lock = None
+        self.api = api
+        from .destination_binding import DestinationBinding
+        self.binding = DestinationBinding(self, "onebot", self._send_control, clock=clock)
+
+    def _send_control(self, text, operation_id, destination, *, reply_to=None):
+        from .onebot_transport import OneBotApi
+        api = self.api or OneBotApi(self.config, self.timeout)
+        return api.send(text, operation_id, destination=destination, reply_to=reply_to)
 
     def start(self):
         if self._connection is not None:
@@ -111,14 +121,30 @@ class OneBotReplyRelay(ExactThreadRelay):
             return ReplyResult("ignored_event_type")
         if value["user_id"] not in self.config.allowed_user_ids:
             return ReplyResult("ignored_unauthorized")
-        if value["chat_id"] != self.config.destination:
-            return ReplyResult("ignored_chat")
+        from .destination_binding import binding_control
+        operation = binding_control(value["text"])
+        if operation is not None:
+            if payload.get("edited") or payload.get("deleted"):
+                return ReplyResult("rejected_route_command")
+            created_at = payload.get("time")
+            if type(created_at) is not int or created_at < 0:
+                return ReplyResult("rejected_route_command")
+            if operation == "challenge":
+                if value["reply_to"] is not None or any(s.get("type") != "text" for s in payload["message"]):
+                    return ReplyResult("rejected_route_challenge")
+                return self.binding.confirm(value["text"], value["user_id"], value["chat_id"],
+                                            message_id=value["message_id"], created_at=created_at)
         if value["reply_to"] is None or value["reply_to"] == value["message_id"]:
             return ReplyResult("ignored_not_thread_reply")
         try:
             mapping = self.thread_store.lookup_thread(value["chat_id"], value["reply_to"])
             if mapping is None:
-                return ReplyResult("ignored_unknown_thread")
+                return ReplyResult("ignored_unknown_thread" if value["chat_id"] == self.config.destination else "ignored_chat")
+            if operation is not None:
+                return self.binding.command(operation,
+                    event_key="onebot-control:" + value["chat_id"] + ":" + value["message_id"],
+                    chat_id=value["chat_id"], parent_id=value["reply_to"], user_id=value["user_id"],
+                    text=value["text"], message_id=value["message_id"], created_at=created_at)
             identity = {key: value[key] for key in ("chat_id", "message_id", "reply_to", "user_id")}
             identity.update(text_sha256=sha256_text(value["text"]), target=mapping.target.to_dict())
             fingerprint = sha256_text(json.dumps(identity, sort_keys=True, separators=(",", ":")))
