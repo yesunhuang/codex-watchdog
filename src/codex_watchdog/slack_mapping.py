@@ -45,6 +45,8 @@ class SlackThreadMapping:
 class SlackThreadStore:
     """Persist only exact Slack-thread routing and hash-only reply receipts."""
 
+    provider = "slack"
+
     def __init__(self, runtime: Path) -> None:
         self.runtime = Path(runtime)
         self.path = self.runtime / "slack" / "relay-state.json"
@@ -113,22 +115,69 @@ class SlackThreadStore:
                     target=target.to_dict(), event_fingerprint=entry["event_fingerprint"],
                     created_at=created or utc_now()), active=created is not None)
 
-    def claim_reply(self, *, event_key, channel_id, thread_ts, instruction_id, text):
+    def claim_reply(self, *, event_key, channel_id, thread_ts, instruction_id, text,
+                    admission=None, message_key=None, payload_sha256=None):
+        if message_key is not None or payload_sha256 is not None:
+            if (not isinstance(message_key, str) or not message_key
+                    or not isinstance(payload_sha256, str)
+                    or re.fullmatch(r"[0-9a-f]{64}", payload_sha256) is None):
+                raise ValueError("reply_ticket_message_identity_invalid")
+        message_digest = sha256_text(message_key) if message_key is not None else None
         event_digest = sha256_text(event_key)
         key = self.thread_key(channel_id, thread_ts)
         journal = self.journal
         with journal.transaction() as db:
+            event_present = db.execute(
+                "SELECT 1 FROM records WHERE namespace=? AND kind='events' AND key=?",
+                (journal.namespace, event_digest)).fetchone()
             previous = journal.get(db, "events", event_digest)
-            if previous is not None:
+            if event_present is not None:
+                if not isinstance(previous, dict):
+                    raise ValueError("reply_ticket_event_collision")
                 if previous["thread_key"] != key or previous["text_sha256"] != sha256_text(text):
                     raise ValueError("reply_ticket_event_collision")
+                if "admission_schema" in previous and (
+                        type(previous["admission_schema"]) is not int or previous["admission_schema"] != 1
+                        or previous.get("message_key") != message_digest
+                        or previous.get("payload_sha256") != payload_sha256):
+                    raise ValueError("reply_ticket_event_collision")
                 return False, previous.get("delivery_status")
+            if message_digest is not None:
+                present = db.execute(
+                    "SELECT 1 FROM records WHERE namespace=? AND kind='messages' AND key=?",
+                    (journal.namespace, message_digest)).fetchone()
+                if present is not None:
+                    receipt = journal.get(db, "messages", message_digest)
+                    if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
+                            or receipt["schema_version"] != 1
+                            or receipt.get("payload_sha256") != payload_sha256
+                            or not isinstance(receipt.get("event_key"), str)):
+                        raise ValueError("reply_ticket_message_collision")
+                    original = journal.get(db, "events", receipt["event_key"])
+                    if (not isinstance(original, dict) or original.get("message_key") != message_digest
+                            or original.get("payload_sha256") != payload_sha256
+                            or original.get("thread_key") != key):
+                        raise ValueError("reply_ticket_message_collision")
+                    return False, original.get("delivery_status")
+            if admission is not None:
+                active = db.execute(
+                    "SELECT 1 FROM records WHERE namespace=? AND kind='threads' AND key=? AND active=1",
+                    (journal.namespace, key)).fetchone()
+                if active is None:
+                    return False, "ticket_closed"
+                if admission(db) is not True:
+                    return False, "unauthorized"
             if not journal.claim(db, key):
                 return False, "ticket_closed"
-            journal.put(db, "events", event_digest, dict(thread_key=key,
-                instruction_id=instruction_id, text_sha256=sha256_text(text), text_chars=len(text),
-                state="dispatching", delivery_status=None, created_at=utc_now(),
-                updated_at=None, error_sha256=None))
+            entry = dict(thread_key=key, instruction_id=instruction_id,
+                         text_sha256=sha256_text(text), text_chars=len(text),
+                         state="dispatching", delivery_status=None, created_at=utc_now(),
+                         updated_at=None, error_sha256=None)
+            if message_digest is not None:
+                entry.update(admission_schema=1, message_key=message_digest, payload_sha256=payload_sha256)
+                journal.put(db, "messages", message_digest, dict(schema_version=1,
+                    event_key=event_digest, payload_sha256=payload_sha256))
+            journal.put(db, "events", event_digest, entry)
         return True, None
 
     def finish_reply(self, event_key, *, state_value, delivery_status, error_sha256=None):

@@ -99,6 +99,7 @@ def main() -> None:
                            ("docs/ONEBOT_QQ.md", "ONEBOT_QQ.md"),
                            ("docs/ONEBOT_REUSE.md", "ONEBOT_REUSE.md"),
                            ("docs/SESSION_BINDING.md", "SESSION_BINDING.md"),
+                           ("docs/SESSION_ACCESS.md", "SESSION_ACCESS.md"),
                            ("THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md")):
         shutil.copy2(ROOT / source, package / target)
     subprocess.run([

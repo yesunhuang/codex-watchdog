@@ -507,7 +507,7 @@ def test_newer_bind_then_older_new_unbind_remains_bound(tmp_path):
 
 
 def test_stale_equal_timestamp_different_event_fails_closed(tmp_path):
-    """Equal timestamps with different events fail closed via stale."""
+    """One physical message cannot represent two different route commands."""
     store = SlackThreadStore(tmp_path)
     record_ticket(store, 1)
     record_ticket(store, 3, session=1)
@@ -516,9 +516,9 @@ def test_stale_equal_timestamp_different_event_fails_closed(tmp_path):
     routes.apply("event:E001", CHANNEL, thread_ts(1), USER, "bind " + DEST, DEST,
                  command_ts=TS_100)
 
-    r = routes.apply("event:E002", CHANNEL, thread_ts(3), USER, "unbind", None,
+    with pytest.raises(ValueError, match="route_message_collision"):
+        routes.apply("event:E002", CHANNEL, thread_ts(3), USER, "unbind", None,
                      command_ts=TS_100)
-    assert r["status"] == "stale"
     assert routes.destination(target(1).thread_id) == DEST  # unchanged
 
 
@@ -797,7 +797,7 @@ def test_existing_command_without_hello_claimed_compatible(tmp_path):
     record_ticket(store2, 2)
     routes2 = make_routes(store2)
     routes2.apply("event:E002", CHANNEL, thread_ts(2), USER, "bind " + DEST, DEST,
-                  command_ts=TS_100)
+                  command_ts=TS_200)
     journal2 = store2.journal
     with journal2.transaction() as db:
         key2 = routes2._command_key("event:E002")

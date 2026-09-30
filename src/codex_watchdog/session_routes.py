@@ -7,6 +7,7 @@ schema version bump is required.
 """
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from decimal import Decimal
@@ -123,6 +124,17 @@ class SessionRoutes:
                 or (entry.get("stale", False) and not entry["ack_claimed"])):
             raise ValueError("route_command_state_invalid")
 
+    def _command_record(self, db, key):
+        # A malformed persisted receipt is not a fresh event. Preserve it and
+        # reject replay instead of overwriting null as if no command existed.
+        journal = self.thread_store.journal
+        if db.execute("SELECT 1 FROM records WHERE namespace=? AND kind=? AND key=?",
+                      (journal.namespace, _KIND_COMMANDS, key)).fetchone() is None:
+            return None
+        entry = journal.get(db, _KIND_COMMANDS, key)
+        self._validate_command(entry)
+        return entry
+
     def destination(self, thread_id: str) -> Optional[str]:
         """Return the bound destination channel ID for a Codex thread, or None."""
         canonical = _canonical_uuid(thread_id)
@@ -142,7 +154,7 @@ class SessionRoutes:
         key = self.thread_store.thread_key(channel_id, parent_ts)
         journal = self.thread_store.journal
         with journal.transaction() as db:
-            receipt = journal.get(db, _KIND_COMMANDS, self._command_key(event_key))
+            receipt = self._command_record(db, self._command_key(event_key))
             if receipt is not None:
                 self._validate_command(receipt)
                 return receipt  # apply() still verifies every collision field.
@@ -186,6 +198,8 @@ class SessionRoutes:
         if Decimal(command_ts) <= Decimal(parent_ts):
             raise ValueError("route_apply_command_ts_invalid")
         command_key = self._command_key(event_key)
+        message_key = channel_id + "\0" + command_ts
+        message_digest = sha256_text(message_key)
 
         with journal.transaction() as db:
             entry = journal.get(db, "threads", source_key)
@@ -203,9 +217,18 @@ class SessionRoutes:
 
             route_key = self._route_key(canonical_tid)
             text_hash = sha256_text(text)
-
+            # Bot controls/replies use the common ordinary receipt lane. An
+            # identity already used there cannot be reinterpreted as a route.
+            from .session_acl import SessionACL
+            human_acl = SessionACL(self.thread_store, self.provider, self.scope)
+            for kind, key in (("events", sha256_text(event_key)), ("messages", message_digest),
+                              ("acl_commands", human_acl._command_key(event_key)),
+                              ("acl_messages", human_acl._msg_dedup_key(message_key))):
+                if db.execute("SELECT 1 FROM records WHERE namespace=? AND kind=? AND key=?",
+                              (journal.namespace, kind, key)).fetchone() is not None:
+                    raise ValueError("route_reply_identity_collision")
             # Duplicate / collision detection runs before stale check
-            existing_cmd = journal.get(db, _KIND_COMMANDS, command_key)
+            existing_cmd = self._command_record(db, command_key)
             if existing_cmd is not None:
                 self._validate_command(existing_cmd)
                 if (
@@ -218,6 +241,34 @@ class SessionRoutes:
                     or existing_cmd.get("command_ts") != command_ts
                 ):
                     raise ValueError("route_command_collision")
+            message_fingerprint = sha256_text(json.dumps(dict(
+                channel=channel_id, parent=parent_ts, timestamp=command_ts, user=user_id,
+                text_hash=text_hash, target=target.to_dict(), destination=destination),
+                sort_keys=True, separators=(",", ":")))
+            physical = db.execute(
+                "SELECT 1 FROM records WHERE namespace=? AND kind='route_messages' AND key=?",
+                (journal.namespace, message_digest)).fetchone()
+            if physical is not None:
+                receipt = journal.get(db, "route_messages", message_digest)
+                if (not isinstance(receipt, dict) or type(receipt.get("schema_version")) is not int
+                        or receipt["schema_version"] != 1
+                        or receipt.get("payload_sha256") != message_fingerprint
+                        or not isinstance(receipt.get("command_key"), str)):
+                    raise ValueError("route_message_collision")
+                original = self._command_record(db, receipt["command_key"])
+                self._validate_command(original)
+                if (original.get("channel_id") != channel_id or original.get("command_ts") != command_ts
+                        or original.get("parent_ts") != parent_ts or original.get("text_hash") != text_hash
+                        or original.get("user_id") != user_id or original.get("thread_id") != canonical_tid
+                        or original.get("destination") != destination):
+                    raise ValueError("route_message_collision")
+                if receipt["command_key"] != command_key:
+                    return {"status": "duplicate", "thread_id": canonical_tid,
+                            "destination": original["destination"], "ack_pending": False}
+            message_receipt = dict(schema_version=1, command_key=command_key,
+                                   payload_sha256=message_fingerprint)
+
+            if existing_cmd is not None:
                 ack_claimed = existing_cmd.get("ack_claimed")
                 return {
                     "status": "duplicate",
@@ -250,6 +301,7 @@ class SessionRoutes:
                         "created_at": utc_now(),
                     }
                     journal.put(db, _KIND_COMMANDS, command_key, stale_entry)
+                    journal.put(db, "route_messages", message_digest, message_receipt)
                     return {
                         "status": "stale",
                         "thread_id": canonical_tid,
@@ -287,6 +339,7 @@ class SessionRoutes:
                 "created_at": utc_now(),
             }
             journal.put(db, _KIND_COMMANDS, command_key, cmd_entry)
+            journal.put(db, "route_messages", message_digest, message_receipt)
 
         return {
             "status": "unbound" if destination is None else "bound",
@@ -305,7 +358,7 @@ class SessionRoutes:
         command_key = self._command_key(event_key)
         journal = self.thread_store.journal
         with journal.transaction() as db:
-            entry = journal.get(db, _KIND_COMMANDS, command_key)
+            entry = self._command_record(db, command_key)
             if entry is None:
                 return None
             self._validate_command(entry)
@@ -367,7 +420,7 @@ class SessionRoutes:
         command_key = self._command_key(event_key)
         journal = self.thread_store.journal
         with journal.transaction() as db:
-            entry = journal.get(db, _KIND_COMMANDS, command_key)
+            entry = self._command_record(db, command_key)
             if entry is None:
                 return
             self._validate_command(entry)
@@ -386,7 +439,7 @@ class SessionRoutes:
         command_key = self._command_key(event_key)
         journal = self.thread_store.journal
         with journal.transaction() as db:
-            entry = journal.get(db, _KIND_COMMANDS, command_key)
+            entry = self._command_record(db, command_key)
             if entry is None:
                 return False
             self._validate_command(entry)

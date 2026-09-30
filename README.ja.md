@@ -207,6 +207,47 @@ TIM は control reply 用として受け入れていません。設定、安全�
 
 Feishu/Lark と OneBot では確認コードで送信先を変更します。有効なセッション通知に `bind` と返信し、同じアカウントで返されたコードを送信先グループへ新しいメッセージとして送信してください。WatchDog が返信可能な挨拶を送ります。`unbind` で既定の送信先に戻ります。権限と制限は[Feishu/Lark・QQ のバインド](docs/SESSION_BINDING.md)を参照してください。
 
+### 特定のセッションを他の人や Slack ボットと共有する
+
+管理者は対象セッションの **有効な WatchDog 通知** に、`add @person`、
+`remove @person`、または `access` と返信します。クライアントのメンション選択機能で
+相手を選んでください。成功すると新しい対応付き確認通知が届き、許可された人は
+その確認通知への返信で同じ Codex セッションに指示できます。相手がその会話に
+アクセスできることが前提です。人への権限付与は Slack、Feishu/Lark、OneBot に対応します。
+
+Dora などの Slack ボットには、人間の管理者が `bot add @bot`、
+`bot remove @bot`、または `bot access` を使います。許可されたボットは、有効な
+対応付き通知への返信として、次のプレーンテキスト形式で指示を送ります。
+
+```text
+!codex 7abff3bc-a4ad-41f2-8237-b3a6672fe941 -- Reply only HELLO_TEST_OK.
+```
+
+新しい要求ごとに新しい小文字の UUID を使い、同じ要求の再送では元の UUID を
+再利用します。区切りは正確に ` -- ` とし、指示は同じ行に書いてください。
+対象セッションは返信元の通知で決まります。通常のボット発言では Codex は起動せず、
+ボットから権限管理や送信先の変更はできません。
+
+権限はプロバイダー、ランタイム、個別セッションごとに独立し、チャンネルへの参加だけでは
+付与されません。Slack の本人確認には `users:read`、Feishu/Lark にはユーザー情報の
+照会権限と対象ユーザーの可視性が必要です。許可された人は通常の返信を送れますが、
+`bind`、`unbind`、権限管理は管理者専用です。アップグレードは既存の設定と権限を保持し、
+権限はマシン間や Slack の socket/polling モード間では同期されません。
+
+人への権限付与は自動テスト済みで、対象ユーザーによる実環境テストが可能です。
+Slack ボットの配信は Windows/macOS で実証済みで、macOS では同一要求の再送拒否も
+確認しています。OneBot の権限付与は自動テストのみです。
+設定、適用範囲、テスト手順は[セッションアクセス](docs/SESSION_ACCESS.md)を参照してください。
+
+### 現在の監視上の制限
+
+macOS パッケージは ARM64 プレビューです。未対応付けのウィンドウや別ウィンドウの
+所有権に関する検出警告がある場合、監視対象が限定されることがあります。
+ホームディレクトリを共有する Linux ノードでは、前回起動時の古い書き込み所有者フラグが
+監視の引き継ぎを妨げ、証拠を確認した上で運用者による復旧が必要になる場合があります。
+このケースの自動復旧は含まれていません。テスト前に対象セッションの監視状態を確認してください。
+挨拶の送信成功だけでは、返信経路の動作確認にはなりません。
+
 ## 対応する構成
 
 | プラットフォーム | 推奨ワークフロー | 状況と制限 |
@@ -325,7 +366,6 @@ Interactive transport selection は `slack`、`lark`、`both`、`onebot`、`slac
 - [Optional multi-agent project contract](examples/AGENTS.multi-agent.md)。
 - [Codex → Claude delegation skill template](examples/skills/codex-use-claude/SKILL.md)。
 - [Asset provenance](ASSETS.md) と [third-party notices](THIRD_PARTY_NOTICES.md)。
-- [Development / dogfooding history](doc/Progress/)。
 
 これは human-led で、AI の支援を広く活用している project です。maintainer が product direction、acceptance、release を
 所有し、ChatGPT が design / review を支援し、OpenAI Codex が implementation、test、packaging の多くを担っています。

@@ -34,7 +34,7 @@ The shared journal enforces the same four-ticket one-shot bound.
 
 
 def human_message(payload, self_id):
-    """Only array-form OneBot human text; never interpret CQ markup as commands."""
+    """Array-form OneBot human text; non-self AT segments trigger access-command parse."""
     if (not isinstance(payload, dict) or payload.get("post_type") != "message"
             or identifier(payload.get("self_id")) != self_id
             or payload.get("anonymous") is not None):
@@ -50,24 +50,55 @@ def human_message(payload, self_id):
     if (destination is None or message_id is None or not isinstance(segments, list)
             or not 1 <= len(segments) <= 256):
         return None
-    text, replies = [], []
+    text_parts, replies = [], []
+    has_nonself_at = False
     for segment in segments:
         if not isinstance(segment, dict) or not isinstance(segment.get("data"), dict):
             return None
         data = segment["data"]
         if segment.get("type") == "text" and isinstance(data.get("text"), str):
-            text.append(data["text"])
+            text_parts.append(data["text"])
         elif segment.get("type") == "reply" and identifier(data.get("id"), message=True) is not None:
             replies.append(identifier(data["id"], message=True))
         elif segment.get("type") == "at" and identifier(data.get("qq")) == self_id:
-            pass
+            pass  # bot-self envelope mention
+        elif segment.get("type") == "at":
+            has_nonself_at = True
         else:
             return None
-    text = "".join(text)
-    if not text.strip() or len(text) > MAX_PROMPT_CHARS or len(replies) > 1:
+
+    # Ordinary path: text + optional reply + optional bot-self at, no other at.
+    if not has_nonself_at:
+        text = "".join(text_parts)
+        if not text.strip() or len(text) > MAX_PROMPT_CHARS or len(replies) > 1:
+            return None
+        # Plain access op keyword (e.g. "access") requires no non-self AT.
+        if text.strip().split()[0].lower() in ("add", "remove", "access"):
+            from .session_access_commands import parse_onebot_access
+            try:
+                parsed = parse_onebot_access(segments, self_id)
+            except ValueError:
+                return None
+            if parsed is not None:
+                return dict(chat_id=kind + ":" + destination, message_id=message_id, user_id=user,
+                            reply_to=replies[0] if replies else None, segments=segments,
+                            access_cmd=parsed)
+        return dict(chat_id=kind + ":" + destination, message_id=message_id, user_id=user,
+                    text=text, reply_to=replies[0] if replies else None, segments=segments)
+
+    # Non-self AT present: attempt to parse as access control command.
+    from .session_access_commands import parse_onebot_access
+    try:
+        parsed = parse_onebot_access(segments, self_id)
+    except ValueError:
+        # Malformed reserved command – reject; never forward to Codex.
         return None
+    if parsed is None:
+        return None
+    operation, delegate_id = parsed
     return dict(chat_id=kind + ":" + destination, message_id=message_id, user_id=user,
-                text=text, reply_to=replies[0] if replies else None)
+                reply_to=replies[0] if replies else None, segments=segments,
+                access_cmd=(operation, delegate_id))
 
 
 class OneBotReplyRelay(ExactThreadRelay):
@@ -75,7 +106,7 @@ class OneBotReplyRelay(ExactThreadRelay):
 
     def __init__(self, runtime, config, *, queue_dispatcher, remote_ssh_adapter,
                  timeout=10.0, thread_store=None, connection_factory=OneBotConnection,
-                 api=None, clock=time.time):
+                 api=None, clock=time.time, session_acl=None):
         if not config.relay_configured:
             raise OneBotError("onebot_relay_configuration_incomplete")
         self.runtime, self.config = Path(runtime), config
@@ -84,6 +115,7 @@ class OneBotReplyRelay(ExactThreadRelay):
         self.timeout, self.connection_factory = timeout, connection_factory
         self._connection = self._listener_lock = None
         self.api = api
+        self._session_acl = session_acl
         from .destination_binding import DestinationBinding
         self.binding = DestinationBinding(self, "onebot", self._send_control, clock=clock)
 
@@ -114,16 +146,52 @@ class OneBotReplyRelay(ExactThreadRelay):
             self._listener_lock.__exit__(None, None, None)
             self._listener_lock = None
 
+    def _get_session_access(self):
+        from .session_access import SessionAccess
+        return SessionAccess(
+            self.thread_store, "onebot", self.config.scope,
+            admin_ids=tuple(self.config.allowed_user_ids),
+            acl=self._session_acl,
+        )
+
     def handle_event(self, payload):
         # Called only from the authenticated connection to the selected bot.
         value = human_message(payload, self.config.self_id)
         if value is None:
             return ReplyResult("ignored_event_type")
-        if value["user_id"] not in self.config.allowed_user_ids:
-            return ReplyResult("ignored_unauthorized")
+
+        user_id = value["user_id"]
+        is_admin = user_id in self.config.allowed_user_ids
+
+        # Access control command path (has non-self AT or plain "access" keyword).
+        access_cmd = value.get("access_cmd")
+        if access_cmd is not None:
+            if not is_admin:
+                return ReplyResult("ignored_unauthorized")
+            if payload.get("edited") or payload.get("deleted"):
+                return ReplyResult("rejected_route_command")
+            operation, raw_delegate_id = access_cmd
+            reply_to = value.get("reply_to")
+            if reply_to is None or reply_to == value["message_id"]:
+                return ReplyResult("ignored_not_thread_reply")
+            try:
+                mapping = self.thread_store.lookup_thread(value["chat_id"], reply_to)
+                if mapping is None:
+                    return ReplyResult("ignored_unknown_thread"
+                                      if value["chat_id"] == self.config.destination
+                                      else "ignored_chat")
+            except StoreBusyError:
+                return ReplyResult("deferred")
+            except Exception:
+                return ReplyResult("rejected_state_or_collision")
+            return self._handle_access_command(
+                payload, value, mapping, operation, raw_delegate_id)
+
         from .destination_binding import binding_control
         operation = binding_control(value["text"])
         if operation is not None:
+            if not is_admin:
+                return ReplyResult("ignored_unauthorized")
             if payload.get("edited") or payload.get("deleted"):
                 return ReplyResult("rejected_route_command")
             created_at = payload.get("time")
@@ -134,11 +202,24 @@ class OneBotReplyRelay(ExactThreadRelay):
                     return ReplyResult("rejected_route_challenge")
                 return self.binding.confirm(value["text"], value["user_id"], value["chat_id"],
                                             message_id=value["message_id"], created_at=created_at)
+
+        # Check for reserved control text that wasn't already claimed by binding_control.
+        text = value["text"]
+        if operation is None:
+            from .session_access_commands import reserved_control as _rc
+            if _rc(text):
+                if not is_admin:
+                    return ReplyResult("ignored_unauthorized")
+                # Admin used reserved keyword without proper AT structure -> reject.
+                return ReplyResult("rejected_route_command")
+
         if value["reply_to"] is None or value["reply_to"] == value["message_id"]:
             return ReplyResult("ignored_not_thread_reply")
         try:
             mapping = self.thread_store.lookup_thread(value["chat_id"], value["reply_to"])
             if mapping is None:
+                if not is_admin:
+                    return ReplyResult("ignored_unauthorized")
                 return ReplyResult("ignored_unknown_thread" if value["chat_id"] == self.config.destination else "ignored_chat")
             if operation is not None:
                 return self.binding.command(operation,
@@ -150,11 +231,20 @@ class OneBotReplyRelay(ExactThreadRelay):
             fingerprint = sha256_text(json.dumps(identity, sort_keys=True, separators=(",", ":")))
             message_key = value["chat_id"] + "\0" + value["message_id"]
             instruction_id = "onebot:" + sha256_text(self.config.scope + "\0" + message_key)[:40]
-            claimed, previous = self.thread_store.claim_reply(event_key=instruction_id,
-                message_key=message_key, payload_sha256=fingerprint,
-                instruction_id=instruction_id, text=value["text"],
-                chat_id=value["chat_id"], parent_id=value["reply_to"])
+            # Always pass admission callback; it atomically verifies target and ticket for both
+            # admins and delegates.
+            access = self._get_session_access()
+            source_key = OneBotThreadStore._address(value["chat_id"], value["reply_to"])
+            admission = access.make_admission(source_key, user_id, mapping.target,
+                                             event_key=instruction_id, message_key=message_key)
+            claimed, previous = self.thread_store.claim_reply(
+                event_key=instruction_id, message_key=message_key,
+                payload_sha256=fingerprint, instruction_id=instruction_id,
+                text=value["text"], chat_id=value["chat_id"],
+                parent_id=value["reply_to"], admission=admission)
             if not claimed:
+                if previous == "unauthorized":
+                    return ReplyResult("ignored_unauthorized")
                 return ReplyResult("duplicate", mapping.target.workspace_id, instruction_id,
                                    previous, duplicate=True)
         except StoreBusyError:
@@ -178,3 +268,106 @@ class OneBotReplyRelay(ExactThreadRelay):
             return ReplyResult("uncertain", mapping.target.workspace_id, instruction_id,
                                result.delivery_status)
         return result
+
+    def _handle_access_command(self, payload, value, mapping, operation, raw_delegate_id):
+        """Handle admin add/remove/access with once-only confirmation mapping."""
+        chat_id = value["chat_id"]
+        message_id = value["message_id"]
+        reply_to = value["reply_to"]
+        user_id = value["user_id"]
+
+        source_key = OneBotThreadStore._address(chat_id, reply_to)
+        message_key = chat_id + "\0" + message_id
+        event_key = "onebot-access:" + chat_id + ":" + message_id
+
+        # Preflight: atomically verify source ticket is active and target unchanged.
+        access = self._get_session_access()
+        try:
+            current_delegates = access.preflight(source_key, user_id, mapping.target)
+            if current_delegates is None:
+                return ReplyResult("ignored_closed_ticket",
+                                   workspace_id=mapping.target.workspace_id)
+        except StoreBusyError:
+            return ReplyResult("deferred")
+        except Exception:
+            return ReplyResult("rejected_state_or_collision")
+
+        # For OneBot, trust authenticated structured integer IDs directly.
+        delegate_id = raw_delegate_id
+
+        segments_sha256 = sha256_text(json.dumps(value["segments"], sort_keys=True, separators=(",", ":")))
+        identity = {
+            "provider": "onebot", "scope": self.config.scope,
+            "chat": chat_id, "reply_to": reply_to,
+            "message": message_id, "sender": user_id,
+            "operation": operation, "delegate": delegate_id,
+            "target": mapping.target.to_dict(),
+            "segments_sha256": segments_sha256,
+        }
+        payload_sha256 = sha256_text(json.dumps(identity, sort_keys=True, separators=(",", ":")))
+
+        try:
+            result = access.apply(
+                event_key=event_key, message_key=message_key,
+                source_key=source_key, user_id=user_id,
+                operation=operation, delegate_id=delegate_id,
+                payload_sha256=payload_sha256, expected_target=mapping.target,
+            )
+        except StoreBusyError:
+            return ReplyResult("deferred")
+        except ValueError:
+            return ReplyResult("rejected_state_or_collision")
+
+        operation_key = result["operation_key"]
+        status = result["status"]
+
+        if status == "duplicate":
+            return ReplyResult("duplicate", mapping.target.workspace_id,
+                              operation_key, duplicate=True)
+
+        try:
+            claim = access.claim_confirmation(operation_key)
+        except Exception:
+            return ReplyResult("uncertain", mapping.target.workspace_id, operation_key)
+
+        if claim is None:
+            return ReplyResult("duplicate", mapping.target.workspace_id,
+                              operation_key, duplicate=True)
+
+        target = claim["target"]
+        fingerprint = claim["fingerprint"]
+        payload_sha256_notif = claim.get("payload_sha256", payload_sha256)
+        delegates = claim.get("delegates", [])
+
+        from .session_access import access_confirmation_text_onebot
+        from .destination_binding import DestinationBinding
+        text_out = DestinationBinding._host(
+            access_confirmation_text_onebot(operation, status, delegate_id, delegates, target))
+
+        # Send fresh top-level message via _send_control (no reply_to).
+        try:
+            previous = self.thread_store.prepare_notification(fingerprint, payload_sha256_notif)
+            if previous is not None:
+                access.finish_confirmation(operation_key, "sent")
+                return ReplyResult("duplicate", mapping.target.workspace_id,
+                                  operation_key, duplicate=True)
+            sent = self._send_control(text_out, operation_key, chat_id)
+            new_chat = sent.get("chat_id")
+            new_msg_id = sent.get("message_id")
+            if (new_chat != chat_id or not isinstance(new_msg_id, str)
+                    or identifier(new_msg_id, message=True) is None):
+                raise ValueError("access_confirmation_address_invalid")
+            self.thread_store.finish_notification(fingerprint, new_chat, new_msg_id, target=target)
+            access.finish_confirmation(operation_key, "sent")
+        except Exception:
+            try:
+                access.finish_confirmation(operation_key, "uncertain")
+            except Exception:
+                pass
+            return ReplyResult("uncertain", mapping.target.workspace_id, operation_key,
+                               "access_confirmation_uncertain")
+
+        return ReplyResult(
+            "access_applied", mapping.target.workspace_id, operation_key,
+            delivery_status=status,
+        )

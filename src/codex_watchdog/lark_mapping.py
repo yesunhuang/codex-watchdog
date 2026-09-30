@@ -152,7 +152,7 @@ class LarkThreadStore:
                     created_at=created or utc_now()), active=created is not None)
 
     def claim_reply(self, *, event_key, message_key, payload_sha256, instruction_id, text,
-                    chat_id, parent_id):
+                    chat_id, parent_id, admission=None):
         event_digest, message_digest = sha256_text(event_key), sha256_text(message_key)
         ticket = self._address(chat_id, parent_id)
         journal = self.journal
@@ -167,6 +167,14 @@ class LarkThreadStore:
                 if message["payload_sha256"] != payload_sha256:
                     raise LarkTransportError("lark_message_id_collision")
                 return False, journal.get(db, "events", message["event_key"]).get("delivery_status")
+            if admission is not None:
+                active = db.execute(
+                    "SELECT 1 FROM records WHERE namespace=? AND kind='threads' AND key=? AND active=1",
+                    (journal.namespace, ticket)).fetchone()
+                if active is None:
+                    return False, "ticket_closed"
+                if admission(db) is not True:
+                    return False, "unauthorized"
             if not journal.claim(db, ticket):
                 return False, "ticket_closed"
             journal.put(db, "events", event_digest, dict(payload_sha256=payload_sha256,

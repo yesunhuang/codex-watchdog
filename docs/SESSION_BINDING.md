@@ -3,6 +3,9 @@
 Feishu/Lark and OneBot support exact-session destination binding from 2.1.0.
 Slack's existing channel-mention commands are unchanged.
 
+To authorize another person or a Slack bot for this session, see
+[session access](SESSION_ACCESS.md).
+
 A route belongs to one provider, authenticated app/bot scope, runtime and exact
 Codex session. Other sessions, including sessions in the same repository, keep
 their own destinations. New sessions use the configured default. Routes are not

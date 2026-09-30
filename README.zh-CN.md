@@ -196,6 +196,42 @@ WatchDog **永远不会猜测回复应该送到哪个 thread**。官方 QQ 的�
 
 飞书/Lark 和 OneBot 使用确认码绑定：回复该会话的有效通知 `bind`，然后用同一账号将收到的确认码作为新消息发送到目标群。WatchDog 会在目标群发送一条可回复的欢迎消息；`unbind` 恢复默认目的地。权限和限制见[飞书/Lark 与 QQ 绑定指南](docs/SESSION_BINDING.md)。
 
+### 将一个会话授权给其他人或 Slack 机器人
+
+管理员可回复该会话的 **有效 WatchDog 通知**，发送 `add @person`、
+`remove @person` 或 `access`。请通过客户端的原生提及选择器选中用户。
+操作成功后，WatchDog 会发送新的会话映射确认消息；被授权人回复该确认消息，
+即可向同一个 Codex 会话发送指令。对方须已能访问该聊天。
+人员授权支持 Slack、飞书/Lark 和 OneBot。
+
+对于 Dora 等 Slack 机器人，由人类管理员发送 `bot add @bot`、
+`bot remove @bot` 或 `bot access`。获得授权后，机器人须回复有效的映射通知，
+使用以下纯文本格式：
+
+```text
+!codex 7abff3bc-a4ad-41f2-8237-b3a6672fe941 -- Reply only HELLO_TEST_OK.
+```
+
+每个新请求使用新的小写 UUID；重传同一请求时复用原 UUID。
+分隔符必须为 ` -- `，指令与其保持同一行。映射通知决定目标会话。
+普通机器人聊天不会唤醒 Codex；机器人不能管理权限或修改消息目的地。
+
+授权仅作用于一个消息平台、运行时和精确会话；加入频道不等于获得权限。
+Slack 身份查询需要 `users:read`；飞书/Lark 需要联系人查询权限及对目标用户的可见性。
+被授权人只能发送普通回复；`bind`、`unbind` 和权限管理仍仅限管理员。
+升级保留现有配置与授权；授权不在机器之间或 Slack 的 socket/polling 模式之间同步。
+
+人员授权已通过自动化测试，可由目标用户进行在线测试。Slack 机器人投递已通过
+Windows/macOS 实测，包括 macOS 对同一请求重放的拒绝；OneBot 人员授权仅有自动化覆盖。
+配置、权限范围和测试步骤见[会话访问权限](docs/SESSION_ACCESS.md)。
+
+### 当前监控限制
+
+macOS 软件包仍为 ARM64 预览版。未映射窗口或会话由其他窗口持有的发现警告，
+可能限制实际监控范围。共享主目录的 Linux 节点若残留上一次启动的写入者标记，
+可能阻止监控交接，需要核实证据后由操作者恢复；本版本未提供该情况的自动恢复。
+测试前请确认目标会话的监控状态；欢迎消息发送成功本身不能证明回复链路正常。
+
 ## 支持的部署方式
 
 | 平台 | 推荐工作流 | 状态与限制 |
@@ -307,7 +343,6 @@ Remote-SSH/分离运行应通过独立于 SSH 连接的持久用户服务启动 
 - [可选多 Agent 项目契约](examples/AGENTS.multi-agent.md)。
 - [Codex → Claude delegation skill 模板](examples/skills/codex-use-claude/SKILL.md)。
 - [资源来源](ASSETS.md)与[第三方声明](THIRD_PARTY_NOTICES.md)。
-- [开发与 dogfooding 历史](doc/Progress/)。
 
 这是一个由人主导、AI 深度协助的项目。维护者负责产品方向、验收与发布；ChatGPT 支持设计与
 review；OpenAI Codex 完成大量实现、测试和打包工作。

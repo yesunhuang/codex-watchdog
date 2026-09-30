@@ -185,6 +185,61 @@ class LarkApi:
             raise LarkTransportError("lark_message_failed_or_timed_out") from None
 
 
+    def verify_user(self, open_id: str) -> str:
+        """Contact-user lookup that distinguishes bot Open IDs; fails closed on any ambiguity.
+
+        Uses pinned SDK contact.v3.user.get with user_id_type='open_id'.  Raises
+        LarkTransportError with a fixed safe code on any failure.
+        """
+        if not valid_id(open_id, "ou"):
+            raise LarkTransportError("lark_user_id_invalid")
+        try:
+            from lark_channel.api.contact.v3.model.get_user_request import GetUserRequest
+            request = (GetUserRequest.builder()
+                       .user_id(open_id)
+                       .user_id_type("open_id")
+                       .build())
+            response = self.client.contact.v3.user.get(request)
+            raw_code = response.raw.status_code
+            if not isinstance(raw_code, int) or isinstance(raw_code, bool):
+                raise LarkTransportError("lark_user_verify_failed_check_permissions")
+            if raw_code == 429:
+                raise LarkTransportError("lark_user_rate_limited")
+            if response.success() is not True or not 200 <= raw_code < 300:
+                raise LarkTransportError("lark_user_verify_failed_check_permissions")
+            data = response.data
+            if data is None or data.user is None:
+                raise LarkTransportError("lark_user_verify_malformed")
+            user = data.user
+            if user.open_id != open_id:
+                raise LarkTransportError("lark_user_id_mismatch")
+            status = getattr(user, "status", None)
+            if status is not None:
+                if not any(hasattr(status, name) for name in (
+                    "is_frozen", "is_resigned", "is_exited", "is_unjoin", "is_activated"
+                )):
+                    raise LarkTransportError("lark_user_verify_malformed")
+                for _f in ("is_frozen", "is_resigned", "is_exited", "is_unjoin"):
+                    _v = getattr(status, _f, None)
+                    if _v is None:
+                        continue
+                    if not isinstance(_v, bool):
+                        raise LarkTransportError("lark_user_verify_malformed")
+                    if _v:
+                        raise LarkTransportError("lark_user_inactive")
+                _activated = getattr(status, "is_activated", None)
+                if _activated is not None:
+                    if not isinstance(_activated, bool):
+                        raise LarkTransportError("lark_user_verify_malformed")
+                    if not _activated:
+                        raise LarkTransportError("lark_user_inactive")
+            return open_id
+        except LarkTransportError:
+            raise
+        except Exception:
+            raise LarkTransportError("lark_user_verify_failed") from None
+
+
 class LarkConnection:
     """Run the SDK's public background lifecycle beside the existing service."""
 

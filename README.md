@@ -216,6 +216,48 @@ Reply `bind #channel` to an active mapped Slack notification to route that exact
 
 Feishu/Lark and OneBot use a confirmation code: reply `bind` to an active session notification, then post the returned code as a new message in the destination group using the same account. WatchDog sends a reply-enabled hello there; `unbind` restores the default. See [Feishu/Lark and QQ binding](docs/SESSION_BINDING.md) for permissions and limits.
 
+### Share one session with a person or Slack bot
+
+An administrator can reply to an **active WatchDog notification** with `add @person`,
+`remove @person` or `access`. Select the person using the client's native mention
+picker. A successful control posts a fresh mapped confirmation; the invited person
+replies to that confirmation to reach the same Codex session. The conversation must
+already be accessible to them. Human delegation supports Slack, Feishu/Lark and OneBot.
+
+For a Slack bot such as Dora, a human administrator uses `bot add @bot`,
+`bot remove @bot` or `bot access`. After receiving a grant, the bot replies to an
+active mapped notification with a plain-text instruction:
+
+```text
+!codex 7abff3bc-a4ad-41f2-8237-b3a6672fe941 -- Reply only HELLO_TEST_OK.
+```
+
+Use a new lowercase UUID for each new request and reuse it only when retransmitting
+that same request. The separator is exactly ` -- `; keep the instruction on the
+same line. The mapped notification selects the session. Ordinary bot chatter does
+not wake Codex, and bots cannot administer access or change destinations.
+
+Grants are specific to one provider, runtime and exact session; channel membership
+does not grant access. Slack identity lookup requires `users:read`. Feishu/Lark
+needs contact-user lookup permission and visibility of the selected person.
+Delegates can send ordinary replies; `bind`, `unbind` and access controls remain
+administrator-only. Existing settings and grants survive upgrades; grants do not
+synchronize between machines or Slack socket/polling modes.
+
+Human delegation has automated coverage and is ready for a live test with the
+intended person. Slack bot delivery passed Windows/macOS live tests, including
+macOS same-request replay rejection; OneBot delegation has automated coverage only.
+See [session access](docs/SESSION_ACCESS.md) for setup, scope and test steps.
+
+### Current monitoring limits
+
+The macOS package remains an ARM64 preview. A discovery warning about an unmapped
+window or ownership in another window can limit which sessions are monitored.
+On shared-home Linux hosts, a stale previous-boot writer flag can block monitoring
+handoff and require verified operator recovery. Automatic recovery for that case
+is not included. Check the intended session's monitoring status before testing;
+successful delivery of a greeting alone does not verify incoming replies.
+
 ## Supported topologies
 
 | Platform | Recommended workflow | Status and limits |
@@ -344,7 +386,6 @@ production service environment.
 - [Optional multi-agent project contract](examples/AGENTS.multi-agent.md).
 - [Codex → Claude delegation skill template](examples/skills/codex-use-claude/SKILL.md).
 - [Asset provenance](ASSETS.md) and [third-party notices](THIRD_PARTY_NOTICES.md).
-- [Development and dogfooding history](doc/Progress/).
 
 This is a human-led project with extensive AI assistance. The maintainer owns
 product direction, acceptance, and releases; ChatGPT supports design and review;

@@ -129,7 +129,7 @@ class SlackReplyPoller:
             # A channel is not supplied by conversations.replies; use only the
             # request's saved mapping, never text parsed from a Slack message.
             event = dict(message, channel=channel, thread_ts=parent)
-            result = self.relay.handle_message(event)
+            result = self.relay.handle_polled_message(event)
             results.append(result.to_dict())
             if result.status == "deferred":
                 break  # No dispatch occurred. Retry this exact message later.

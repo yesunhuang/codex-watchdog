@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 from .models import MAX_PROMPT_CHARS, sha256_text
 from .queue_wake import QueueWakeDispatcher
+from .session_access_commands import parse_slack_access, reserved_control
 from .remote_ssh import RemoteSshAdapter, RemoteSshTarget
 from .slack_mapping import (
     SlackThreadMapping,
@@ -27,8 +28,6 @@ from .relay import ExactThreadRelay, ReplyResult as SlackReplyResult
 _DELIVERED_STATES = frozenset({"enqueued", "consumed_or_started", "started"})
 
 
-
-
 class SlackReplyRelay(ExactThreadRelay):
     """Relay allowlisted replies from mapped Slack threads to exact Codex threads."""
 
@@ -45,6 +44,10 @@ class SlackReplyRelay(ExactThreadRelay):
         thread_store: Optional[SlackThreadStore] = None,
         reply_mode: str = "socket",
         route_api: Optional[Any] = None,
+        access_api: Optional[Any] = None,
+        access_sender: Optional[Any] = None,
+        session_acl: Optional[Any] = None,
+        bot_api: Optional[Any] = None,
     ) -> None:
         if not isinstance(bot_token, str) or not bot_token.startswith("xoxb-"):
             raise ValueError("Slack bot token is invalid")
@@ -70,6 +73,11 @@ class SlackReplyRelay(ExactThreadRelay):
             thread_store if thread_store is not None else SlackThreadStore(runtime)
         )
         self._route_api = route_api
+        self._access_api = access_api
+        self._access_sender = access_sender
+        self._session_acl = session_acl
+        self._bot_api = bot_api
+        self._bot_verifier = None
         self._app = None
         self._handler = None
         self._listener_lock: Optional[FileLock] = None
@@ -148,11 +156,25 @@ class SlackReplyRelay(ExactThreadRelay):
 
     def _handle_bolt_message(
         self, event: Dict[str, Any], body: Dict[str, Any], client: Any
-    ) -> None:
-        result = self.handle_message(event, event_id=body.get("event_id"))
+    ) -> SlackReplyResult:
+        result = self.handle_message(event, event_id=body.get("event_id"),
+            authenticated_team_id=body.get("team_id"),
+            authenticated_app_id=body.get("api_app_id"))
         self.acknowledge(event, result, client)
+        return result
+
+    def handle_polled_message(self, event):
+        # Only the poller calls this entry point, after validating its whole page.
+        text = event.get("text") if isinstance(event, dict) else None
+        if self._bot_marked(event) or (isinstance(text, str) and text.strip()
+                                      and text.strip().split()[0].lower() == "bot"):
+            return self.handle_message(event, _from_poll=True)
+        return self.handle_message(event)
 
     def acknowledge(self, event, result, client) -> None:
+        # Bot instructions never generate a conversational acknowledgement.
+        if self._bot_marked(event) or result.status.startswith("bot_"):
+            return
         response = self._response_text(result)
         channel = event.get("channel")
         thread_ts = event.get("thread_ts")
@@ -238,10 +260,15 @@ class SlackReplyRelay(ExactThreadRelay):
         return True
 
     def handle_message(
-        self, event: Any, *, event_id: Optional[str] = None
+        self, event: Any, *, event_id: Optional[str] = None,
+        authenticated_team_id: Optional[str] = None,
+        authenticated_app_id: Optional[str] = None, _from_poll: bool = False,
     ) -> SlackReplyResult:
         if not isinstance(event, dict) or event.get("type") != "message":
             return SlackReplyResult("ignored_event_type")
+        if self._bot_marked(event):
+            return self._handle_bot_instruction(event, event_id, authenticated_team_id,
+                                                authenticated_app_id, _from_poll)
         if (
             event.get("subtype") is not None
             or event.get("bot_id") is not None
@@ -249,8 +276,16 @@ class SlackReplyRelay(ExactThreadRelay):
         ):
             return SlackReplyResult("ignored_bot_or_subtype")
         user_id = event.get("user")
-        if user_id not in self.allowed_user_ids:
+        if not valid_slack_user_id(user_id):
             return SlackReplyResult("ignored_unauthorized")
+        try:
+            if self._get_bot_access().known_user(user_id):
+                return SlackReplyResult("bot_ignored", delivery_status="bot_identity_missing")
+        except StoreBusyError:
+            return SlackReplyResult("deferred")
+        except Exception:
+            return SlackReplyResult("rejected_state_or_collision")
+        is_admin = user_id in self.allowed_user_ids
         channel_id = event.get("channel")
         if not valid_slack_channel_id(channel_id):
             return SlackReplyResult("ignored_channel")
@@ -274,13 +309,47 @@ class SlackReplyRelay(ExactThreadRelay):
         if mapping is None:
             if channel_id != self.channel_id:
                 return SlackReplyResult("ignored_channel")
+            if not is_admin:
+                return SlackReplyResult("ignored_unauthorized")
             return SlackReplyResult("ignored_unknown_thread")
 
         stable_event_id = self._event_key(event, event_id)
+        if text.strip().split(None, 1)[0].lower() == "bot":
+            if not is_admin:
+                return SlackReplyResult("ignored_unauthorized")
+            return self._handle_bot_control(event, stable_event_id, mapping,
+                authenticated_team_id, authenticated_app_id, _from_poll)
+
+        # Reserved control check: deny reserved commands from non-admins entirely;
+        # parse add/remove/access for admins before the ordinary relay path.
+        if reserved_control(text) or text.strip().split(None, 1)[0].lower() == "!codex":
+            if not is_admin:
+                return SlackReplyResult("ignored_unauthorized")
+            # Admins: bind/unbind fall through to the route-command path below.
+            # add/remove/access are handled here as access control commands.
+            first_word = text.strip().split(None, 1)[0].lower()
+            if first_word not in ("bind", "unbind"):
+                try:
+                    parsed = parse_slack_access(text)
+                except ValueError as exc:
+                    return SlackReplyResult("rejected_route_command",
+                                           workspace_id=mapping.target.workspace_id,
+                                           delivery_status=str(exc))
+                if parsed is not None:
+                    operation, raw_delegate_id = parsed
+                    return self._handle_access_command(
+                        event, stable_event_id, mapping, channel_id,
+                        thread_ts, user_id, text, operation, raw_delegate_id,
+                    )
+                # WD-BIND- or other reserved non-bind: reject
+                return SlackReplyResult("rejected_route_command",
+                                       workspace_id=mapping.target.workspace_id)
 
         from .slack_route_commands import parse_route_command
         previous = None
         if text.strip().split(None, 1)[0].lower() in ("bind", "unbind"):
+            if not is_admin:
+                return SlackReplyResult("ignored_unauthorized")
             from .session_routes import SessionRoutes
             try:
                 previous = SessionRoutes(self.thread_store, scope=self.channel_id).command_source(
@@ -306,21 +375,36 @@ class SlackReplyRelay(ExactThreadRelay):
                 delivery_status=str(exc),
             )
         if route_cmd is not None:
+            if not is_admin:
+                return SlackReplyResult("ignored_unauthorized")
             return self._handle_route_command(
                 event, stable_event_id, route_cmd, mapping, channel_id, thread_ts, user_id, text,
                 previous=previous,
             )
 
+        # Ordinary message relay. Admission callback atomically verifies target and ticket for
+        # both admins and delegates.
         instruction_id = "slack:" + sha256_text(stable_event_id)[:40]
+        access = self._get_session_access()
+        source_key = SlackThreadStore.thread_key(channel_id, thread_ts)
+        message_key = channel_id + "\0" + message_ts
+        identity = dict(channel=channel_id, thread_ts=thread_ts, message_ts=message_ts,
+                        user=user_id, text_sha256=sha256_text(text), target=mapping.target.to_dict())
+        fingerprint = sha256_text(json.dumps(identity, sort_keys=True, separators=(",", ":")))
+        admission = access.make_admission(source_key, user_id, mapping.target,
+                                         event_key=stable_event_id, message_key=message_key)
         try:
             claimed, previous_status = self.thread_store.claim_reply(
                 event_key=stable_event_id, channel_id=channel_id, thread_ts=thread_ts,
-                instruction_id=instruction_id, text=text)
+                instruction_id=instruction_id, text=text, admission=admission,
+                message_key=message_key, payload_sha256=fingerprint)
         except StoreBusyError:
             return SlackReplyResult("deferred")  # No claim or admission occurred.
         except Exception as exc:
             return SlackReplyResult("rejected_state_or_collision", error_sha256=self._error_digest(exc))
         if not claimed:
+            if previous_status == "unauthorized":
+                return SlackReplyResult("ignored_unauthorized")
             return SlackReplyResult(
                 "duplicate",
                 workspace_id=mapping.target.workspace_id,
@@ -373,6 +457,331 @@ class SlackReplyRelay(ExactThreadRelay):
         )
 
 
+
+    @staticmethod
+    def _bot_marked(event):
+        return isinstance(event, dict) and (
+            event.get("subtype") == "bot_message"
+            or any(key in event for key in ("bot_id", "bot_profile", "app_id", "api_app_id")))
+
+    def _get_bot_access(self):
+        from .slack_bot_acl import BotSessionAccess
+        return BotSessionAccess(self.thread_store, self.channel_id)
+
+    def _get_bot_verifier(self):
+        if self._bot_verifier is None:
+            from .slack_bot_identity import BotVerifier, bot_api_call
+            api = self._bot_api
+            if api is None:
+                api = lambda method, params: bot_api_call(self.bot_token, method, params)
+            self._bot_verifier = BotVerifier(api)
+        return self._bot_verifier
+
+    def _bot_context(self, team_id, app_id, from_poll):
+        context = self._get_bot_verifier().context()
+        # Socket metadata describes the receiving installation. Poll responses
+        # have no envelope; their context comes from the authenticated API token.
+        if not from_poll and (team_id != context.team_id or app_id != context.app_id):
+            raise ValueError("bot_transport_context_mismatch")
+        return context
+
+    def _handle_bot_control(self, event, event_key, mapping, team_id, app_id, from_poll):
+        from .slack_bot_identity import BotVerificationDeferred, parse_bot_control_event
+        user = event["user"]
+        source_key = self.thread_store.thread_key(event["channel"], event["thread_ts"])
+        access = self._get_bot_access()
+        try:
+            operation, mentioned = parse_bot_control_event(event)
+            if self._get_session_access().preflight(source_key, user, mapping.target) is None:
+                return SlackReplyResult("ignored_closed_ticket")
+            context = self._bot_context(team_id, app_id, from_poll)
+            if any(key in event and event[key] != context.team_id for key in ("team", "team_id")):
+                raise ValueError("bot_transport_context_mismatch")
+            verifier = self._get_bot_verifier()
+            verifier.human_owner(user)
+            principal = None
+            if mentioned is not None:
+                recorded = [value for value in access.principals(mapping.target.thread_id)
+                            if value.user_id == mentioned and value.team_id == context.team_id]
+                if operation == "remove" and len(recorded) == 1:
+                    principal = recorded[0]
+                else:
+                    principal = verifier.bot(mentioned)
+            fingerprint = sha256_text(json.dumps(dict(
+                kind="slack_bot_control", source=source_key, user=user,
+                target=mapping.target.to_dict(), operation=operation,
+                principal=principal.to_dict() if principal else None,
+                text_sha256=sha256_text(event["text"]),
+                message_ts=event["ts"], receiving=context.to_dict()),
+                sort_keys=True, separators=(",", ":")))
+            result = access.control(event_key=event_key,
+                message_key=event["channel"] + "\0" + event["ts"],
+                source_key=source_key, user_id=user, operation=operation,
+                principal=principal, expected_target=mapping.target,
+                admin_ids=self.allowed_user_ids, payload_sha256=fingerprint)
+        except (StoreBusyError, BotVerificationDeferred):
+            return SlackReplyResult("deferred")
+        except Exception as exc:
+            return SlackReplyResult("bot_control_rejected", error_sha256=self._error_digest(exc))
+        if result["status"] in ("duplicate", "closed", "unauthorized"):
+            return SlackReplyResult("bot_control_" + result["status"])
+        key = result["operation_key"]
+        try:
+            confirmation = access.claim_confirmation(key)
+            if confirmation is None:
+                return SlackReplyResult("bot_control_duplicate")
+            delegates = confirmation["principals"]
+            listing = ", ".join("<@" + value.user_id + ">" for value in delegates) or "none"
+            text = slack_message_with_host(
+                "Bot access " + result["status"] + ". Session bots: " + listing
+                + ". Human administrators retain independent access. "
+                + "Reply to this new notification for this exact session.")
+            sent = self._get_access_sender()(text, key, event["channel"])
+            if (sent.get("chat_id") != event["channel"]
+                    or not valid_slack_timestamp(sent.get("message_id"))):
+                raise ValueError("bot_confirmation_address_invalid")
+            self.thread_store.record_thread(sent["chat_id"], sent["message_id"],
+                confirmation["target"], confirmation["fingerprint"])
+            access.finish_confirmation(key, "sent")
+            self.thread_store.finish_reply(event_key, state_value="delivered",
+                                           delivery_status="bot_" + result["status"])
+        except Exception:
+            try:
+                access.finish_confirmation(key, "uncertain")
+                self.thread_store.finish_reply(event_key, state_value="uncertain",
+                                               delivery_status="bot_confirmation_uncertain")
+            except Exception:
+                pass
+            return SlackReplyResult("bot_control_uncertain", mapping.target.workspace_id, key)
+        return SlackReplyResult("bot_access_applied", mapping.target.workspace_id, key,
+                                delivery_status=result["status"])
+
+    def _handle_bot_instruction(self, event, event_id, team_id, app_id, from_poll):
+        from .slack_bot_identity import BotVerificationDeferred, event_principal, parse_bot_instruction
+        command = parse_bot_instruction(event)
+        if command is None:
+            return SlackReplyResult("ignored_bot_or_subtype", delivery_status="bot_not_instruction")
+        channel, parent, timestamp = event.get("channel"), event.get("thread_ts"), event.get("ts")
+        if (not valid_slack_channel_id(channel) or not valid_slack_timestamp(parent)
+                or not valid_slack_timestamp(timestamp) or timestamp == parent):
+            return SlackReplyResult("bot_ignored", delivery_status="bot_unmapped")
+        request_id, prompt = command
+        try:
+            mapping = self.thread_store.lookup_thread(channel, parent)
+            if mapping is None:
+                return SlackReplyResult("bot_ignored", delivery_status="bot_unmapped")
+            context = self._bot_context(team_id, app_id, from_poll)
+            principal = self._get_bot_verifier().bot(event.get("user"))
+            if event_principal(event, context.team_id, principal) is not True:
+                return SlackReplyResult("bot_ignored", delivery_status="bot_identity_mismatch")
+            event_key = self._event_key(event, event_id)
+            message_key = channel + "\0" + timestamp
+            fingerprint = sha256_text(json.dumps(dict(
+                kind="slack_bot_instruction", principal=principal.to_dict(),
+                receiving=context.to_dict(), request_id=request_id,
+                channel=channel, parent=parent, timestamp=timestamp,
+                target=mapping.target.to_dict(), text_sha256=sha256_text(event["text"])),
+                sort_keys=True, separators=(",", ":")))
+            source_key = self.thread_store.thread_key(channel, parent)
+            admission = self._get_bot_access().make_admission(source_key, principal, mapping.target,
+                request_id=request_id, event_key=event_key, message_key=message_key,
+                payload_sha256=fingerprint)
+            instruction_id = "slackbot:" + sha256_text(event_key)[:40]
+            claimed, previous = self.thread_store.claim_reply(
+                event_key=event_key, channel_id=channel, thread_ts=parent,
+                instruction_id=instruction_id, text=prompt, admission=admission,
+                message_key=message_key, payload_sha256=fingerprint)
+        except (StoreBusyError, BotVerificationDeferred):
+            return SlackReplyResult("deferred")
+        except Exception as exc:
+            return SlackReplyResult("bot_rejected", error_sha256=self._error_digest(exc))
+        if not claimed:
+            return SlackReplyResult("bot_ignored" if previous == "unauthorized" else "bot_duplicate",
+                                    delivery_status=previous, duplicate=previous != "unauthorized")
+        try:
+            result = self._controlled_reply(mapping, event_key, instruction_id, prompt,
+                                             check_legacy_receipt=False)
+            if result is None:
+                delivery = self._dispatch(mapping, instruction_id, prompt)
+                result = SlackReplyResult("queued" if delivery in _DELIVERED_STATES else "uncertain",
+                                          mapping.target.workspace_id, instruction_id, delivery)
+            delivered = result.delivery_status in _DELIVERED_STATES
+            self.thread_store.finish_reply(event_key,
+                state_value="delivered" if delivered else "uncertain",
+                delivery_status=result.delivery_status or result.status)
+            return replace(result, status="bot_queued" if delivered else "bot_uncertain")
+        except Exception as exc:
+            try:
+                self.thread_store.finish_reply(event_key, state_value="uncertain",
+                                               delivery_status="exception")
+            except Exception:
+                pass
+            return SlackReplyResult("bot_uncertain", mapping.target.workspace_id, instruction_id,
+                                    error_sha256=self._error_digest(exc))
+
+    def _get_session_access(self) -> Any:
+        from .session_access import SessionAccess
+        return SessionAccess(
+            self.thread_store, "slack", self.channel_id,
+            admin_ids=tuple(self.allowed_user_ids),
+            acl=self._session_acl,
+        )
+
+    def _get_access_api(self) -> Any:
+        if self._access_api is not None:
+            return self._access_api
+        from .session_access_commands import slack_user_get
+        token = self.bot_token
+        def _api(method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+            return slack_user_get(token, method, params)
+        return _api
+
+    def _get_access_sender(self) -> Any:
+        if self._access_sender is not None:
+            return self._access_sender
+        token = self.bot_token
+        def _sender(text: str, operation_id: str, destination: str) -> Dict[str, Any]:
+            try:
+                from slack_sdk import WebClient
+                client = WebClient(token=token, retry_handlers=[])
+                resp = client.chat_postMessage(
+                    channel=destination, text=text,
+                    unfurl_links=False, unfurl_media=False,
+                )
+                resp_dict = resp.data if hasattr(resp, "data") else (resp if isinstance(resp, dict) else {})
+                if (resp_dict.get("ok") is not True
+                        or resp_dict.get("channel") != destination
+                        or not valid_slack_timestamp(resp_dict.get("ts"))):
+                    raise ValueError("access_sender_bad_response")
+                return {"chat_id": resp_dict["channel"], "message_id": resp_dict["ts"]}
+            except ImportError:
+                raise RuntimeError("slack_sdk required for access sender")
+        return _sender
+
+    def _handle_access_command(
+        self,
+        event: Any,
+        stable_event_id: str,
+        mapping: Any,
+        channel_id: str,
+        thread_ts: str,
+        user_id: str,
+        text: str,
+        operation: str,
+        raw_delegate_id: Optional[str],
+    ) -> SlackReplyResult:
+        """Handle admin add/remove/access with one-shot confirmation mapping."""
+        message_ts = event.get("ts", "")
+        source_key = SlackThreadStore.thread_key(channel_id, thread_ts)
+        message_key = channel_id + "\0" + message_ts
+
+        # Preflight: atomically verify source ticket is active and target unchanged.
+        access = self._get_session_access()
+        try:
+            current_delegates = access.preflight(source_key, user_id, mapping.target)
+            if current_delegates is None:
+                return SlackReplyResult("ignored_closed_ticket",
+                                       workspace_id=mapping.target.workspace_id)
+        except StoreBusyError:
+            return SlackReplyResult("deferred")
+        except Exception as exc:
+            return SlackReplyResult("rejected_state_or_collision",
+                                   error_sha256=self._error_digest(exc))
+
+        # Verify delegate identity for add/remove; skip for known admins and existing delegates.
+        delegate_id = raw_delegate_id
+        if operation in ("add", "remove") and raw_delegate_id is not None:
+            if raw_delegate_id in self.allowed_user_ids:
+                pass  # Admin target: apply() will return already_admin
+            else:
+                skip_verify = operation == "remove" and raw_delegate_id in current_delegates
+                if not skip_verify:
+                    try:
+                        from .session_access_commands import verify_slack_user
+                        delegate_id = verify_slack_user(raw_delegate_id, self._get_access_api())
+                    except ValueError as exc:
+                        return SlackReplyResult("rejected_route_command",
+                                               workspace_id=mapping.target.workspace_id,
+                                               delivery_status=str(exc))
+                    except Exception as exc:
+                        from urllib.error import HTTPError
+                        if isinstance(exc, HTTPError) and exc.code == 429:
+                            raise
+                        return SlackReplyResult("rejected_route_command",
+                                               workspace_id=mapping.target.workspace_id)
+
+        # Build deterministic payload fingerprint including command text hash.
+        identity: Dict[str, Any] = {
+            "provider": "slack", "channel": channel_id, "thread_ts": thread_ts,
+            "message_ts": message_ts, "user": user_id,
+            "operation": operation, "delegate": delegate_id,
+            "target": mapping.target.to_dict(),
+            "text_sha256": sha256_text(text),
+        }
+        payload_sha256 = sha256_text(
+            json.dumps(identity, sort_keys=True, separators=(",", ":")))
+        try:
+            result = access.apply(
+                event_key=stable_event_id, message_key=message_key,
+                source_key=source_key, user_id=user_id,
+                operation=operation, delegate_id=delegate_id,
+                payload_sha256=payload_sha256, expected_target=mapping.target,
+            )
+        except StoreBusyError:
+            return SlackReplyResult("deferred")
+        except ValueError as exc:
+            return SlackReplyResult("rejected_state_or_collision",
+                                   error_sha256=self._error_digest(exc))
+
+        operation_key = result["operation_key"]
+        status = result["status"]
+
+        if status == "duplicate":
+            return SlackReplyResult("duplicate", mapping.target.workspace_id,
+                                   operation_key, duplicate=True)
+
+        # Once-only claim before any external effect.
+        try:
+            claim = access.claim_confirmation(operation_key)
+        except Exception:
+            return SlackReplyResult("uncertain", mapping.target.workspace_id, operation_key)
+
+        if claim is None:
+            return SlackReplyResult("duplicate", mapping.target.workspace_id,
+                                   operation_key, duplicate=True)
+
+        target = claim["target"]
+        fingerprint = claim["fingerprint"]
+        delegates = claim.get("delegates", [])
+
+        from .session_access import access_confirmation_text_slack
+        text_out = slack_message_with_host(
+            access_confirmation_text_slack(operation, status, delegate_id, delegates, target))
+
+        # Send fresh top-level message (not a reply) and record the new mapping.
+        try:
+            sender = self._get_access_sender()
+            sent = sender(text_out, operation_key, channel_id)
+            new_channel = sent.get("chat_id")
+            new_ts = sent.get("message_id")
+            if (not valid_slack_channel_id(new_channel)
+                    or new_channel != channel_id
+                    or not valid_slack_timestamp(new_ts)):
+                raise ValueError("access_confirmation_address_invalid")
+            self.thread_store.record_thread(new_channel, new_ts, target, fingerprint)
+            access.finish_confirmation(operation_key, "sent")
+        except Exception:
+            try:
+                access.finish_confirmation(operation_key, "uncertain")
+            except Exception:
+                pass
+            return SlackReplyResult("uncertain", mapping.target.workspace_id, operation_key,
+                                   delivery_status="access_confirmation_uncertain")
+
+        return SlackReplyResult(
+            "access_applied", mapping.target.workspace_id, operation_key,
+            delivery_status=status,
+        )
 
     def _handle_route_command(
         self,
@@ -500,6 +909,13 @@ class SlackReplyRelay(ExactThreadRelay):
         if result.status == "route_unbound":
             return "Session route unbound. Notifications return to the default channel."
         if result.status == "rejected_route_command":
+            if result.delivery_status == "access_verify_missing_scope":
+                return ("WatchDog needs the Slack users:read bot scope to verify a new delegate. "
+                        "Authorize that scope for the existing app, then retry add @person.")
+            if (isinstance(result.delivery_status, str)
+                    and result.delivery_status.startswith("access_")):
+                return ("WatchDog could not change session access. Reply with add @person, "
+                        "remove @person or access, using one native user mention.")
             if result.delivery_status == "route_destination_missing_scope":
                 return (
                     "WatchDog cannot verify this channel: the bot is missing a required Slack scope. "
