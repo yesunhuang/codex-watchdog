@@ -395,6 +395,249 @@ def test_invalid_completion_receipt_cannot_release_writer(scenario, changes, rea
     assert json.loads(path.read_text())["state"] == changes["state"]
 
 
+def _park_and_restart_saved_continuation(s, monkeypatch, *, proof="exact"):
+    from codex_watchdog.control_context import acting_as
+    from codex_watchdog.control_state import ControlStore
+
+    store = ControlStore(s.binding.codex_home, THREAD, s.workspace.repo_root,
+                         clock=lambda: 100, boot_id="fixture-boot")
+    local = store.attach("desktop", "fixture-desktop", "vscode")
+    store.detach(local)
+    token = store.claim_remote("original-monitor", "fixture-host", "absent", host_observer=True)
+    # Exercise the node's actual durable park writer path with a coordinated
+    # native-writer fixture, without emulating any second native Codex session.
+    s.owner.node_local = True
+    _append_native_events(s, [{"type": "event_msg", "payload": {
+        "type": "task_started", "turn_id": INTERRUPTED,
+    }}])
+    with acting_as(store, token):
+        assert s.step()["continuation"]["status"] == "enqueued"
+    instruction = s.owner.continuation._instruction(THREAD, INTERRUPTED)
+    receipt_path = s.dispatcher.records / (sha256_text(instruction) + ".json")
+    receipt = json.loads(receipt_path.read_text())
+    receipt.update(state="consumed_or_started", future_receipt_setting={"preserve": True})
+    InstructionStore._atomic_json(receipt_path, receipt)
+    continuation = json.loads(s.owner.continuation.path.read_text())
+    continuation.update(status="consumed_or_started", future_continuation_setting={"preserve": True})
+    InstructionStore._atomic_json(s.owner.continuation.path, continuation)
+    if proof == "exact":
+        _consume_completed_continuation(s, INTERRUPTED, extra_newline=True)
+    elif proof == "wrong_turn":
+        _consume_completed_continuation(s, CONTINUED, extra_newline=True)
+    else:
+        with sqlite3.connect(s.binding.codex_home / "queue_1.sqlite") as db:
+            db.execute("DELETE FROM queued_items")
+        _append_native_events(s, [{"type": "event_msg", "payload": {
+            "type": "task_complete", "turn_id": INTERRUPTED,
+        }}])
+        s.latest, s.status = INTERRUPTED, "completed"
+    # Supported idle handback skips dispatch/continuation work, closes only
+    # its verified writer, and retains the node's armed durable park gate.
+    s.owner.yield_requested = True
+    with acting_as(store, token):
+        assert s.step()["owner_state"] == "waiting_for_attach"
+    assert s.owner.client is None and s.writer is None
+    assert store.read()["node_parked"] is True and s.binding.load()["state"] == "armed"
+    assert json.loads(receipt_path.read_text())["state"] == "consumed_or_started"
+    store.release_remote(token, "absent")
+    s.token = store.claim_remote("replacement-monitor", "fixture-host", "absent", host_observer=True)
+    s.store, s.receipt_path, s.initial_receipt = store, receipt_path, receipt
+    s.owner = s.make_owner()
+    s.owner.node_local = True
+    s.native_calls_before_restart = list(s.calls)
+    monkeypatch.setattr(s.owner, "client_factory", lambda *a: pytest.fail("parked restart must not open a native client"))
+    monkeypatch.setattr(s.dispatcher, "dispatch", lambda *a, **kw: pytest.fail("parked reconciliation must not dispatch"))
+
+
+def _step_parked(s):
+    from codex_watchdog.control_context import acting_as
+    with acting_as(s.store, s.token):
+        return s.step()
+
+
+def test_parked_restart_automatically_reconciles_completed_saved_receipt(scenario, monkeypatch):
+    s = scenario
+    _park_and_restart_saved_continuation(s, monkeypatch)
+    result = _step_parked(s)
+    assert result["owner_state"] == "parked"
+    receipt = json.loads(s.receipt_path.read_text())
+    assert receipt["state"] == "started"
+    assert result["continuation"]["status"] == "started"
+    assert receipt["started_turn_id"] == INTERRUPTED
+    for key in ("instruction_id", "thread_id", "prompt_sha256", "queue_message_id",
+                "rollout_baseline_offset", "created_at", "future_receipt_setting"):
+        assert receipt[key] == s.initial_receipt[key]
+    saved = json.loads(s.owner.continuation.path.read_text())
+    assert saved["continuation_turn_id"] == INTERRUPTED
+    assert saved["future_continuation_setting"] == {"preserve": True}
+    assert saved["notifications"] == {}
+    assert s.store.read()["node_parked"] is True and s.binding.load()["state"] == "armed"
+    assert s.owner.client is None and s.writer is None
+    assert s.calls == s.native_calls_before_restart and len(s.sent) == 1 and not s.notices
+    assert _step_parked(s)["owner_state"] == "parked"
+    s.store.release_remote(s.token, "absent")
+    s.token = s.store.claim_remote("third-monitor", "fixture-host", "absent", host_observer=True)
+    s.owner = s.make_owner()
+    s.owner.node_local = True
+    monkeypatch.setattr(s.owner, "client_factory", lambda *a: pytest.fail("receipt recovery must keep a vacant writer"))
+    assert _step_parked(s)["continuation"]["status"] == "started"
+    assert s.store.read()["node_parked"] is True
+    assert s.calls == s.native_calls_before_restart and len(s.sent) == 1 and not s.notices
+
+
+@pytest.mark.parametrize("damage,reason", [
+    ("missing", "receipt_missing"), ("malformed", "Expecting"), ("wrong_target", "receipt_invalid"),
+])
+def test_parked_reconciliation_fails_closed_on_invalid_saved_receipt(scenario, monkeypatch, damage, reason):
+    s = scenario
+    _park_and_restart_saved_continuation(s, monkeypatch)
+    if damage == "missing":
+        s.receipt_path.unlink()
+    elif damage == "malformed":
+        s.receipt_path.write_text("not-json")
+    else:
+        receipt = json.loads(s.receipt_path.read_text())
+        receipt["thread_id"] = CONTINUED
+        InstructionStore._atomic_json(s.receipt_path, receipt)
+    with pytest.raises(ValueError, match=reason):
+        _step_parked(s)
+    assert s.owner.client is None and s.writer is None and s.store.read()["node_parked"] is True
+    assert s.calls == s.native_calls_before_restart and len(s.sent) == 1 and not s.notices
+
+
+@pytest.mark.parametrize("proof,state", [
+    ("missing_message", "consumed_or_started"), ("wrong_turn", "consumed_or_started"),
+    ("exact", "uncertain"), ("exact", "dispatching"),
+])
+def test_parked_reconciliation_preserves_unproven_and_uncertain_delivery(scenario, monkeypatch, proof, state):
+    s = scenario
+    _park_and_restart_saved_continuation(s, monkeypatch, proof=proof)
+    receipt = json.loads(s.receipt_path.read_text())
+    receipt["state"] = state
+    InstructionStore._atomic_json(s.receipt_path, receipt)
+    value = json.loads(s.owner.continuation.path.read_text())
+    value["status"] = state
+    InstructionStore._atomic_json(s.owner.continuation.path, value)
+    result = _step_parked(s)
+    assert result["owner_state"] == "parked" and result["continuation"]["status"] == state
+    assert json.loads(s.receipt_path.read_text())["state"] == state
+    saved = json.loads(s.owner.continuation.path.read_text())
+    assert saved.get("continuation_turn_id") is None and saved["notifications"] == {}
+    assert s.owner.client is None and s.writer is None and s.store.read()["node_parked"] is True
+    assert s.calls == s.native_calls_before_restart and len(s.sent) == 1 and not s.notices
+
+
+def test_parked_prepared_without_queue_record_does_not_admit_work(scenario, monkeypatch):
+    s = scenario
+    _park_and_restart_saved_continuation(s, monkeypatch)
+    s.receipt_path.unlink()
+    value = json.loads(s.owner.continuation.path.read_text())
+    value["status"] = "prepared"
+    InstructionStore._atomic_json(s.owner.continuation.path, value)
+    result = _step_parked(s)
+    assert result["owner_state"] == "parked" and result["continuation"]["status"] == "prepared"
+    assert not s.receipt_path.exists() and s.owner.client is None and s.writer is None
+    assert s.calls == s.native_calls_before_restart and len(s.sent) == 1 and not s.notices
+
+
+def test_parked_reconciliation_is_rate_limited_between_owner_steps(scenario, monkeypatch):
+    from codex_watchdog.control_context import acting_as
+    s = scenario
+    _park_and_restart_saved_continuation(s, monkeypatch, proof="missing_message")
+    clock = [1000.0]
+    monkeypatch.setattr(linux_owner, "time", SimpleNamespace(
+        monotonic=lambda: clock[0], time=linux_owner.time.time))
+    assert _step_parked(s)["continuation"]["status"] == "consumed_or_started"
+    next_check = s.owner._next_continuation_check
+    assert next_check > clock[0]
+    observe, calls = s.dispatcher.observe_delivery, []
+
+    def checked_observe(*args, **kwargs):
+        assert clock[0] >= next_check, "tight owner step must not rescan a historical receipt"
+        calls.append(args)
+        return observe(*args, **kwargs)
+
+    monkeypatch.setattr(s.dispatcher, "observe_delivery", checked_observe)
+    with acting_as(s.store, s.token):
+        assert s.owner.step(observe=False)["owner_state"] == "parked"
+    assert not calls
+    clock[0] = next_check
+    with acting_as(s.store, s.token):
+        assert s.owner.step(observe=False)["owner_state"] == "parked"
+    assert len(calls) == 1
+    assert s.calls == s.native_calls_before_restart and len(s.sent) == 1 and not s.notices
+
+
+@pytest.mark.parametrize("gate,expected", [
+    ("release", "released"), ("expired", "released"), ("yield", "waiting_for_attach"),
+    ("attached_writer", "observing"),
+])
+def test_parked_receipt_reconciliation_retains_lifecycle_barriers(scenario, monkeypatch, gate, expected):
+    s = scenario
+    _park_and_restart_saved_continuation(s, monkeypatch)
+    before = s.receipt_path.read_bytes()
+    if gate == "release":
+        s.owner.release_requested = True
+    elif gate == "expired":
+        path = linux_binding.reservation_path(s.binding.codex_home, THREAD)
+        value = json.loads(path.read_text())
+        value["expires_at"] = 0
+        InstructionStore._atomic_json(path, value)
+    elif gate == "yield":
+        s.owner.yield_requested = True
+    else:
+        s.writer = 777
+    assert _step_parked(s)["owner_state"] == expected
+    assert s.receipt_path.read_bytes() == before
+    assert s.owner.client is None and s.calls == s.native_calls_before_restart
+    assert len(s.sent) == 1 and not s.notices
+
+
+def test_automatic_pause_releases_parked_owner_without_reconciling_receipt(scenario, monkeypatch):
+    from contextlib import ExitStack
+    from codex_watchdog import linux_auto
+    from codex_watchdog.control_state import control_atomic_json
+    s = scenario
+    _park_and_restart_saved_continuation(s, monkeypatch)
+    before = s.receipt_path.read_bytes()
+    with s.store.guard(s.token) as value:
+        value["auto_paused"] = True
+        control_atomic_json(s.store.path, value)
+    monkeypatch.setattr(linux_auto, "writer_pid", lambda *a: s.writer)
+    monkeypatch.setattr(linux_auto, "vscode_writer", lambda pid: pid == 777)
+    monkeypatch.setattr(linux_auto, "locality_identity", lambda: "fixture-host")
+    agent = linux_auto.LinuxAutoWatchdog(s.binding.runtime, s.binding.codex_home, continue_interrupted=True)
+    agent.controllers[THREAD] = dict(store=s.store, token=s.token, owner=s.owner, locks=ExitStack())
+    assert agent.step(observe=False)[0]["state"] == "released"
+    assert s.receipt_path.read_bytes() == before and s.store.read()["auto_paused"] is True
+    assert s.owner.client is None and s.writer is None and s.calls == s.native_calls_before_restart
+    assert len(s.sent) == 1 and not s.notices
+
+
+@pytest.mark.parametrize("gate,reason", [
+    ("stale_epoch", "control_stale_epoch"), ("expired_owner", "control_lease_expired"),
+    ("missing_capability", "control_owner_capability_required"), ("foreign_writer", "linux_conflicting_writer"),
+])
+def test_parked_reconciliation_cannot_adopt_missing_or_stale_ownership(scenario, monkeypatch, gate, reason):
+    from codex_watchdog.control_state import control_atomic_json
+    s = scenario
+    _park_and_restart_saved_continuation(s, monkeypatch)
+    before = s.receipt_path.read_bytes()
+    if gate == "stale_epoch":
+        s.store.release_remote(s.token, "absent")
+        assert s.store.claim_remote("new-authoritative-owner", "fixture-host", "absent", host_observer=True)
+    elif gate == "expired_owner":
+        with s.store.guard(s.token) as value:
+            value["owner"]["expires"] = 99
+            control_atomic_json(s.store.path, value)
+    elif gate == "foreign_writer":
+        s.writer = 999
+    with pytest.raises(ValueError, match=reason):
+        s.step() if gate == "missing_capability" else _step_parked(s)
+    assert s.receipt_path.read_bytes() == before and s.owner.client is None
+    assert s.calls == s.native_calls_before_restart and len(s.sent) == 1 and not s.notices
+
+
 def test_crash_after_notification_send_does_not_send_again(scenario):
     s = scenario
     s.step()

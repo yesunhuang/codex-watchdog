@@ -91,7 +91,10 @@ The runtime foreground lock and per-thread owner lock prevent competing owners.
 The reservation fences new WatchDog queue sends from other runtimes and the
 Remote-SSH helper. It does not control direct first-party Codex clients. Existing
 queue receipts can always be passively reconciled; uncertain/dispatching sends
-are never retried. Normal queue commands targeting this runtime remain available.
+are never retried. Parked monitoring automatically checks an existing continuation
+receipt without reopening the thread or sending another instruction. Its pending
+notification still requires genuine native writer ownership. Normal queue commands
+targeting this runtime remain available.
 
 ## Restart and reattachment
 

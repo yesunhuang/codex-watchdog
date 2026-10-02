@@ -252,16 +252,19 @@ class LinuxThreadOwner:
                     self.binding.renew_lease(self.thread)
                 except StoreBusyError:
                     pass  # Retry next owner check; a released/expired lease stays fenced.
-            if (self.continuation is not None and result["owner_state"] == "owned"
+            if (self.continuation is not None and result["owner_state"] in ("owned", "parked")
                     and not self.release_requested and not self.yield_requested
                     and time.monotonic() >= self._next_continuation_check):
                 try:
-                    self.continuation_status = self.continuation.step(self, workspace)
+                    if result["owner_state"] == "owned":
+                        self.continuation_status = self.continuation.step(self, workspace)
+                        continuation_checked = True
+                    else:
+                        self.continuation_status = self.continuation.reconcile(self)
                 except StoreBusyError:
                     return self._status("standby", "control_operation_in_progress")
                 self._next_continuation_check = time.monotonic() + 5
-                continuation_checked = True
-                result = self._status("owned")
+                result = self._status(result["owner_state"])
         if self._recovery_notice is not None:
             self.health.report(self._recovery_notice, recovering=True)
             self._recovery_notice = None

@@ -127,6 +127,38 @@ class LinuxContinuation:
             raise LinuxBindingError("linux_continuation_turn_unverified") from exc
         return identifier, status
 
+    def _observe_receipt(self, value, thread):
+        if value is None:
+            return
+        record = self.dispatcher.records / (sha256_text(value["instruction_id"]) + ".json")
+        if record.exists():
+            receipt = self.dispatcher.observe_delivery(value["instruction_id"])
+            if receipt.thread_id != thread or receipt.status not in (
+                "enqueued", "consumed_or_started", "started", "uncertain", "dispatching",
+            ):
+                raise LinuxBindingError("linux_continuation_receipt_invalid")
+            value["status"] = receipt.status
+            if receipt.status == "started":
+                queued = json.loads(record.read_text(encoding="utf-8"))
+                try:
+                    value["continuation_turn_id"] = str(uuid.UUID(queued["started_turn_id"]))
+                except (KeyError, ValueError, TypeError, AttributeError) as exc:
+                    raise LinuxBindingError("linux_continuation_start_unverified") from exc
+            self._save(value)
+        elif value["status"] != "prepared":
+            raise LinuxBindingError("linux_continuation_receipt_missing")
+
+    def reconcile(self, owner):
+        """Observe an existing receipt under the owner fence without a native client.
+
+        Parked monitoring must retain its parked state. Receipt evidence cannot
+        authorize a new continuation or an external notification here.
+        """
+        with FileLock(self.lock):
+            value = self._read(owner.thread)
+            self._observe_receipt(value, owner.thread)
+            return self._summary(value)
+
     def notify_pending(self, owner, workspace):
         # Canonical notification preparation owns its own control lock. Never
         # call it while the writer step still holds that lock.
@@ -154,28 +186,9 @@ class LinuxContinuation:
 
         with FileLock(self.lock):
             value = self._read(owner.thread)
-            if value is not None:
-                record = self.dispatcher.records / (sha256_text(value["instruction_id"]) + ".json")
-                if record.exists():
-                    receipt = self.dispatcher.observe_delivery(value["instruction_id"])
-                    if receipt.thread_id != owner.thread or receipt.status not in (
-                        "enqueued", "consumed_or_started", "started", "uncertain", "dispatching",
-                    ):
-                        raise LinuxBindingError("linux_continuation_receipt_invalid")
-                    value["status"] = receipt.status
-                    if receipt.status == "started":
-                        queued = json.loads(record.read_text(encoding="utf-8"))
-                        try:
-                            continuation_turn = str(uuid.UUID(queued["started_turn_id"]))
-                        except (KeyError, ValueError, TypeError, AttributeError) as exc:
-                            raise LinuxBindingError("linux_continuation_start_unverified") from exc
-                        value["continuation_turn_id"] = continuation_turn
-                        self._save(value)
-                    else:
-                        self._save(value)
-                        return self._summary(value)
-                elif value["status"] != "prepared":
-                    raise LinuxBindingError("linux_continuation_receipt_missing")
+            self._observe_receipt(value, owner.thread)
+            if value is not None and value["status"] not in ("prepared", "started"):
+                return self._summary(value)
 
             if owner.thread_status != "idle" or owner.approval_required:
                 return self._summary(value)
