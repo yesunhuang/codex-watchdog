@@ -1,49 +1,31 @@
-# Codex WatchDog 2.2.0
+# Codex WatchDog 2.2.1
 
-Share an existing Codex session with another person through Slack, Feishu/Lark or
-OneBot. Administrators reply `add @person`, `remove @person` or `access` to an active
-WatchDog notification, selecting the person through the native mention picker.
-Successful controls return a fresh mapped confirmation for further replies.
-Delegates can send ordinary instructions to that exact session; administration and
-destination changes remain restricted to configured administrators.
+Fix automatic writer handback after a Linux interruption has already completed.
+The queued-wake receipt matcher now recognizes the exact saved instruction when
+Codex appends one terminal newline, and recognizes completion of the declared
+interrupted turn when its original start precedes the saved receipt baseline.
+This lets the existing idle, queue and writer checks release the backend so the
+same conversation can return to VS Code. No second conversation is created.
 
-Human administrators can also authorize a Slack bot, such as Dora, with
-`bot add @bot`, inspect grants with `bot access`, and revoke with `bot remove @bot`.
-The bot replies to an active mapped notification using the single-line format:
+Matching still requires the exact thread, instruction marker, saved prompt hash
+and native turn evidence. Ambiguous, malformed, truncated or replaced transcript
+evidence remains unresolved. An uncertain instruction is not replayed and a
+receipt is not cleared merely because it is old or the queue is empty. Transcript
+matching streams a fixed snapshot instead of loading the whole appended history.
 
-```text
-!codex 7abff3bc-a4ad-41f2-8237-b3a6672fe941 -- Reply only HELLO_TEST_OK.
-```
+Existing runtimes, credentials, pairings, notification destinations, grants and
+reply-ticket journals are preserved. Version 2.2.1 rebuilds Windows x64, Linux
+x64, Linux ARM64 and macOS ARM64 preview from one public source revision. Release
+gates include native package checks, complete file hashes, privacy checks, the
+Windows embedded application icon and upgrade from public 2.2.0.
 
-Generate a new lowercase UUID for each new request; retain it when retransmitting
-the same request. The separator is exactly ` -- `. A multiline envelope remains
-supported when its actual newline is preserved. Instructions use plain text;
-rich-text plain sections must reproduce it exactly. The mapped notification, not
-the UUID, selects the session. Ordinary bot chatter and bot administrative controls
-are rejected. Durable request admission suppresses replay of an admitted request.
+Session sharing and Slack bot controls from 2.2.0 remain available; see the shipped
+session-access and destination-binding guides for syntax and provider permissions.
+No additional access is granted by upgrading.
 
-Slack grants require `users:read`. Feishu/Lark grants require contact-user lookup
-permission and visibility of the selected person. Grants remain local to the
-runtime, provider and exact session, and do not transfer between Slack socket and
-polling modes. A grant does not invite a person into a private conversation.
-
-Existing runtime, credentials, pairings, routes, grants and reply tickets are
-preserved. Durable access records reuse the reply-ticket journal. Revocation
-governs subsequent admission, including replies to older active notifications.
-Ambiguous identity, ownership or delivery continues to block action. Uncertain
-external sends are not automatically repeated. The session-access guide ships in
-every supported package alongside the existing destination-binding guide.
-
-The accepted candidate passed native Windows, Linux x64/ARM64 and macOS ARM64
-tests. Slack bot delivery passed live Windows/macOS tests, including same-request
-replay rejection on macOS. Human delegation and OneBot delegation have automated
-coverage; test the intended person/provider before relying on that access path.
-Release CI additionally checks all rebuilt packages and Windows upgrade from the
-immediately previous public 2.1.0 release, including the embedded application icon.
-
-Known limits: macOS remains an ARM64 preview; existing unmapped-window and
-other-window ownership warnings can limit session discovery. On shared-home Linux
-hosts, a stale previous-boot writer flag can still block monitoring handoff and
-require evidence-based operator recovery. This release does not add automatic
-recovery for that case. Outbound greeting success alone does not establish incoming
-human-reply acceptance. QQ/OneBot has no new live acceptance in this release.
+Known limits remain: macOS is an ARM64 preview; unmapped-window and other-window
+ownership evidence can limit automatic discovery. A stale previous-boot writer
+flag on shared-home Linux can still require evidence-based operator recovery.
+The separate Windows follower-view recovery-notification limitation is unchanged.
+Human delegation and QQ/OneBot have no new live acceptance in this patch.
+Outbound notification success alone does not establish incoming reply acceptance.

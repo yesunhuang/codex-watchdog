@@ -565,72 +565,114 @@ class QueueWakeDispatcher:
 
     @classmethod
     def _rollout_started(cls, record: Dict[str, Any]) -> Optional[str]:
+        """Correlate native delivery without replaying an uncertain queue item.
+
+        Normally a native start and exact queued UserMessage must follow baseline.
+        Linux interruption recovery can instead continue the declared old turn:
+        require that exact message and a subsequent completion of that same turn.
+        The receipt's byte baseline still excludes every pre-dispatch echo.
+        """
         rollout_path = record.get("rollout_path")
         baseline = record.get("rollout_baseline_offset")
         thread_id = record.get("thread_id")
+        digest = record.get("prompt_sha256")
+        instruction = record.get("instruction_id")
         if (
             not isinstance(rollout_path, str)
-            or not isinstance(baseline, int)
+            or type(baseline) is not int or baseline < 0
             or not isinstance(thread_id, str)
+            or _UUID.fullmatch(thread_id) is None
+            or str(uuid.UUID(thread_id)) != thread_id
+            or not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            or not isinstance(instruction, str)
         ):
             return None
+        resumed_turn = None
+        continuation_prefix = "linux-continue:" + thread_id + ":"
+        if record.get("source") == "linux_interruption" and instruction.startswith(continuation_prefix):
+            candidate = instruction[len(continuation_prefix):]
+            if _UUID.fullmatch(candidate) is not None and str(uuid.UUID(candidate)) == candidate:
+                resumed_turn = candidate
+
+        prefix = cls._marker(record) + "\n"
+        started_turns = set()
+        message_turns = set()
+        proven_turns = set()
+        conflicting_turns = set()
         path = Path(rollout_path)
         try:
             with path.open("rb") as handle:
+                snapshot = os.fstat(handle.fileno())
+                if baseline > snapshot.st_size:
+                    return None
+                if baseline:
+                    handle.seek(baseline - 1)
+                    if handle.read(1) != b"\n":
+                        return None  # An offset inside an event is not a delivery boundary.
                 handle.seek(baseline)
-                appended = handle.read()
-        except (OSError, ValueError):
+                remaining = snapshot.st_size - baseline
+                while remaining:
+                    # Stream complete events in one fixed snapshot. A long-lived
+                    # receipt must not materialize hundreds of MB of native history.
+                    line = handle.readline(remaining)
+                    remaining -= len(line)
+                    if not line.endswith(b"\n"):
+                        return None  # Concurrent truncation or an unfinished event.
+                    event = json.loads(line)
+                    if not isinstance(event, dict):
+                        return None
+                    if event.get("type") != "event_msg":
+                        continue
+                    payload = event.get("payload")
+                    if not isinstance(payload, dict):
+                        return None
+                    kind, turn = payload.get("type"), payload.get("turn_id")
+                    if kind not in ("task_started", "item_completed", "task_complete"):
+                        continue
+                    if (not isinstance(turn, str) or _UUID.fullmatch(turn) is None
+                            or str(uuid.UUID(turn)) != turn):
+                        continue
+                    if "thread_id" in payload and payload["thread_id"] != thread_id:
+                        conflicting_turns.add(turn)
+                        continue
+                    if kind == "task_started":
+                        started_turns.add(turn)
+                        if turn in message_turns:
+                            proven_turns.add(turn)
+                    elif kind == "task_complete":
+                        if turn == resumed_turn and turn in message_turns:
+                            proven_turns.add(turn)
+                    elif payload.get("thread_id") == thread_id:
+                        item = payload.get("item")
+                        if not isinstance(item, dict) or item.get("type") != "UserMessage":
+                            continue
+                        content = item.get("content")
+                        if not isinstance(content, list) or len(content) != 1:
+                            continue
+                        part = content[0]
+                        if not isinstance(part, dict) or part.get("type") != "text":
+                            continue
+                        text = part.get("text")
+                        if not isinstance(text, str) or not text.startswith(prefix):
+                            continue
+                        prompt = text[len(prefix):]
+                        if (sha256_text(prompt) != digest
+                                and not (prompt.endswith("\n") and sha256_text(prompt[:-1]) == digest)):
+                            continue  # Only the proven single appended LF is tolerated.
+                        message_turns.add(turn)
+                        if len(message_turns) > 1:
+                            return None  # The same wake cannot identify competing turns.
+                        if turn in started_turns:
+                            proven_turns.add(turn)
+                current = path.stat()
+                if ((current.st_dev, current.st_ino) != (snapshot.st_dev, snapshot.st_ino)
+                        or os.fstat(handle.fileno()).st_size < snapshot.st_size):
+                    return None
+        except (OSError, ValueError, UnicodeError):
             return None
-        if not appended.endswith(b"\n"):
-            appended = (
-                appended.rsplit(b"\n", 1)[0] + b"\n" if b"\n" in appended else b""
-            )
-        events: List[Dict[str, Any]] = []
-        for line in appended.splitlines():
-            try:
-                event = json.loads(line.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                continue
-            if isinstance(event, dict):
-                events.append(event)
-        started_turns = {
-            payload.get("turn_id")
-            for event in events
-            for payload in [event.get("payload")]
-            if event.get("type") == "event_msg"
-            and isinstance(payload, dict)
-            and payload.get("type") == "task_started"
-            and isinstance(payload.get("turn_id"), str)
-        }
-        marker = cls._marker(record)
-        prefix = marker + "\n"
-        for event in events:
-            payload = event.get("payload")
-            if (
-                event.get("type") != "event_msg"
-                or not isinstance(payload, dict)
-                or payload.get("type") != "item_completed"
-                or payload.get("thread_id") != thread_id
-                or payload.get("turn_id") not in started_turns
-            ):
-                continue
-            item = payload.get("item")
-            if not isinstance(item, dict) or item.get("type") != "UserMessage":
-                continue
-            content = item.get("content")
-            if not isinstance(content, list):
-                continue
-            for part in content:
-                if (
-                    isinstance(part, dict)
-                    and part.get("type") == "text"
-                    and isinstance(part.get("text"), str)
-                    and part["text"].startswith(prefix)
-                    and sha256_text(part["text"][len(prefix) :])
-                    == record.get("prompt_sha256")
-                ):
-                    return str(payload["turn_id"])
-        return None
+        if len(proven_turns) != 1 or message_turns & conflicting_turns:
+            return None
+        return next(iter(proven_turns))
 
     @staticmethod
     def _receipt_from_record(

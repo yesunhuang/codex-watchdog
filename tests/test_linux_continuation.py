@@ -95,6 +95,7 @@ def scenario(tmp_path, monkeypatch):
     data.make_owner = make_owner
     data.dispatcher = dispatcher
     data.notifier = notifier
+    data.rollout = rollout
 
     def step():
         data.owner._next_continuation_check = 0
@@ -233,6 +234,167 @@ def test_auto_continuation_interruption_does_not_make_a_retry_loop(scenario):
     assert [x.event_type for x in s.notices] == ["linux_continuation_started", "linux_continuation_interrupted"]
 
 
+def _append_native_events(scenario, events):
+    with scenario.rollout.open("a", encoding="utf-8") as file:
+        for event in events:
+            file.write(json.dumps(event) + "\n")
+
+
+def _consume_completed_continuation(scenario, turn, extra_newline=False):
+    with sqlite3.connect(scenario.binding.codex_home / "queue_1.sqlite") as db:
+        db.execute("DELETE FROM queued_items WHERE thread_id=?", (THREAD,))
+    _append_native_events(scenario, [
+        {"type": "event_msg", "payload": {
+            "type": "item_completed", "thread_id": THREAD, "turn_id": turn,
+            "item": {"type": "UserMessage", "content": [{
+                "type": "text", "text": scenario.sent[-1] + ("\n" if extra_newline else ""),
+            }]},
+        }},
+        {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": turn}},
+    ])
+    scenario.latest, scenario.status = turn, "completed"
+
+
+@pytest.mark.parametrize("resumed_original,extra_newline", [
+    (False, True), (True, False), (True, True),
+])
+def test_completed_saved_receipt_reconciles_and_parks_without_replay(
+    scenario, resumed_original, extra_newline,
+):
+    s = scenario
+    turn = INTERRUPTED if resumed_original else CONTINUED
+    if resumed_original:
+        # Codex resumes the interrupted turn; its start is outside the new
+        # receipt's append-only baseline in the native continuation transcript.
+        _append_native_events(s, [{"type": "event_msg", "payload": {
+            "type": "task_started", "turn_id": turn,
+        }}])
+    assert s.step()["continuation"]["status"] == "enqueued"
+    instruction = s.owner.continuation._instruction(THREAD, INTERRUPTED)
+    receipt_path = s.dispatcher.records / (sha256_text(instruction) + ".json")
+    receipt = json.loads(receipt_path.read_text())
+    receipt.update(state="consumed_or_started", created_at="2000-01-01T00:00:00Z")
+    InstructionStore._atomic_json(receipt_path, receipt)
+    continuation = json.loads(s.owner.continuation.path.read_text())
+    continuation.update(status="consumed_or_started", created_at="2000-01-01T00:00:00Z")
+    InstructionStore._atomic_json(s.owner.continuation.path, continuation)
+    if not resumed_original:
+        _append_native_events(s, [{"type": "event_msg", "payload": {
+            "type": "task_started", "turn_id": turn,
+        }}])
+    _consume_completed_continuation(s, turn, extra_newline)
+    s.owner._idle_since -= 6
+
+    result = s.step()
+    assert result["continuation"]["status"] == "started"
+    assert result["owner_state"] == "parked" and s.owner.client is None
+    assert s.writer is None and s.binding.load()["state"] == "armed"
+    saved = json.loads(s.owner.continuation.path.read_text())
+    assert saved["continuation_turn_id"] == turn
+    assert saved["interrupted_turn_id"] == INTERRUPTED
+    assert saved["created_at"] == "2000-01-01T00:00:00Z"
+    assert json.loads(receipt_path.read_text())["started_turn_id"] == turn
+    assert len(s.sent) == len(s.notices) == 1
+    assert s.notices[0].event_type == "linux_continuation_started"
+    calls = list(s.calls)
+    assert s.step()["owner_state"] == "parked"
+    assert s.calls == calls and len(s.sent) == len(s.notices) == 1
+
+
+def test_resumed_original_turn_interruption_does_not_repeat_continuation(scenario):
+    s = scenario
+    _append_native_events(s, [{"type": "event_msg", "payload": {
+        "type": "task_started", "turn_id": INTERRUPTED,
+    }}])
+    s.step()
+    _consume_completed_continuation(s, INTERRUPTED, extra_newline=True)
+    s.status = "interrupted"
+    assert s.step()["continuation"]["attention"] == "continuation_interrupted"
+    s.step()
+    assert len(s.sent) == 1
+    assert [notice.event_type for notice in s.notices] == [
+        "linux_continuation_started", "linux_continuation_interrupted",
+    ]
+
+
+@pytest.mark.parametrize("state", ["consumed_or_started", "uncertain", "dispatching"])
+def test_idle_empty_queue_and_old_receipt_never_authorize_uncertain_handback(scenario, state):
+    s = scenario
+    s.step()
+    instruction = s.owner.continuation._instruction(THREAD, INTERRUPTED)
+    path = s.dispatcher.records / (sha256_text(instruction) + ".json")
+    receipt = json.loads(path.read_text())
+    receipt.update(state=state, created_at="2000-01-01T00:00:00Z")
+    InstructionStore._atomic_json(path, receipt)
+    with sqlite3.connect(s.binding.codex_home / "queue_1.sqlite") as db:
+        db.execute("DELETE FROM queued_items")
+    # Completion alone is not delivery proof: the exact wake is absent.
+    _append_native_events(s, [{"type": "event_msg", "payload": {
+        "type": "task_complete", "turn_id": INTERRUPTED,
+    }}])
+    s.status = "completed"
+    s.owner._idle_since -= 6
+    result = s.step()
+    assert result["continuation"]["status"] == state
+    assert result["owner_state"] == "owned" and s.owner.client is not None
+    s.step()
+    assert len(s.sent) == 1
+    assert not any(notice.event_type == "linux_continuation_started" for notice in s.notices)
+
+
+@pytest.mark.parametrize("gate", ["active", "live_active", "new_queue", "writer_race"])
+def test_reconciled_receipt_keeps_fresh_handback_guards(scenario, gate):
+    s = scenario
+    s.step()
+    s.started()
+    s.owner._idle_since -= 6
+    if gate == "active":
+        s.owner._event({"method": "turn/started", "params": {"threadId": THREAD}})
+    elif gate == "live_active":
+        s.native_status = "active"
+    elif gate == "new_queue":
+        with sqlite3.connect(s.binding.codex_home / "queue_1.sqlite") as db:
+            db.execute("INSERT INTO queued_items VALUES (?,?,?)", (QUEUE, THREAD, "new work"))
+    else:
+        def change_writer(method, params):
+            if method == "thread/read":
+                s.writer = 999
+        s.request_hook = change_writer
+    if gate == "writer_race":
+        with pytest.raises(LinuxBindingError, match="linux_writer_changed"):
+            s.step()
+    else:
+        result = s.step()
+        assert result["continuation"]["status"] == "started"
+        assert result["owner_state"] == "owned"
+    assert s.owner.client is not None
+    assert len(s.sent) == 1
+
+
+@pytest.mark.parametrize("changes,reason", [
+    ({"state": "failed"}, "receipt_invalid"),
+    ({"state": "started", "thread_id": CONTINUED, "started_turn_id": CONTINUED}, "receipt_invalid"),
+    ({"state": "started", "started_turn_id": "not-a-turn"}, "start_unverified"),
+])
+def test_invalid_completion_receipt_cannot_release_writer(scenario, changes, reason):
+    s = scenario
+    s.step()
+    instruction = s.owner.continuation._instruction(THREAD, INTERRUPTED)
+    path = s.dispatcher.records / (sha256_text(instruction) + ".json")
+    receipt = json.loads(path.read_text())
+    receipt.update(changes)
+    InstructionStore._atomic_json(path, receipt)
+    with sqlite3.connect(s.binding.codex_home / "queue_1.sqlite") as db:
+        db.execute("DELETE FROM queued_items")
+    s.status = "completed"
+    s.owner._idle_since -= 6
+    with pytest.raises(LinuxBindingError, match=reason):
+        s.step()
+    assert s.owner.client is not None and s.writer == s.owner.client.process.pid
+    assert len(s.sent) == 1 and not s.notices
+    assert json.loads(path.read_text())["state"] == changes["state"]
+
+
 def test_crash_after_notification_send_does_not_send_again(scenario):
     s = scenario
     s.step()
@@ -303,7 +465,7 @@ def test_cli_opt_in_defaults_and_explicit_enablement():
 
 @pytest.mark.parametrize("mode", ["standalone", "bound_coordinated", "automatic"])
 def test_cli_passes_opt_in_to_selected_linux_controller(scenario, monkeypatch, mode):
-    from codex_watchdog import cli, linux_auto
+    from codex_watchdog import cli, linux_auto, messaging_setup
     s = scenario
     received = []
     class Controller:
@@ -313,6 +475,9 @@ def test_cli_passes_opt_in_to_selected_linux_controller(scenario, monkeypatch, m
             return 0
     monkeypatch.setattr(linux_owner, "LinuxThreadOwner", Controller)
     monkeypatch.setattr(linux_auto, "LinuxAutoWatchdog", Controller)
+    # This test verifies controller arguments, never the operator's provider
+    # profile or secure store. Messaging bootstrap has its own acceptance tests.
+    monkeypatch.setattr(messaging_setup, "prepare_launch", lambda *a, **kw: {})
     if mode == "bound_coordinated":
         InstructionStore._atomic_json(s.binding.codex_home / "watchdog-control" / THREAD / "owner.json", {})
     command = "linux-auto-run" if mode == "automatic" else "linux-run"

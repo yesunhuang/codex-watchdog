@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
@@ -579,3 +580,315 @@ def test_assistant_marker_echo_is_not_started_evidence(tmp_path: Path) -> None:
         )
 
     assert dispatcher.observe_delivery("wake-1").status == "enqueued"
+
+
+INTERRUPTED_TURN = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+OTHER_TURN = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+OTHER_THREAD = "22222222-3333-4444-8555-666666666666"
+
+
+def wake_event(kind, turn=INTERRUPTED_TURN, **fields):
+    return {"timestamp": "2026-09-17T02:00:00Z", "type": "event_msg",
+            "payload": {"type": kind, "turn_id": turn, **fields}}
+
+
+def wake_user(text, turn=INTERRUPTED_TURN, thread=THREAD_ID):
+    return wake_event("item_completed", turn, thread_id=thread,
+                      item={"type": "UserMessage", "content": [{"type": "text", "text": text}]})
+
+
+def append_wake_events(path, *events):
+    with path.open("ab") as handle:
+        for event in events:
+            handle.write((json.dumps(event) + "\n").encode())
+
+
+@pytest.fixture
+def queued_rollout(tmp_path):
+    """A persisted, observed then consumed queue item, never a fabricated ACK."""
+    def create(*, source="manual", instruction="wake-1", prompt="Resume once", history=()):
+        home = tmp_path / "codex-home"
+        rollout = home / "sessions" / f"rollout-test-{THREAD_ID}.jsonl"
+        rollout.parent.mkdir(parents=True)
+        rollout.touch()
+        append_wake_events(rollout, *history)
+        database = home / "queue_1.sqlite"
+        create_queue_database(database)
+        runner = FakeRunner()
+        dispatcher = QueueWakeDispatcher(tmp_path / "runtime", runner=runner,
+            codex_executable="fixture-codex", codex_home=home, queue_database=database)
+        dispatcher.dispatch(THREAD_ID, instruction, prompt, source)
+        wrapped = runner.calls[0][0][-1]
+        with sqlite3.connect(database) as db:
+            db.execute("INSERT INTO queued_items VALUES (?,?,?)", (QUEUE_ID, THREAD_ID, wrapped))
+        assert dispatcher.observe_delivery(instruction).status == "enqueued"
+        with sqlite3.connect(database) as db:
+            db.execute("DELETE FROM queued_items WHERE id=?", (QUEUE_ID,))
+        assert dispatcher.observe_delivery(instruction).status == "consumed_or_started"
+        record_path = next(dispatcher.records.glob("*.json"))
+        return dispatcher, runner, rollout, record_path, wrapped, instruction
+    return create
+
+
+@pytest.mark.parametrize("added_lf", [False, True])
+def test_completed_existing_interrupted_turn_promotes_old_receipt(queued_rollout, added_lf):
+    instruction = f"linux-continue:{THREAD_ID}:{INTERRUPTED_TURN}"
+    started = wake_event("task_started")
+    started["timestamp"] = "2026-09-17T01:58:08.516Z"
+    dispatcher, runner, rollout, path, wrapped, _ = queued_rollout(
+        source="linux_interruption", instruction=instruction, history=[started])
+    before = json.loads(path.read_text())
+    before["created_at"] = "2026-09-17T01:58:38.981078Z"
+    before["consumed_or_started_at"] = "2026-09-17T01:59:41.606969Z"
+    before["future_compatible_field"] = {"keep": True}
+    path.write_text(json.dumps(before))
+    complete = wake_event("task_complete")
+    complete["timestamp"] = "2026-09-17T02:13:34.843Z"
+    append_wake_events(rollout, wake_user(wrapped + ("\n" if added_lf else "")), complete)
+
+    # A fresh dispatcher models an upgrade/restart reading the old schema-2 receipt.
+    restarted = QueueWakeDispatcher(dispatcher.runtime, codex_executable="fixture-codex",
+        codex_home=dispatcher.codex_home, runner=runner)
+    receipt = restarted.dispatch(THREAD_ID, instruction, "Resume once", "linux_interruption")
+    assert receipt.status == "started" and receipt.deduplicated
+    after = json.loads(path.read_text())
+    assert after["started_turn_id"] == INTERRUPTED_TURN
+    assert after["future_compatible_field"] == {"keep": True}
+    for key in ("created_at", "schema_version", "prompt_sha256", "queue_message_id",
+                "rollout_baseline_offset", "consumed_or_started_at"):
+        assert after[key] == before[key]
+    assert restarted.dispatch(THREAD_ID, instruction, "Resume once", "linux_interruption").deduplicated
+    assert len(runner.calls) == 1
+    with sqlite3.connect(dispatcher.queue_database) as db:
+        assert db.execute("SELECT count(*) FROM queued_items").fetchone()[0] == 0
+
+
+def test_one_added_terminal_lf_promotes_new_turn_without_rewriting_prompt(queued_rollout):
+    dispatcher, runner, rollout, path, wrapped, instruction = queued_rollout()
+    before = json.loads(path.read_text())
+    append_wake_events(rollout, wake_event("task_started"), wake_user(wrapped + "\n"))
+    assert dispatcher.observe_delivery(instruction).status == "started"
+    assert json.loads(path.read_text())["prompt_sha256"] == before["prompt_sha256"]
+    assert len(runner.calls) == 1
+
+
+@pytest.mark.parametrize("suffix", ["\n\n", "\r\n", "\r", " ", "\t", " \n", "\n ", "\n\r"])
+def test_rollout_does_not_normalize_other_prompt_changes(queued_rollout, suffix):
+    dispatcher, runner, rollout, _, wrapped, instruction = queued_rollout()
+    append_wake_events(rollout, wake_event("task_started"), wake_user(wrapped + suffix))
+    assert dispatcher.observe_delivery(instruction).status == "consumed_or_started"
+    assert len(runner.calls) == 1
+
+
+@pytest.mark.parametrize("prompt", ["Resume once\n", "Resume once ", "  Resume once", "Resume once\r"])
+@pytest.mark.parametrize("extra_lf", ["", "\n"])
+def test_rollout_preserves_original_prompt_whitespace(queued_rollout, prompt, extra_lf):
+    dispatcher, _, rollout, _, wrapped, instruction = queued_rollout(prompt=prompt)
+    append_wake_events(rollout, wake_event("task_started"), wake_user(wrapped + extra_lf))
+    assert dispatcher.observe_delivery(instruction).status == "started"
+
+
+@pytest.mark.parametrize("gate", [
+    "source", "instruction_thread", "instruction_turn", "instruction_shape", "noncanonical_id",
+    "other_thread", "other_turn", "wrong_hash", "wrong_marker", "leading_edit", "missing_user",
+    "completion_only", "completion_before_user", "missing_completion", "wrong_completion_turn",
+    "wrong_completion_thread", "assistant_echo", "mixed_content", "invalid_turn",
+])
+def test_existing_turn_requires_exact_unambiguous_postbaseline_proof(queued_rollout, gate):
+    instruction = f"linux-continue:{THREAD_ID}:{INTERRUPTED_TURN}"
+    source = "linux_interruption"
+    if gate == "source":
+        source = "manual"
+    elif gate == "instruction_thread":
+        instruction = f"linux-continue:{OTHER_THREAD}:{INTERRUPTED_TURN}"
+    elif gate == "instruction_turn":
+        instruction = f"linux-continue:{THREAD_ID}:{OTHER_TURN}"
+    elif gate == "instruction_shape":
+        instruction += ":suffix"
+    elif gate == "noncanonical_id":
+        instruction = f"linux-continue:{THREAD_ID}:{INTERRUPTED_TURN.upper()}"
+    dispatcher, runner, rollout, _, wrapped, _ = queued_rollout(
+        source=source, instruction=instruction, history=[wake_event("task_started")])
+    user, complete = wake_user(wrapped), wake_event("task_complete")
+    if gate == "other_thread":
+        user["payload"]["thread_id"] = OTHER_THREAD
+    elif gate == "other_turn":
+        user["payload"]["turn_id"] = OTHER_TURN
+        complete["payload"]["turn_id"] = OTHER_TURN
+    elif gate == "wrong_hash":
+        user = wake_user(wrapped + "changed")
+    elif gate == "wrong_marker":
+        user = wake_user(wrapped.replace("linux-continue:", "forged-continue:", 1))
+    elif gate == "leading_edit":
+        user = wake_user(" " + wrapped)
+    elif gate in ("missing_user", "completion_only"):
+        user = {"type": "response_item", "payload": {"type": "message", "role": "user"}}
+    elif gate == "wrong_completion_turn":
+        complete["payload"]["turn_id"] = OTHER_TURN
+    elif gate == "wrong_completion_thread":
+        complete["payload"]["thread_id"] = OTHER_THREAD
+    elif gate == "assistant_echo":
+        user["payload"]["item"]["type"] = "AgentMessage"
+    elif gate == "mixed_content":
+        user["payload"]["item"]["content"].append({"type": "text", "text": "extra instruction"})
+    elif gate == "invalid_turn":
+        user["payload"]["turn_id"] = complete["payload"]["turn_id"] = "not-a-turn"
+    events = [user, complete]
+    if gate == "completion_before_user":
+        events.reverse()
+    elif gate == "missing_completion":
+        events.pop()
+    append_wake_events(rollout, *events)
+    assert dispatcher.observe_delivery(instruction).status == "consumed_or_started"
+    assert len(runner.calls) == 1
+
+
+@pytest.mark.parametrize("resumed", [False, True])
+def test_prebaseline_exact_user_echo_cannot_prove_delivery(queued_rollout, resumed):
+    instruction = f"linux-continue:{THREAD_ID}:{INTERRUPTED_TURN}" if resumed else "wake-1"
+    digest = hashlib.sha256(b"Resume once").hexdigest()
+    wrapped = f"[CODEX_WATCHDOG_WAKE id={instruction} sha256={digest}]\nResume once"
+    dispatcher, _, rollout, _, _, _ = queued_rollout(
+        source="linux_interruption" if resumed else "manual", instruction=instruction,
+        history=[wake_event("task_started"), wake_user(wrapped)])
+    append_wake_events(rollout, wake_event("task_complete"))
+    assert dispatcher.observe_delivery(instruction).status == "consumed_or_started"
+
+
+@pytest.mark.parametrize("resumed", [False, True])
+def test_competing_exact_wake_turns_are_ambiguous(queued_rollout, resumed):
+    instruction = f"linux-continue:{THREAD_ID}:{INTERRUPTED_TURN}" if resumed else "wake-1"
+    dispatcher, _, rollout, _, wrapped, _ = queued_rollout(
+        source="linux_interruption" if resumed else "manual", instruction=instruction)
+    append_wake_events(rollout, wake_event("task_started"), wake_user(wrapped),
+        wake_event("task_complete"), wake_event("task_started", OTHER_TURN),
+        wake_user(wrapped, OTHER_TURN))
+    assert dispatcher.observe_delivery(instruction).status == "consumed_or_started"
+
+
+@pytest.mark.parametrize("bad", [b'{broken}\n', b'null\n', b'[]\n', b'\xff\n',
+                                 b'{"type":"event_msg","payload":null}\n', b'{"partial":'])
+def test_malformed_or_incomplete_suffix_fails_closed(queued_rollout, bad):
+    dispatcher, _, rollout, _, wrapped, instruction = queued_rollout()
+    append_wake_events(rollout, wake_event("task_started"), wake_user(wrapped))
+    with rollout.open("ab") as handle:
+        handle.write(bad)
+    assert dispatcher.observe_delivery(instruction).status == "consumed_or_started"
+
+
+@pytest.mark.parametrize("offset", [-1, True, 0.5, "0", 1, 10**12])
+def test_invalid_rollout_baseline_fails_closed(queued_rollout, offset):
+    dispatcher, _, rollout, path, wrapped, instruction = queued_rollout()
+    append_wake_events(rollout, wake_event("task_started"), wake_user(wrapped))
+    record = json.loads(path.read_text())
+    record["rollout_baseline_offset"] = offset
+    path.write_text(json.dumps(record))
+    assert dispatcher.observe_delivery(instruction).status == "consumed_or_started"
+
+
+def test_completion_with_exact_thread_and_repeated_same_turn_evidence_is_valid(queued_rollout):
+    instruction = f"linux-continue:{THREAD_ID}:{INTERRUPTED_TURN}"
+    dispatcher, _, rollout, _, wrapped, _ = queued_rollout(
+        source="linux_interruption", instruction=instruction)
+    append_wake_events(rollout, wake_user(wrapped), wake_user(wrapped),
+        wake_event("task_complete", thread_id=THREAD_ID))
+    assert dispatcher.observe_delivery(instruction).status == "started"
+
+
+def test_unfinished_native_line_can_be_reconciled_on_a_later_read(queued_rollout):
+    dispatcher, runner, rollout, _, wrapped, instruction = queued_rollout()
+    append_wake_events(rollout, wake_event("task_started"))
+    with rollout.open("ab") as handle:
+        handle.write(json.dumps(wake_user(wrapped)).encode())
+    assert dispatcher.observe_delivery(instruction).status == "consumed_or_started"
+    with rollout.open("ab") as handle:
+        handle.write(b"\n")
+    assert dispatcher.observe_delivery(instruction).status == "started"
+    assert len(runner.calls) == 1
+
+
+def test_new_turn_postbaseline_start_can_follow_its_user_message(queued_rollout):
+    dispatcher, _, rollout, _, wrapped, instruction = queued_rollout()
+    append_wake_events(rollout, wake_user(wrapped), wake_event("task_started"))
+    assert dispatcher.observe_delivery(instruction).status == "started"
+
+
+def test_new_turn_conflicting_native_start_thread_fails_closed(queued_rollout):
+    dispatcher, _, rollout, _, wrapped, instruction = queued_rollout()
+    append_wake_events(rollout, wake_event("task_started", thread_id=OTHER_THREAD), wake_user(wrapped))
+    assert dispatcher.observe_delivery(instruction).status == "consumed_or_started"
+
+
+def test_rollout_scan_streams_only_complete_postbaseline_events(queued_rollout, monkeypatch):
+    history = [{"type": "irrelevant", "padding": "history" * 1000}] * 20
+    dispatcher, _, rollout, path, wrapped, instruction = queued_rollout(history=history)
+    append_wake_events(rollout, *[{"type": "irrelevant", "padding": "later" * 100}] * 2000,
+                       wake_event("task_started"), wake_user(wrapped))
+    baseline = json.loads(path.read_text())["rollout_baseline_offset"]
+    original = Path.open
+    reads, seeks, lines = [], [], []
+
+    class StreamOnly:
+        def __init__(self, handle):
+            self.handle = handle
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.handle.close()
+        def fileno(self):
+            return self.handle.fileno()
+        def seek(self, offset):
+            seeks.append(offset)
+            return self.handle.seek(offset)
+        def read(self, size=-1):
+            assert size == 1, "only the baseline boundary may use read()"
+            reads.append(size)
+            return self.handle.read(size)
+        def readline(self, limit):
+            line = self.handle.readline(limit)
+            lines.append(len(line))
+            return line
+
+    def tracked_open(path, mode="r", *args, **kwargs):
+        handle = original(path, mode, *args, **kwargs)
+        return StreamOnly(handle) if path == rollout and mode == "rb" else handle
+    monkeypatch.setattr(Path, "open", tracked_open)
+    assert dispatcher.observe_delivery(instruction).status == "started"
+    assert reads == [1] and seeks == [baseline - 1, baseline]
+    assert len(lines) == 2002 and max(lines) < 2000
+
+
+@pytest.mark.parametrize("change", ["truncate", "replace"])
+def test_rollout_changed_during_scan_cannot_promote(queued_rollout, monkeypatch, change):
+    dispatcher, _, rollout, _, wrapped, instruction = queued_rollout()
+    append_wake_events(rollout, wake_event("task_started"), wake_user(wrapped))
+    original = Path.open
+    changed = []
+
+    class ChangingStream:
+        def __init__(self, handle):
+            self.handle = handle
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.handle.close()
+        def fileno(self):
+            return self.handle.fileno()
+        def seek(self, offset):
+            return self.handle.seek(offset)
+        def readline(self, limit):
+            line = self.handle.readline(limit)
+            if not changed:
+                changed.append(True)
+                if change == "replace":
+                    rollout.rename(rollout.with_suffix(".old"))
+                with original(rollout, "wb") as out:
+                    out.write(b"{}\n")
+            return line
+
+    def tracked_open(path, mode="r", *args, **kwargs):
+        handle = original(path, mode, *args, **kwargs)
+        return ChangingStream(handle) if path == rollout and mode == "rb" else handle
+    monkeypatch.setattr(Path, "open", tracked_open)
+    assert dispatcher.observe_delivery(instruction).status == "consumed_or_started"
+    assert changed == [True]
