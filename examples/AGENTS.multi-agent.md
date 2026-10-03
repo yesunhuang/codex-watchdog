@@ -225,7 +225,30 @@ Do not discard another agent's unmerged work merely to obtain a clean tree.
 When multiple agents are active, prefer small independent scopes and let the
 Manager/Codex A integrate at explicit checkpoints.
 
-## 7. General coordination invariants
+## 7. Questions and blockers
+
+Do **not** ask the user questions in the middle of an active turn and then wait
+for an answer. This includes commentary/interim questions and interactive
+request-user-input mechanisms that may not be relayed by the surrounding
+WatchDog workflow.
+
+If progress genuinely requires a user decision, clarification, approval, or
+missing information:
+
+1. Continue any useful independent work that is already authorized and does not
+   depend on that answer.
+2. Bring the blocked work to a safe, resumable boundary and preserve relevant
+   state/evidence.
+3. Stop the affected work.
+4. End the current turn and put the exact question or blocker in the **final
+   output**, together with what is blocked and what can resume after the answer.
+5. Resume only after the user replies and any required approval is present.
+
+Do not guess consequential decisions, silently substitute a different plan, or
+keep an active turn open waiting for user input. Silence or elapsed time is not
+approval.
+
+## 8. General coordination invariants
 
 - Read this `AGENTS.md` before every new assignment or resumed checkpoint.
 - Preserve user data, credentials, unrelated work, and other agents' state.
