@@ -11,6 +11,15 @@ These rules are durable project constraints for future implementation work. Trea
 - Prefer the smallest reliable mechanism that solves a real dogfood problem. Avoid speculative orchestration and premature abstraction.
 - Preserve fail-closed behavior for ambiguous targeting, delivery, authorization, and remote-state resolution.
 
+## WatchDog-relayed questions and blockers
+
+WatchDog relays final output, not interim questions. Continue already-authorized work autonomously when no user input is needed. When progress requires a user decision, clarification, approval, or missing information:
+
+- **Stop the affected work and end the current assistant turn with the question or blocker in the FINAL output.** State exactly what is blocked, the decision or information required, relevant evidence, and what can resume after the answer.
+- Do not ask only in commentary, an interim progress update, or a tool's question UI and then keep the same run alive waiting for a reply. Do not bury the request in a report without making it explicit in the final output.
+- Resume the blocked work only after the user replies and any required approval has been obtained. Silence or elapsed time is not approval.
+- This changes question delivery only. Preserve existing authorized autonomy, safety and approval requirements, ownership, and execution/release gates; never bypass a required confirmation to avoid stopping.
+
 ## Upgrade and configuration compatibility
 
 **Upgrade must preserve user state by default. Reconfiguration is a failure mode, not a normal upgrade step.**
