@@ -96,8 +96,11 @@ class Rig:
         if method == "conversations.replies":
             return dict(ok=True, messages=deepcopy(self.history.get((params["channel"], params["ts"]), [])))
         assert method == "chat.postMessage"
+        return self.post(**params)
+
+    def post(self, **params):
         self.acks.append(dict(params))
-        return dict(ok=True)
+        return dict(ok=True, channel=params["channel"], ts=f"1789111900.{len(self.acks):06d}")
 
     def record(self, target=TARGET, channel=CHANNEL):
         self.parents += 1
@@ -121,7 +124,7 @@ class Rig:
         if body is not None:
             envelope.update(body)
         result = self.relay._handle_bolt_message(event, envelope,
-            SimpleNamespace(chat_postMessage=lambda **params: self.acks.append(params)))
+            SimpleNamespace(chat_postMessage=self.post))
         return result.to_dict()
 
     def deliver(self, event, *, body=None):
@@ -196,7 +199,7 @@ def journal_rows(rig):
 
 
 @pytest.mark.parametrize("inline", (False, True), ids=("legacy", "inline"))
-def test_grant_explicit_instruction_exactly_once_and_no_bot_ack(rig, inline):
+def test_grant_explicit_instruction_exactly_once_and_one_bot_receipt(rig, inline):
     source = rig.grant()
     event = instruction_event(rig, source, inline=inline)
     before_ack = len(rig.acks)
@@ -206,7 +209,8 @@ def test_grant_explicit_instruction_exactly_once_and_no_bot_ack(rig, inline):
     assert not rig.state(source)["active"]
     rig.restart()
     rig.deliver(event, body=dict(event_id="Ev-changed-delivery"))
-    assert len(rig.calls) == 1 and len(rig.acks) == before_ack
+    assert len(rig.calls) == 1 and len(rig.acks) == before_ack + 1
+    assert REQUEST in rig.acks[-1]["text"] and rig.acks[-1]["thread_ts"] == source
 
 
 def test_inline_instruction_without_blocks_queues_only_its_plain_body(rig):
@@ -216,7 +220,7 @@ def test_inline_instruction_without_blocks_queues_only_its_plain_body(rig):
     assert rig.deliver(event)[0]["status"] == "bot_queued"
     assert len(rig.calls) == 1
     assert rig.calls[0][0] == TARGET.thread_id and rig.calls[0][2] == PROMPT
-    assert rig.acks == rig.remote_calls == []
+    assert len(rig.acks) == 1 and rig.remote_calls == []
 
 
 @pytest.mark.parametrize("inline_first", (False, True))
@@ -227,8 +231,25 @@ def test_inline_and_legacy_headers_share_logical_request_reservation(rig, inline
     second = rig.record()
     before, rows = rig.state(second), journal_rows(rig)
     rig.deliver(instruction_event(rig, second, inline=not inline_first))
-    rig.assert_inert(second, before)
-    assert journal_rows(rig) == rows and len(rig.calls) == 1
+    rig.assert_inert(second, before, ack=False)
+    assert len(rig.calls) == 1 and len(rig.acks) == before["acks"] + 1
+    acknowledgement = rig.acks[-1]
+    assert acknowledgement["channel"] == CHANNEL and acknowledgement["thread_ts"] == second
+    assert REQUEST in acknowledgement["text"]
+    assert "request ID was already reserved" in acknowledgement["text"]
+    assert "queued no additional task" in acknowledgement["text"]
+    assert PROMPT not in acknowledgement["text"] and TARGET.thread_id not in acknowledgement["text"]
+    after = journal_rows(rig)
+    assert [row for row in after if row[1] != "slack_bot_receipts"] == [
+        row for row in rows if row[1] != "slack_bot_receipts"]
+    old_receipts = {row for row in rows if row[1] == "slack_bot_receipts"}
+    new_receipts = {row for row in after if row[1] == "slack_bot_receipts"}
+    assert old_receipts.issubset(new_receipts) and len(new_receipts) == len(old_receipts) + 1
+    rig.restart()
+    rig.deliver(instruction_event(rig, second, inline=inline_first))
+    rig.assert_inert(second, before, ack=False)
+    assert journal_rows(rig) == after
+    assert len(rig.calls) == 1 and len(rig.acks) == before["acks"] + 1
 
 
 @pytest.mark.parametrize("attempt", ("soft-line", "explicit-block-line", "paragraph"))
@@ -546,10 +567,27 @@ def test_logical_request_cannot_move_to_new_message_or_parent_after_restart(rig,
     rig.restart()
     rig.deliver(first, body=dict(event_id="Ev-retry-after-restart"))
     second = rig.record()
-    before = rig.state(second)
+    before, rows = rig.state(second), journal_rows(rig)
     rig.deliver(instruction_event(rig, second, inline=inline))
-    rig.assert_inert(second, before)
-    assert len(rig.calls) == 1
+    rig.assert_inert(second, before, ack=False)
+    assert len(rig.calls) == 1 and len(rig.acks) == before["acks"] + 1
+    acknowledgement = rig.acks[-1]
+    assert acknowledgement["channel"] == CHANNEL and acknowledgement["thread_ts"] == second
+    assert REQUEST in acknowledgement["text"]
+    assert "request ID was already reserved" in acknowledgement["text"]
+    assert "queued no additional task" in acknowledgement["text"]
+    assert PROMPT not in acknowledgement["text"] and TARGET.thread_id not in acknowledgement["text"]
+    after = journal_rows(rig)
+    assert [row for row in after if row[1] != "slack_bot_receipts"] == [
+        row for row in rows if row[1] != "slack_bot_receipts"]
+    old_receipts = {row for row in rows if row[1] == "slack_bot_receipts"}
+    new_receipts = {row for row in after if row[1] == "slack_bot_receipts"}
+    assert old_receipts.issubset(new_receipts) and len(new_receipts) == len(old_receipts) + 1
+    rig.restart()
+    rig.deliver(instruction_event(rig, second, inline=not inline))
+    rig.assert_inert(second, before, ack=False)
+    assert journal_rows(rig) == after
+    assert len(rig.calls) == 1 and len(rig.acks) == before["acks"] + 1
 
 
 @pytest.mark.parametrize("flow", ("ordinary", "access", "bot-control", "unbind"))
@@ -651,7 +689,8 @@ def test_poll_destination_comes_from_mapped_request_not_message_channel(tmp_path
     rig.history[(CHANNEL, source)] = [forged]
     results = rig.poller.poll_once()
     assert results[0]["status"] == "bot_queued"
-    assert rig.calls[0][0] == TARGET.thread_id and rig.acks == []
+    assert rig.calls[0][0] == TARGET.thread_id and len(rig.acks) == 1
+    assert rig.acks[0]["channel"] == CHANNEL
 
 
 def test_poll_validates_entire_page_before_any_bot_claim(tmp_path):

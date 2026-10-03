@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from copy import copy
 import json
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -172,8 +173,8 @@ class SlackReplyRelay(ExactThreadRelay):
         return self.handle_message(event)
 
     def acknowledge(self, event, result, client) -> None:
-        # Bot instructions never generate a conversational acknowledgement.
         if self._bot_marked(event) or result.status.startswith("bot_"):
+            self._acknowledge_bot(result, client)
             return
         response = self._response_text(result)
         channel = event.get("channel")
@@ -211,6 +212,71 @@ class SlackReplyRelay(ExactThreadRelay):
                 except ControlError:
                     # A stale or uncertain acknowledgement is never resent.
                     return
+
+    def _acknowledge_bot(self, result, client) -> None:
+        """Report admission once without changing dispatch or reply tickets."""
+        from .slack_bot_receipts import BotCommandReceipts
+        if result.bot_receipt is None:
+            return
+        context, outcome = result.bot_receipt
+        receipts = BotCommandReceipts(self._get_bot_access())
+        try:
+            claim = receipts.claim(context, outcome)
+        except Exception:
+            # Exact saved authority could not be established. Receipt failure
+            # never alters or retries the independently recorded task dispatch.
+            return
+        if claim is None:
+            return
+        response = slack_message_with_host(self._bot_receipt_text(claim))
+        posted = dict(status="uncertain", message_ts=None)
+
+        def send_ack(_event):
+            try:
+                # Bolt's WebClient retries connection failures by default. An
+                # isolated copy gives an uncertain receipt one provider attempt
+                # without changing human sends or the listener client.
+                sender = copy(client)
+                if hasattr(sender, "retry_handlers"):
+                    sender.retry_handlers = []
+                if hasattr(sender, "timeout"):
+                    sender.timeout = min(sender.timeout, 10)
+                reply = sender.chat_postMessage(
+                    channel=claim.channel_id, thread_ts=claim.thread_ts,
+                    text=response, unfurl_links=False, unfurl_media=False)
+                if (reply.get("ok") is True and reply.get("channel") == claim.channel_id
+                        and valid_slack_timestamp(reply.get("ts"))):
+                    posted.update(status="sent", message_ts=reply["ts"])
+            except Exception:
+                pass  # Provider details stay private; uncertain sends never retry.
+            return SimpleNamespace(to_dict=lambda: dict(status=posted["status"], channel="slack"))
+
+        try:
+            if result.control is None:
+                send_ack(None)
+            else:
+                control, target, token = result.control
+                acknowledgement = NotificationEvent(
+                    context.target.workspace_id, "slack_bot_receipt",
+                    "slack-bot-receipt-" + claim.key, "Bot request receipt", response)
+                control.notify(target, token, acknowledgement, SimpleNamespace(notify=send_ack))
+        except Exception:
+            # Never refresh or reacquire an owner capability just for feedback.
+            pass
+        try:
+            receipts.finish(claim, status=posted["status"], message_ts=posted["message_ts"])
+        except Exception:
+            pass  # The durable pre-send claim still prohibits another attempt.
+
+    @staticmethod
+    def _bot_receipt_text(claim) -> str:
+        outcomes = {
+            "queued": "accepted and queued. This receipt does not confirm execution or completion.",
+            "uncertain": "delivery is uncertain. The request ID remains reserved; do not replay or resend it.",
+            "duplicate": "request ID was already reserved. This message queued no additional task; prior execution is not confirmed.",
+            "rejected": "not accepted: this reply ticket is closed. This message queued no task.",
+        }
+        return "WatchDog request " + claim.context.request_id + ": " + outcomes[claim.outcome]
 
     def _send_binding_hello(self, event_key: str, client: Any) -> bool:
         """Post a top-level hello to the destination channel and record the mapping.
@@ -558,6 +624,8 @@ class SlackReplyRelay(ExactThreadRelay):
 
     def _handle_bot_instruction(self, event, event_id, team_id, app_id, from_poll):
         from .slack_bot_identity import BotVerificationDeferred, event_principal, parse_bot_instruction
+        from .slack_bot_acl import BotRequestReused
+        from .slack_bot_receipts import BotReceiptContext
         command = parse_bot_instruction(event)
         if command is None:
             return SlackReplyResult("ignored_bot_or_subtype", delivery_status="bot_not_instruction")
@@ -583,6 +651,8 @@ class SlackReplyRelay(ExactThreadRelay):
                 target=mapping.target.to_dict(), text_sha256=sha256_text(event["text"])),
                 sort_keys=True, separators=(",", ":")))
             source_key = self.thread_store.thread_key(channel, parent)
+            receipt_context = BotReceiptContext(source_key, principal, mapping.target,
+                request_id, event_key, message_key, fingerprint)
             admission = self._get_bot_access().make_admission(source_key, principal, mapping.target,
                 request_id=request_id, event_key=event_key, message_key=message_key,
                 payload_sha256=fingerprint)
@@ -593,15 +663,26 @@ class SlackReplyRelay(ExactThreadRelay):
                 message_key=message_key, payload_sha256=fingerprint)
         except (StoreBusyError, BotVerificationDeferred):
             return SlackReplyResult("deferred")
+        except BotRequestReused:
+            return SlackReplyResult("bot_duplicate", duplicate=True,
+                delivery_status="request_reserved", bot_receipt=(receipt_context, "duplicate"))
         except Exception as exc:
             return SlackReplyResult("bot_rejected", error_sha256=self._error_digest(exc))
         if not claimed:
-            return SlackReplyResult("bot_ignored" if previous == "unauthorized" else "bot_duplicate",
-                                    delivery_status=previous, duplicate=previous != "unauthorized")
+            if previous == "unauthorized":
+                return SlackReplyResult("bot_ignored", delivery_status=previous)
+            # Original event/physical retries have no captured current owner
+            # capability. They do not start a new primary receipt after a crash.
+            # A new message on a closed ticket can receive bounded metadata-only
+            # rejection/duplicate feedback under its independently rechecked grant.
+            return SlackReplyResult("bot_duplicate", delivery_status=previous, duplicate=True,
+                bot_receipt=(receipt_context, "rejected") if previous == "ticket_closed" else None)
+        result, legacy_dispatch = None, False
         try:
             result = self._controlled_reply(mapping, event_key, instruction_id, prompt,
                                              check_legacy_receipt=False)
             if result is None:
+                legacy_dispatch = True
                 delivery = self._dispatch(mapping, instruction_id, prompt)
                 result = SlackReplyResult("queued" if delivery in _DELIVERED_STATES else "uncertain",
                                           mapping.target.workspace_id, instruction_id, delivery)
@@ -609,7 +690,9 @@ class SlackReplyRelay(ExactThreadRelay):
             self.thread_store.finish_reply(event_key,
                 state_value="delivered" if delivered else "uncertain",
                 delivery_status=result.delivery_status or result.status)
-            return replace(result, status="bot_queued" if delivered else "bot_uncertain")
+            return replace(result, status="bot_queued" if delivered else "bot_uncertain",
+                           bot_receipt=(receipt_context, "queued" if delivered else "uncertain")
+                           if legacy_dispatch or result.control is not None else None)
         except Exception as exc:
             try:
                 self.thread_store.finish_reply(event_key, state_value="uncertain",
@@ -617,7 +700,10 @@ class SlackReplyRelay(ExactThreadRelay):
             except Exception:
                 pass
             return SlackReplyResult("bot_uncertain", mapping.target.workspace_id, instruction_id,
-                                    error_sha256=self._error_digest(exc))
+                                    error_sha256=self._error_digest(exc),
+                                    control=result.control if result is not None else None,
+                                    bot_receipt=(receipt_context, "uncertain")
+                                    if legacy_dispatch or (result is not None and result.control is not None) else None)
 
     def _get_session_access(self) -> Any:
         from .session_access import SessionAccess

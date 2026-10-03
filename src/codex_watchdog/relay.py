@@ -176,6 +176,9 @@ class ReplyResult:
     duplicate: bool = False
     error_sha256: Optional[str] = None
     control: Optional[tuple] = field(default=None, repr=False, compare=False)
+    # Public status is not authority to send a bot receipt. Only the verified
+    # handler captures this context; it is deliberately excluded from to_dict.
+    bot_receipt: Optional[tuple] = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> Dict[str, Any]:
         return {

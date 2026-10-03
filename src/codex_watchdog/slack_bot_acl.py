@@ -23,6 +23,10 @@ _OUTCOMES = {"add": ("added", "already_present"),
              "remove": ("removed", "not_present"), "access": ("access",)}
 
 
+class BotRequestReused(ValueError):
+    """A reserved logical UUID must not admit another physical message."""
+
+
 def _digest(value: Any) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
 
@@ -369,7 +373,7 @@ class BotSessionAccess:
                 # Any prior logical reservation is final, including an uncertain
                 # dispatch. Ordinary event/message retries were handled first.
                 self._schema(existing)
-                raise ValueError("slack_bot_request_reused")
+                raise BotRequestReused("slack_bot_request_reused")
             journal.put(db, _REQUESTS, request_key, dict(
                 schema_version=1, provider="slack", scope=self.scope,
                 request_id=request_id, principal=principal.to_dict(),

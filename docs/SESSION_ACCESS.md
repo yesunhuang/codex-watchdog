@@ -143,7 +143,48 @@ user/bot IDs and any supplied app/team/profile fields must agree with the verifi
 bot. Polling derives its receiving context from the API token and its destination
 from the requested mapped conversation. Slack's default self-event filter stays
 enabled; WatchDog additionally rejects its own user, bot and app. Bot instructions
-produce no relay acknowledgment, which prevents an acknowledgment feedback loop.
+can receive the bounded sender receipts described below. WatchDog's own receipts
+and ordinary bot acknowledgment chatter remain excluded from instruction input.
+
+### Request receipts
+
+From 2.2.3, an eligible bot instruction can receive a sender receipt in its
+originating mapped Slack thread. The receipt echoes the canonical request UUID.
+It does not select another session, create a notification mapping or issue a new
+reply ticket.
+
+| Sender receipt | Meaning |
+| --- | --- |
+| Accepted and queued | WatchDog admitted the request and confirmed its queue delivery to the exact existing session. Execution and completion require separate native evidence or a Codex result. |
+| Delivery uncertain | WatchDog could not confirm delivery. The UUID remains reserved; do not replay or resend the instruction to force delivery. |
+| Duplicate request | This repeat admits no new task. The notice provides no proof that the earlier request executed or completed. |
+| Closed mapped ticket | No task was admitted by this message. A later intentional request needs an active mapped notification. |
+
+Closed-ticket feedback requires the current verified bot principal and its
+current grant for that exact mapped session. Missing grants, failed identity
+checks, unmapped messages and malformed instructions receive no sender feedback.
+Duplicate notices are generic and reveal no hidden target information.
+
+Accepted/queued and delivery-uncertain feedback share one primary receipt limit
+per logical UUID. A new physical message repeating that UUID can receive at most
+one duplicate notice. Closed-ticket rejection can receive at most one rejection
+notice for that UUID. Sender feedback for one UUID is capped across socket and
+polling receipts. Each transport keeps its own grants and task-admission
+reservations. A retry of the original provider event or physical message
+does not repeat its primary receipt or create a duplicate notice.
+If the process stops before attempting the primary receipt, an original retry
+stays silent: the captured owner capability cannot be recovered for feedback.
+
+Each schema-1 receipt is durably claimed before the API send. Claimed, sent and
+uncertain outcomes are permanent and are never automatically retried, including
+after restart. A failed send or invalid API response does not change task
+admission, dispatch the task again or consume another ticket. Inspect the native
+request and delivery records when feedback is missing; absence of a receipt
+does not establish that the task was rejected.
+
+Ordinary human queued/uncertain replies retain their existing behavior. Human
+`bot add`, `bot remove` and `bot access` controls retain their fresh mapped
+confirmations.
 
 ### Admission, audit and upgrades
 
@@ -172,6 +213,14 @@ failures before admission return deferred; polling keeps its cursor for retry.
 Socket callbacks are already acknowledged by Bolt, so a deferred result does
 not itself schedule a retry; the sender may retransmit the same request UUID.
 
+Sender-receipt records are separate from task admission and reuse the existing
+journal. For admitted owner-controlled work, the receipt uses the notification
+capability captured during that admission. Eligible rejection and duplicate
+receipts use journal-authorized provider metadata only; they do not acquire a
+native owner, wake Codex or operate a native client. Receipt failure never
+reopens a task reservation. Existing grants, ticket schemas, configuration and
+credentials remain in place on upgrade.
+
 Inspect only the relevant session's bot records and associated common delivery
 receipt when investigating admission. Malformed or colliding state is retained
 and rejected. An access confirmation lists that session's bot grants only.
@@ -185,16 +234,32 @@ approval is given.
 
 After the approved build and required permissions are available:
 
-1. Verify the intended bot's association through authenticated Slack metadata.
-2. On a fresh notification for the chosen session, the human owner sends
-   `bot add @bot` and checks the resulting mapped confirmation.
-3. Have that bot send the exact instruction format above, with a fresh request
-   UUID, as a reply to the confirmation. Confirm one instruction reaches the
-   existing Codex conversation. Replay it and confirm no second delivery.
-4. Check that ordinary bot chatter, another session and an unmapped destination
-   have no effect. Human ordinary replies should continue to work.
-5. Revoke with `bot remove @bot` on an active notification, then test a new bot
-   request against an older still-active notification. Confirm no delivery.
+1. Reconcile any already posted test request against its native request, ticket
+   and queue records before sending another instruction. A successful provider
+   post alone does not establish admission.
+2. Verify the intended bot's association through authenticated Slack metadata
+   and reuse its compatible existing session grant. If a grant is missing, the
+   human owner sends `bot add @bot` on a fresh notification for the chosen session
+   and checks the resulting mapped confirmation.
+3. After the candidate is ready, have that bot send the exact instruction format
+   above with a fresh UUID and a recognizable result marker, as a reply to an
+   active notification for the exact existing session. Check the echoed UUID and
+   originating Slack parent in the sender receipt. Verify one native dispatch
+   and the real Codex result separately; a queued receipt alone does not prove
+   execution or completion.
+4. Intentionally repeat that UUID in one new physical reply. Confirm no new
+   task, no changed grant and at most one generic duplicate notice. Retrying the
+   original event or physical message must not repeat its receipt. Check that
+   WatchDog's own receipt, ordinary bot chatter, another session and an unmapped
+   destination have no instruction effect. Human ordinary replies should
+   continue to work.
+5. In isolated provider fixtures, fail the acknowledgment send after dispatch,
+   then restart and repeat the same input. Confirm one task dispatch, a retained
+   claimed/uncertain receipt and no repeated send. Exercise both socket and
+   polling paths without manufacturing a live provider outage.
+6. When revocation is part of the approved trial, revoke with `bot remove @bot`
+   on an active notification, then test a new bot request against an older
+   still-active notification. Confirm no delivery or sender feedback.
 
 Do not replay an uncertain instruction with a new UUID merely to force delivery;
 first check whether the original instruction reached the existing conversation.

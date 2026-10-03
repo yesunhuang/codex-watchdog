@@ -237,6 +237,10 @@ that same request. The separator is exactly ` -- `; keep the instruction on the
 same line. The mapped notification selects the session. Ordinary bot chatter does
 not wake Codex, and bots cannot administer access or change destinations.
 
+Eligible bot requests receive bounded UUID-correlated feedback in that Slack thread.
+Queued means delivery was confirmed, not execution or completion. An uncertain
+delivery keeps its UUID reserved; inspect the existing request instead of replaying it.
+
 Grants are specific to one provider, runtime and exact session; channel membership
 does not grant access. Slack identity lookup requires `users:read`. Feishu/Lark
 needs contact-user lookup permission and visibility of the selected person.
