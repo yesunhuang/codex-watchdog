@@ -7,8 +7,9 @@ import pytest
 from codex_watchdog.control_state import ControlStore
 from codex_watchdog.lark_transport import LarkConfig
 from codex_watchdog.notifications import EnvironmentNotifier, NotificationConfig, NotificationEvent
+from codex_watchdog.notification_receipts import DualDeliveryReceipts
 from codex_watchdog.relay import CombinedReplyRelays, RelayTarget, reply_relay_from_config
-from codex_watchdog.storage import InstructionStore
+from codex_watchdog.storage import FileLock
 
 
 THREAD = "11111111-2222-4333-8444-555555555555"
@@ -88,7 +89,8 @@ def test_provider_timeout_does_not_block_other_or_replay_either_after_restart(tm
     repeated = calls.notifier(tmp_path).notify(EVENT)
     assert repeated.status == "delivery_failed" and repeated.attempted_channels == ()
     assert len(calls.slack) == len(calls.lark) == 1
-    receipt = json.loads((tmp_path/"notifications/dual-deliveries.json").read_text())["events"][EVENT.event_fingerprint()]
+    with FileLock(tmp_path / "locks/notifications.lock"), DualDeliveryReceipts(tmp_path) as receipts:
+        receipt = receipts.get(EVENT.event_fingerprint())
     assert receipt[failed] == "uncertain"
     assert set(receipt.values()) == {"uncertain", "sent"}
 
@@ -112,16 +114,20 @@ def test_pre_send_journal_failure_prevents_network_and_preserves_legacy_state(tm
     assert not calls.slack and not calls.lark
 
 
-def test_post_send_write_failure_is_not_replayed(tmp_path):
+def test_post_send_write_failure_is_not_replayed(tmp_path, monkeypatch):
     calls = ProviderCalls()
-    writes = []
-    def fail_confirmation(path, value):
-        writes.append(str(path))
-        if len(writes) == 2:
+    commit = DualDeliveryReceipts._commit
+    failed = []
+    def fail_confirmation(store):
+        # Fail the SQLite confirmation transaction after the provider returned,
+        # leaving its previously committed uncertain claim recoverable.
+        if not failed and store.get(EVENT.event_fingerprint()).get("slack") == "sent":
+            failed.append(True)
             raise OSError("fixture confirmation failure")
-        InstructionStore._atomic_json(path, value)
+        commit(store)
+    monkeypatch.setattr(DualDeliveryReceipts, "_commit", fail_confirmation)
     with pytest.raises(OSError):
-        calls.notifier(tmp_path, atomic_writer=fail_confirmation).notify(EVENT)
+        calls.notifier(tmp_path).notify(EVENT)
     result = calls.notifier(tmp_path).notify(EVENT)
     assert result.status == "delivery_failed"
     assert len(calls.slack) == len(calls.lark) == 1

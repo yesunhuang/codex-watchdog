@@ -185,8 +185,11 @@ def test_all_providers_retain_legacy_receipts_and_routes(tmp_path):
     api.failed = False
     assert notifier.notify(event).status == "delivery_failed"
     assert calls == ["slack", "lark"] and len(api.calls) == 1
-    receipts = json.loads((tmp_path / "notifications/dual-deliveries.json").read_text())
-    assert receipts["events"][event.event_fingerprint()] == {"slack": "sent", "lark": "sent"}
+    from codex_watchdog.notification_receipts import DualDeliveryReceipts
+    from codex_watchdog.storage import FileLock
+    with FileLock(notifier.lock_path), DualDeliveryReceipts(tmp_path) as receipts:
+        assert receipts.get(event.event_fingerprint()) == {"slack": "sent", "lark": "sent"}
+    assert json.loads((tmp_path / "notifications/dual-deliveries.json").read_text())["schema_version"] == 2
     instance = reply_relay_from_config(tmp_path, cfg, queue_dispatcher=SimpleNamespace(), remote_ssh_adapter=None)
     instance.thread_store.cache_mappings(notifier.relay_thread_store.notification_mappings(event.event_fingerprint()), TARGET)
     assert len(instance.relays) == 3

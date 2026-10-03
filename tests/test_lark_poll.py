@@ -20,7 +20,7 @@ OTHER = "22222222-2222-4333-8444-555555555555"
 
 def message(mid="om_reply00000001", parent=ROOT, created=101000, text="  reply \u98de\u4e66\n"):
     return dict(message_id=mid, root_id=parent, parent_id=parent, chat_id=CHAT,
-                create_time=str(created), update_time=str(created + 100), updated=True,
+                create_time=str(created), update_time=str(created), updated=False,
                 deleted=False, msg_type="text", sender=dict(id=USER, id_type="open_id", sender_type="user"),
                 body=dict(content=json.dumps(dict(text=text))))
 
@@ -30,6 +30,26 @@ class Api:
         self.pages = []
         self.calls = []
         self.acks = []
+        self.messages = {}
+
+    def thread_for_root(self, root, *, destination=None):
+        self.calls.append(("root", destination, root))
+        return "omt_" + root.removeprefix("om_")
+
+    def get_message(self, message_id):
+        self.calls.append(("get", message_id))
+        return self.messages[message_id]
+
+    def thread_history(self, thread_id, page_token=None):
+        self.calls.append(("thread", thread_id, page_token))
+        value = self.pages.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        if isinstance(value, dict) and isinstance(value.get("items"), list):
+            for item in value["items"]:
+                if isinstance(item, dict) and isinstance(item.get("message_id"), str):
+                    self.messages[item["message_id"]] = item
+        return value
 
     def history(self, *args):
         self.calls.append(args)
@@ -50,7 +70,7 @@ def setup(root, *, parent=ROOT, tid=THREAD, api=None):
     relay = LarkReplyRelay(root, cfg, queue_dispatcher=queue, remote_ssh_adapter=None, api=api)
     relay.thread_store.cache_mappings([dict(provider="lark", scope=cfg.scope, chat_id=CHAT,
         message_id=parent, event_fingerprint="a" * 64, ticket_schema=1,
-        created_at="2026-09-18T00:00:00Z")], RelayTarget("workspace", tid, "process_local"))
+        created_at="1970-01-01T00:01:40Z")], RelayTarget("workspace", tid, "process_local"))
     clock = [100]
     poller = LarkReplyPoller(relay, api=api, clock=lambda: clock[0])
     poller._read()
@@ -65,9 +85,8 @@ def page(*messages, **fields):
 def test_two_runtimes_same_app_chat_route_only_their_own_notifications(tmp_path):
     a, ap, aa, ac, _ = setup(tmp_path / "a")
     b, bp, ba, bc, _ = setup(tmp_path / "b", parent="om_notification02", tid=OTHER)
-    history = page(message(), message("om_reply00000002", "om_notification02"),
-                   message("om_reply00000003", "om_unmapped00001"))
-    aa.pages.append(history); ba.pages.append(history)
+    aa.pages.append(page(message()))
+    ba.pages.append(page(message("om_reply00000002", "om_notification02")))
     ap.poll_once(); bp.poll_once()
     assert len(ac) == len(bc) == 1
     assert ac[0][0] == THREAD and bc[0][0] == OTHER
@@ -75,6 +94,8 @@ def test_two_runtimes_same_app_chat_route_only_their_own_notifications(tmp_path)
     assert len(aa.acks) == len(ba.acks) == 1
     assert not a.thread_store.lookup_thread(CHAT, "om_notification02")
     assert not b.thread_store.lookup_thread(CHAT, ROOT)
+    assert aa.calls[-1][1] == "omt_notification01"
+    assert ba.calls[-1][1] == "omt_notification02"
 
 
 def test_overlap_restart_and_socket_event_cannot_duplicate_a_reply(tmp_path):
@@ -83,7 +104,7 @@ def test_overlap_restart_and_socket_event_cannot_duplicate_a_reply(tmp_path):
     api.pages.append(page(m)); poller.poll_once()
     restarted = LarkReplyPoller(relay, api=api, clock=lambda: 115)
     api.pages.append(page(message(created=104000)))
-    assert restarted.poll_once()[0]["duplicate"]
+    assert restarted.poll_once() == []  # Closed tickets are intentionally untracked.
     payload = {"schema": "2.0", "header": {"app_id": relay.config.app_id,
         "event_id": "original-socket-id", "event_type": "im.message.receive_v1"}, "event": {
         "sender": {"sender_type": "user", "sender_id": {"open_id": USER}},
@@ -100,7 +121,10 @@ def test_first_poll_transition_does_not_replay_historical_commands(tmp_path):
     poller.path.unlink()  # Isolated fixture creates its first cursor half a second later.
     poller.poll_once()
     assert not calls
-    assert poller._read()["not_before_ms"] == 100500
+    state = json.loads(poller.active_path.read_text())
+    key = relay.thread_store._address(CHAT, ROOT)
+    assert state["parents"][key]["not_before_ms"] == 100500
+    assert not poller.path.exists()  # No replacement historical-chat cursor.
 
 
 def test_previously_delivered_socket_receipt_is_reused_in_place(tmp_path):
@@ -114,20 +138,24 @@ def test_previously_delivered_socket_receipt_is_reused_in_place(tmp_path):
     assert relay.handle_event(payload).status == "queued"
     before = relay.thread_store.path.read_bytes()
     api.pages.append(page(m))
-    assert poller.poll_once()[0]["duplicate"]
+    assert poller.poll_once() == []
     assert relay.thread_store.path.read_bytes() == before
     assert len(calls) == 1 and not api.acks
 
 
-def test_page_token_and_window_are_retained_across_restart(tmp_path):
+def test_incomplete_legacy_page_is_preserved_without_resume_or_optimistic_floor(tmp_path):
     relay, poller, api, calls, clock = setup(tmp_path)
-    api.pages.append(dict(items=[message()], has_more=True, page_token="fixture-token"))
+    legacy = poller._read()
+    legacy.update(window_end=108, page_token="fixture-token")
+    poller.path.write_text(json.dumps(legacy))
+    original = poller.path.read_bytes()
+    api.pages.append(page(message()))
     poller.poll_once()
     restarted = LarkReplyPoller(relay, api=api, clock=lambda: 1000)
     api.pages.append(page(message("om_reply00000002", created=102000)))
     restarted.poll_once()
-    assert api.calls == [(100, 108, None), (100, 108, "fixture-token")]
-    assert restarted._read()["after"] == 108 and len(calls) == 1  # One reply per notification.
+    assert api.calls == [("root", CHAT, ROOT), ("thread", "omt_notification01", None)]
+    assert poller.path.read_bytes() == original and len(calls) == 1
 
 
 @pytest.mark.parametrize("change", ["chat", "message_id", "timestamp", "sender", "deleted", "page"])
@@ -136,15 +164,18 @@ def test_invalid_entire_page_does_not_partially_dispatch_or_advance(tmp_path, ch
     bad = message("om_reply00000002")
     if change == "chat": bad["chat_id"] = "oc_otherchat0001"
     elif change == "message_id": bad["message_id"] = "bad"
-    elif change == "timestamp": bad["create_time"] = "99000"
+    elif change == "timestamp": bad["create_time"] = "not-a-timestamp"
     elif change == "sender": bad["sender"] = None
     elif change == "deleted": bad["deleted"] = "false"
     data = page(message(), bad)
     if change == "page": data["has_more"] = True
     before = poller.path.read_bytes()
     api.pages.append(data)
-    with pytest.raises(LarkTransportError): poller.poll_once()
+    poller.poll_once()
     assert poller.path.read_bytes() == before and calls == []
+    state = json.loads(poller.active_path.read_text())
+    assert state["parents"][relay.thread_store._address(CHAT, ROOT)]["after_ms"] == 100000
+    assert json.loads(poller.health_path.read_text())["status"] == "retrying"
 
 
 @pytest.mark.parametrize("change", ["user", "bot", "deleted", "parent", "kind", "empty", "id_type"])
@@ -167,8 +198,9 @@ def test_busy_mapping_store_retries_page_before_admission(tmp_path):
     before = poller.path.read_bytes()
     api.pages.extend([page(message()), page(message())])
     with FileLock(relay.thread_store.lock_path):
-        assert poller.poll_once()[0]["status"] == "deferred"
+        with pytest.raises(StoreBusyError): poller.poll_once()
     assert poller.path.read_bytes() == before
+    assert api.calls == []  # No provider work without an authoritative active set.
     poller.poll_once()
     assert len(calls) == 1
 

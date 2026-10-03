@@ -16,6 +16,7 @@ import urllib.request
 import uuid
 
 from .models import sha256_text, utc_now
+from .notification_receipts import DualDeliveryReceipts
 from .slack_mapping import (
     SlackRelayTarget,
     SlackThreadStore,
@@ -785,29 +786,20 @@ class EnvironmentNotifier:
         )
 
     def _deliver_both(self, event: NotificationEvent) -> _DeliveryResult:
-        path = self.runtime / "notifications" / "dual-deliveries.json"
-        if path.exists():
-            state = json.loads(path.read_text(encoding="utf-8"))
-        else:
-            state = {"schema_version": 1, "events": {}}
-        if (not isinstance(state, dict) or set(state) != {"schema_version", "events"}
-                or type(state["schema_version"]) is not int or state["schema_version"] != 1
-                or not isinstance(state["events"], dict)):
-            raise ValueError("dual notification state is malformed")
-        for key, entry in state["events"].items():
-            if (re.fullmatch(r"[0-9a-f]{64}", key) is None or not isinstance(entry, dict)
-                    or not set(entry) <= {"slack", "lark"}
-                    or any(value not in ("uncertain", "sent") for value in entry.values())):
-                raise ValueError("dual notification receipt is malformed")
-        receipt = state["events"].setdefault(event.event_fingerprint(), {})
+        with DualDeliveryReceipts(self.runtime, atomic_writer=self.atomic_writer) as receipts:
+            return self._deliver_with_receipts(event, receipts)
+
+    def _deliver_with_receipts(self, event, receipts):
+        fingerprint = event.event_fingerprint()
+        receipt = receipts.get(fingerprint)
         delivered, failures, attempts = [], [], []
         configuration = {"slack": self.config.slack_configured, "lark": self.config.lark.configured,
                          "onebot": self.config.onebot.configured}
         for provider in self.config.interactive_providers:
             configured = configuration[provider]
             if provider == "onebot":
-                # OneBot's own journal fences its sends. Keep the previous
-                # Slack/Feishu receipt format byte-compatible with rollback.
+                # OneBot's own journal fences its sends separately from the
+                # indexed Slack/Feishu receipts and their complete-export rollback.
                 attempts.append(provider)
                 try:
                     self._send_onebot(event)
@@ -825,19 +817,17 @@ class EnvironmentNotifier:
             if not configured:
                 failures.append(sha256_text(provider + "_configuration_incomplete"))
                 continue
-            # Claim before sending. A timeout, crash or failed receipt write
-            # never causes an automatic replay at either provider. This
-            # additive schema-1 journal leaves legacy/rollback state intact.
-            receipt[provider] = "uncertain"
-            self.atomic_writer(path, state)
+            # Commit before sending. A timeout/crash/failed confirmation keeps
+            # the indexed uncertain claim and never causes automatic replay.
+            if not receipts.claim(fingerprint, provider):
+                raise ValueError("dual notification receipt changed before claim")
             attempts.append(provider)
             try:
                 (self._send_slack if provider == "slack" else self._send_lark)(event)
             except Exception as error:
                 failures.append(self._error_digest(provider + "_failed", error))
                 continue
-            receipt[provider] = "sent"
-            self.atomic_writer(path, state)
+            receipts.confirm_sent(fingerprint, provider)
             delivered.append(provider)
         return _DeliveryResult(
             "sent" if len(delivered) == len(self.config.interactive_providers) else "delivery_failed",
@@ -930,7 +920,7 @@ class EnvironmentNotifier:
             context = f"Thread location (SSH): {remote}\nWatchDog machine: {machine}"
         text = f"{event.subject.strip()}\n{context}\n{event.message}"
         if target is not None:
-            text += "\n\nReply to this message to send text to this exact existing Codex thread."
+            text += "\n\nReply in thread on this message to send text to this exact existing Codex thread."
         fingerprint = event.event_fingerprint()
         bound_destination = None
         if event.relay_target is not None:

@@ -142,6 +142,75 @@ class LarkApi:
         except Exception:
             raise LarkTransportError("lark_history_failed_or_timed_out") from None
 
+    def _message_data(self, response):
+        """Preserve authenticated JSON types and fixed history diagnostics."""
+        import json
+        status = response.raw.status_code
+        if status == 429:
+            raise LarkTransportError("lark_history_rate_limited")
+        if (type(status) is not int or response.success() is not True
+                or not 200 <= status < 300):
+            raise LarkTransportError("lark_history_unavailable_check_permissions")
+        return json.loads(response.raw.content)["data"]
+
+    def get_message(self, message_id):
+        """One exact authenticated message lookup, never a history scan."""
+        if not valid_id(message_id, "om"):
+            raise LarkTransportError("lark_poll_message_id_invalid")
+        from lark_channel.api.im.v1.model.get_message_request import GetMessageRequest
+        request = (GetMessageRequest.builder().message_id(message_id)
+                   .user_id_type("open_id").build())
+        try:
+            data = self._message_data(self.client.im.v1.message.get(request))
+            items = data.get("items") if isinstance(data, dict) else None
+            if (not isinstance(items, list) or len(items) != 1
+                    or not isinstance(items[0], dict) or items[0].get("message_id") != message_id):
+                raise LarkTransportError("lark_poll_message_invalid")
+            return items[0]
+        except LarkTransportError:
+            raise
+        except Exception:
+            raise LarkTransportError("lark_history_failed_or_timed_out") from None
+
+    def thread_for_root(self, root_id, *, destination=None):
+        """Resolve the provider's native thread ID from the exact mapped root.
+
+        An ordinary quoted reply is not a native thread. Missing thread metadata
+        means wait; it never authorizes guessing a thread ID or reading the chat.
+        """
+        chat = self.config.chat_id if destination is None else destination
+        if not valid_id(chat, "oc"):
+            raise LarkTransportError("lark_destination_invalid")
+        root = self.get_message(root_id)
+        if (root.get("chat_id") != chat or type(root.get("deleted")) is not bool
+                or root["deleted"] or root.get("root_id") or root.get("parent_id")):
+            raise LarkTransportError("lark_poll_root_invalid")
+        thread_id = root.get("thread_id")
+        if thread_id is None or thread_id == "":
+            return None
+        if not (valid_id(thread_id, "omt") or valid_id(thread_id, "om")):
+            raise LarkTransportError("lark_poll_thread_id_invalid")
+        return thread_id
+
+    def thread_history(self, thread_id, page_token=None):
+        """One newest native-thread page; this API has no time filters."""
+        if not (valid_id(thread_id, "omt") or valid_id(thread_id, "om")):
+            raise LarkTransportError("lark_poll_thread_id_invalid")
+        if (page_token is not None and
+                (not isinstance(page_token, str) or not 0 < len(page_token) <= 4096)):
+            raise LarkTransportError("lark_history_page_invalid")
+        from lark_channel.api.im.v1.model.list_message_request import ListMessageRequest
+        request = (ListMessageRequest.builder().container_id_type("thread")
+                   .container_id(thread_id).sort_type("ByCreateTimeDesc").page_size(50))
+        if page_token is not None:
+            request.page_token(page_token)
+        try:
+            return self._message_data(self.client.im.v1.message.list(request.build()))
+        except LarkTransportError:
+            raise
+        except Exception:
+            raise LarkTransportError("lark_history_failed_or_timed_out") from None
+
     def send(self, text, operation_id, *, reply_to=None, destination=None):
         """destination=None keeps the configured chat exactly as before.
 

@@ -129,14 +129,33 @@ def test_bound_chat_reply_is_polled_with_persistent_cursor(tmp_path):
     assert env.discovery.poll_once()[0]["status"]=="route_bound"
     env.clock[0]+=1
     hello="om_sent000000000002"
+    native_roots = {}
+    lookups = []
+    def thread_for_root(root, *, destination=None):
+        chat = destination or env.default
+        assert env.relay.thread_store.lookup_thread(chat, root) is not None
+        tid = "omt_" + root.removeprefix("om_")
+        native_roots[tid] = (chat, root)
+        lookups.append((chat, root))
+        return tid
+    def thread_history(tid, page_token=None):
+        assert page_token is None
+        chat, root = native_roots[tid]
+        return dict(items=[item for item in env.history.get(chat, [])
+                          if item.get("root_id") == root], has_more=False)
+    env.api.thread_for_root = thread_for_root
+    env.api.thread_history = thread_history
+    poller=LarkReplyPoller(env.relay,api=env.api,clock=lambda:env.clock[0])
+    env.clock[0]+=1  # Fresh native reply follows the first-switch baseline.
     reply=history_message(env,"continue",mid="om_newreply0001")
-    reply.update(root_id=hello,parent_id=hello)
+    reply.update(root_id=hello,parent_id=hello,updated=False,update_time=reply["create_time"])
     env.history[env.dest]=[reply]
     env.clock[0]+=3
-    poller=LarkReplyPoller(env.relay,api=env.api,clock=lambda:env.clock[0])
+    history_reads = len(env.queries)
     poller.poll_once()
     assert len(env.queued)==1 and env.queued[0][0]==env.target.thread_id
     assert env.api.calls[-1]["destination"]==env.dest
+    assert (env.dest, hello) in lookups and len(env.queries) == history_reads
     restarted=LarkReplyPoller(env.relay,api=env.api,clock=lambda:env.clock[0]+10)
     restarted.poll_once()
     assert len(env.queued)==1

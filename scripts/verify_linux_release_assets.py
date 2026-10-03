@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import zipfile
@@ -19,6 +20,17 @@ def verify(directory: Path, version: str, commit: str) -> None:
             raise ValueError("Linux acceptance does not identify this release: " + architecture)
         with zipfile.ZipFile(directory / (name + ".zip")) as archive:
             manifest = json.loads(archive.read(name + "/package-manifest.json"))
+            core_version = tuple(int(part) for part in version.split("-", 1)[0].split("+", 1)[0].split("."))
+            if core_version >= (2, 2, 4):
+                try:
+                    guide = archive.read(name + "/NOTIFICATION_RECEIPTS.md")
+                except KeyError:
+                    raise ValueError("Linux receipt rollback guide is missing: " + architecture) from None
+                if manifest.get("files", {}).get("NOTIFICATION_RECEIPTS.md") != hashlib.sha256(guide).hexdigest():
+                    raise ValueError("Linux receipt rollback guide hash is invalid: " + architecture)
+                text = guide.decode("utf-8")
+                if not all(phrase in text for phrase in ("notification-receipts-export", "--runtime", "sent", "uncertain")):
+                    raise ValueError("Linux receipt rollback guide is incomplete: " + architecture)
         if any(manifest.get(key) != value for key, value in {
             "schema_version": 1, "version": version, "platform": "linux",
             "architecture": architecture, "source_commit": commit,

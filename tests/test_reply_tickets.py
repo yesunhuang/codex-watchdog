@@ -395,5 +395,7 @@ def test_poll_rate_limit_keeps_backoff_and_does_not_advance_cursor(tmp_path, mon
     poller.stop = OneTick()
     poller._run()
     assert poller.next_poll == 190
-    assert not poller.path.exists()
+    state = json.loads(poller.path.read_text())
+    assert state["threads"] == {}  # A rate limit never advances unread replies.
+    assert state["after"] in relay.thread_store.poll_mappings()
     assert json.loads(poller.health_path.read_text())["retry_seconds"] == 90

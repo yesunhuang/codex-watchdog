@@ -24,15 +24,43 @@ choose the domain that owns your application.
 4. Obtain the app's `cli_...` ID and secret. The setup flow learns the conversation
    and permitted sender from your confirmation message; no Open ID lookup is needed.
 
-Normal replies use authenticated history polling every 10 seconds. Each runtime
-accepts only replies to its recorded notifications, so several machines may
-share the app and conversation without competing for events. First-use pairing
-also polls independently, using a device label and a fresh code. Neither path needs a public callback server. An
-incoming-webhook bot alone cannot receive these replies.
+Normal replies use authenticated native-thread polling every 10 seconds.
+First-use pairing polls independently, using a device label and a fresh code.
+Neither path needs a public callback server. An incoming-webhook bot alone
+cannot receive these replies.
 
 Feishu's long connections deliver each event to one client, not all clients
 ([official SDK](https://github.com/larksuite/node-sdk/blob/main/README.zh.md)).
 Use the advanced `socket` reply mode only when one listener owns the app.
+
+## Reply polling
+
+WatchDog reads only native threads belonging to still-valid
+mapped notifications, using the existing last **four tickets per provider and
+session**. Closed and evicted parents stop being tracked. Several machines may
+share the same app/chat; each runtime retains its exact mappings and receipts. Set
+`CODEX_WATCHDOG_LARK_REPLY_MODE=socket` only for an exclusive app listener.
+Authenticated message/thread read access is required; a missing permission is reported in the runtime's
+`lark/<scope>/poll-health-*.json` without silently falling back to a competing
+socket. Use **Reply in thread** on the mapped bot message. Ordinary quoted chat
+replies are outside the native thread API. The first polling adoption establishes
+a current baseline; subsequent restarts retain observed unread positions and
+exact pending-message identities. Existing legacy cursor files remain intact.
+The first valid mapped human reply is admitted once; edits are not commands.
+Without a compatible saved cursor, first adoption starts at launch and does not
+backfill earlier commands.
+
+Each tick attempts at most four active parents and one newest page of up to 50
+messages per parent. This is a work budget, not a global session cap. Failed
+parents rotate without moving their unread positions; provider-wide rate limits
+retain backoff. An observed deferred reply is retried by its exact message ID,
+even after it falls outside the newest page. A page that cannot establish coverage
+of an unknown unread tail fails closed with `lark_poll_reply_window_saturated`;
+the monitor does not skip that tail or start historical catchup. Healthy parents
+continue. Editing or deleting an observed deferred message produces
+`lark_poll_pending_changed` and preserves that parent's unread position.
+The provider's [native-thread reference](https://github.com/larksuite/cli/blob/main/skills/lark-im/references/lark-im-threads-messages-list.md)
+documents descending reads and the absence of thread time filters.
 
 ## Pair on first use
 
@@ -155,7 +183,7 @@ codex-watchdog --runtime <existing-runtime> lark-relay-test --workspace <exact-w
 ```
 
 The normal running WatchDog owns the reply listener. Use the chat application's
-native **Reply** action on the test notification, then verify the text arrives
+native **Reply in thread** action on the test notification, then verify the text arrives
 in the existing Codex conversation. A separate top-level message has no recorded
 target and is ignored. Windows users can substitute `./codex-watchdog.exe` for
 the executable name; Unix users can use its full installed path.
@@ -180,3 +208,5 @@ force retries can cause duplicates. A provider acknowledgement and a recorded
 admission cannot guarantee delivery across every possible process crash.
 
 See [Feishu/Lark and OneBot exact-session binding](SESSION_BINDING.md) for the confirmation-code flow, permissions and limits.
+
+See [notification receipt rollback](NOTIFICATION_RECEIPTS.md) before starting an older binary after a dual-provider upgrade.

@@ -235,6 +235,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="unique test id; a new id deliberately bypasses notification debounce",
     )
     notify_test.add_argument("--workspace", type=_safe_id, default="notification-test")
+    commands.add_parser(
+        "notification-receipts-export",
+        help="export all dual-send receipts for rollback while the runtime is stopped",
+    )
     relay_test = commands.add_parser(
         "slack-relay-test",
         aliases=["lark-relay-test", "onebot-relay-test"],
@@ -300,6 +304,17 @@ def _prompt(message: Optional[str], prompt_file: Optional[Path]) -> str:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "notification-receipts-export":
+        from .notification_receipts import NotificationReceiptError, export_legacy
+        import sqlite3
+        try:
+            result = export_legacy(args.runtime)
+        except NotificationReceiptError as error:
+            result = {"status": "export_failed", "reason": str(error)}
+        except (OSError, sqlite3.Error, ValueError):
+            result = {"status": "export_failed", "reason": "notification_receipts_unavailable"}
+        print(json.dumps(result, sort_keys=True))
+        return 1 if result["status"] == "export_failed" else 0
     if args.command == "setup-messaging":
         if args.onebot:
             from .onebot_setup import setup_onebot
@@ -635,7 +650,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             subject=f"[Codex Watchdog RELAY TEST] {args.id}",
             message=(
                 {"slack": "Reply in this Slack thread. WatchDog will relay your text ",
-                 "lark": "Reply to this Feishu/Lark message. WatchDog will relay your text ",
+                 "lark": "Reply in thread on this Feishu/Lark message. WatchDog will relay your text ",
                  "onebot": "Quote/reply to this QQ message. WatchDog will relay your text "}[provider] +
                 "without interpreting it to the exact existing VS Code Codex "
                 "thread shown by this workspace."

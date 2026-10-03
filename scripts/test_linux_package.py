@@ -107,7 +107,7 @@ def validate_archive(package: Path) -> dict:
     architecture, machine = {"aarch64": ("arm64", 183), "x86_64": ("x64", 62)}[platform.machine()]
     assert manifest["platform"] == "linux" and manifest["architecture"] == architecture
     assert manifest["schema_version"] == 1 and len(manifest["source_commit"]) == 40
-    allowed = {"codex-watchdog", "LICENSE", "LINUX_PACKAGE.md", "FEISHU_LARK.md", "MESSAGING_SETUP.md", "SETUP.md", "ONEBOT_QQ.md", "ONEBOT_REUSE.md", "SESSION_BINDING.md", "SESSION_ACCESS.md", "THIRD_PARTY_NOTICES.md",
+    allowed = {"codex-watchdog", "LICENSE", "LINUX_PACKAGE.md", "FEISHU_LARK.md", "MESSAGING_SETUP.md", "SETUP.md", "ONEBOT_QQ.md", "ONEBOT_REUSE.md", "SESSION_BINDING.md", "SESSION_ACCESS.md", "NOTIFICATION_RECEIPTS.md", "THIRD_PARTY_NOTICES.md",
                "THIRD_PARTY_LICENSES/README.md", "THIRD_PARTY_LICENSES/inventory.json"}
     inventory = json.loads((package / "THIRD_PARTY_LICENSES/inventory.json").read_text())
     assert inventory["schema_version"] == 1
@@ -125,6 +125,8 @@ def validate_archive(package: Path) -> dict:
     assert {p.relative_to(package).as_posix() for p in package.rglob("*") if p.is_file()} == allowed | {"package-manifest.json"}
     assert not any(p.is_symlink() for p in package.rglob("*"))
     assert all(digest(package / name) == sha for name, sha in manifest["files"].items())
+    rollback_guide = (package / "NOTIFICATION_RECEIPTS.md").read_text(encoding="utf-8")
+    assert all(text in rollback_guide for text in ("notification-receipts-export", "--runtime", "sent", "uncertain"))
     archive = package.parent / (package.name + ".zip")
     assert digest(archive) == (archive.parent / (archive.name + ".sha256")).read_text().split()[0]
     with zipfile.ZipFile(archive) as zipped:

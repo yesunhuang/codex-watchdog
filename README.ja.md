@@ -355,6 +355,10 @@ Interactive transport selection は `slack`、`lark`、`both`、`onebot`、`slac
 をサポートします。既存の explicit selection は互換 upgrade で保持されます。production service の environment を
 変更する前に各 provider guide を確認してください。
 
+Feishu/Lark の polling では、有効な WatchDog 通知で **Reply in thread** を使ってください。
+両 provider の runtime を旧版に戻す前に、すべての WatchDog process を停止し、
+[receipt export の手順](docs/NOTIFICATION_RECEIPTS.md)に従ってください。
+
 ## ドキュメント
 
 - Install: [Windows](WINDOWS_PACKAGE.md)、[macOS](docs/MACOS_PACKAGE.md)、

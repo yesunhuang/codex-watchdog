@@ -375,6 +375,10 @@ Interactive transport selection supports `slack`, `lark`, `both`, `onebot`,
 stable across compatible upgrades; see the provider guides before changing a
 production service environment.
 
+For Feishu/Lark polling, use **Reply in thread** on an active WatchDog notification.
+Before rolling back a dual-provider runtime, stop every WatchDog process and
+follow the [receipt export procedure](docs/NOTIFICATION_RECEIPTS.md).
+
 ## Documentation
 
 - Setup: [Windows](WINDOWS_PACKAGE.md), [macOS](docs/MACOS_PACKAGE.md),

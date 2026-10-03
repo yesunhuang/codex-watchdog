@@ -332,6 +332,9 @@ Remote-SSH/分离运行应通过独立于 SSH 连接的持久用户服务启动 
 交互传输可选择 `slack`、`lark`、`both`、`onebot`、`slack+onebot`、`lark+onebot` 或 `all`。
 已有显式选择会在兼容升级中保持稳定；修改生产 service 环境前请先查看对应 provider 文档。
 
+飞书/Lark 轮询模式请在有效的 WatchDog 通知上使用 **在话题中回复（Reply in thread）**。
+回退双 provider runtime 前，先停止所有 WatchDog 进程，再按[回执导出步骤](docs/NOTIFICATION_RECEIPTS.md)操作。
+
 ## 文档
 
 - 安装：[Windows](WINDOWS_PACKAGE.md)、[macOS](docs/MACOS_PACKAGE.md)、

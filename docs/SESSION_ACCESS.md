@@ -165,6 +165,13 @@ current grant for that exact mapped session. Missing grants, failed identity
 checks, unmapped messages and malformed instructions receive no sender feedback.
 Duplicate notices are generic and reveal no hidden target information.
 
+Polling tracks only still-active mapped tickets, using the existing last four
+tickets per provider and session. Closed or evicted parents stop being polled;
+silence for later replies there is expected. No feedback-only lane, historical
+backfill or reopened ticket is created to acknowledge a repeat. The initial
+valid-ticket acknowledgement remains required. Socket delivery can produce the
+bounded rejection or duplicate receipt below when the event is otherwise eligible.
+
 Accepted/queued and delivery-uncertain feedback share one primary receipt limit
 per logical UUID. A new physical message repeating that UUID can receive at most
 one duplicate notice. Closed-ticket rejection can receive at most one rejection
@@ -248,7 +255,9 @@ After the approved build and required permissions are available:
    and the real Codex result separately; a queued receipt alone does not prove
    execution or completion.
 4. Intentionally repeat that UUID in one new physical reply. Confirm no new
-   task, no changed grant and at most one generic duplicate notice. Retrying the
+   task, no changed grant and at most one generic duplicate notice if the message
+   is observed while eligible. A polling parent closed by the original request
+   is no longer tracked and needs no duplicate notice. Retrying the
    original event or physical message must not repeat its receipt. Check that
    WatchDog's own receipt, ordinary bot chatter, another session and an unmapped
    destination have no instruction effect. Human ordinary replies should

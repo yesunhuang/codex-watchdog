@@ -55,7 +55,20 @@ class FakeProvider:
                     if provider.failure:
                         self.respond({"code": 999, "msg": "raw-secret-provider-error"}, provider.failure)
                     else:
-                        self.respond({"code": 0, "data": {"items": provider.history, "has_more": False}})
+                        query = parse_qs(urlparse(self.path).query)
+                        items = provider.history
+                        if query.get("container_id_type") == ["thread"]:
+                            tid = query["container_id"][0]
+                            items = [item for item in items
+                                if tid == "omt_" + (item.get("root_id") or "").removeprefix("om_")]
+                        self.respond({"code": 0, "data": {"items": items, "has_more": False}})
+                    return
+                if self.path.startswith("/open-apis/im/v1/messages/"):
+                    assert self.headers.get("Authorization") == "Bearer " + provider.token
+                    root = urlparse(self.path).path.rsplit("/", 1)[1]
+                    self.respond({"code": 0, "data": {"items": [dict(message_id=root,
+                        chat_id=provider.message_chat, deleted=False,
+                        thread_id="omt_" + root.removeprefix("om_"))]}})
                     return
                 self.respond({"code": 0, "bot": {"open_id": "ou_loopbackbot01", "app_name": "fixture"}})
 
@@ -199,7 +212,7 @@ def test_real_sdk_auth_create_reply_and_stable_idempotency_uuid(provider):
     assert len([p for p in provider.posts if "/auth/" in p[0]]) == 1
 
 
-def test_real_sdk_history_shared_chat_keeps_independent_runtime_routes(provider, tmp_path):
+def test_real_sdk_scoped_threads_keep_independent_runtime_routes(provider, tmp_path):
     from codex_watchdog.lark_poll import LarkReplyPoller
     from test_lark_poll import message
     other_parent = "om_notification02"
@@ -214,7 +227,7 @@ def test_real_sdk_history_shared_chat_keeps_independent_runtime_routes(provider,
         relay = LarkReplyRelay(tmp_path / label, provider.config, queue_dispatcher=queue,
                               remote_ssh_adapter=None, api=provider.api())
         relay.thread_store.cache_mappings([dict(provider="lark", scope=provider.config.scope,
-            ticket_schema=1, created_at="2026-09-18T00:00:00Z",
+            ticket_schema=1, created_at="1970-01-01T00:01:40Z",
             chat_id=CHAT, message_id=parent, event_fingerprint="a" * 64)],
             RelayTarget(label, THREAD, "process_local"))
         clock = [100]
@@ -226,9 +239,13 @@ def test_real_sdk_history_shared_chat_keeps_independent_runtime_routes(provider,
     assert destinations[0] != destinations[1]
     assert provider.connections.empty()  # Neither runtime competed for events.
     reads = [parse_qs(urlparse(path).query) for path in provider.gets if "/messages?" in path]
-    assert len(reads) == 2 and reads[0] == reads[1]
-    assert reads[0] == dict(container_id_type=["chat"], container_id=[CHAT],
-                           start_time=["100"], end_time=["108"], sort_type=["ByCreateTimeAsc"], page_size=["50"])
+    assert len(reads) == 2
+    assert reads[0] == dict(container_id_type=["thread"], container_id=["omt_notification01"],
+                           sort_type=["ByCreateTimeDesc"], page_size=["50"])
+    assert reads[1] == dict(reads[0], container_id=["omt_notification02"])
+    roots = [urlparse(path).path for path in provider.gets if "/messages/" in path]
+    assert roots == ["/open-apis/im/v1/messages/om_notification01",
+                     "/open-apis/im/v1/messages/om_notification02"]
 
 
 @pytest.mark.parametrize("status,code", [(403, "unavailable_check_permissions"), (429, "rate_limited")])

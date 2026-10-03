@@ -115,7 +115,10 @@ def test_wrong_parent_fails_before_any_reply_is_delivered(tmp_path):
         dict(messages=[event(), event(ts="1789112245.000001", thread_ts="1789111000.000001")]))
     with pytest.raises(ValueError, match="identity"):
         poller.poll_once()
-    assert deliveries == [] and not poller.path.exists()
+    assert deliveries == []
+    state = json.loads(poller.path.read_text())
+    assert state["threads"] == {}
+    assert state["after"] == relay.thread_store.thread_key(CHANNEL, PARENT)
 
 
 def test_uncertain_delivery_is_not_replayed_when_cursor_write_failed(tmp_path):

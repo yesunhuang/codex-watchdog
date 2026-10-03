@@ -93,7 +93,7 @@ class SlackReplyPoller:
             dict(schema_version=1, checked_at=utc_now(), status=status, device_label=self.device_label, **fields))
 
     def poll_once(self):
-        """Caller holds the listener lock; errors never advance a reply cursor."""
+        """Caller holds the listener lock; unread replies retain their cursors."""
         state = self._read()
         mappings = self.relay.thread_store.poll_mappings()
         keys = sorted(mappings)
@@ -106,6 +106,11 @@ class SlackReplyPoller:
             return []
         later = [key for key in keys if key > (state.get("after") or "")]
         key = (later or keys)[0]
+        # Scheduling progress is independent of reply progress. Persist it
+        # before this parent's API, validation, handler or ACK can fail, so
+        # another active parent gets the next attempt even after a restart.
+        state["after"] = key
+        InstructionStore._atomic_json(self.path, state)
         mapping = mappings[key]
         parent = mapping["thread_ts"]
         oldest = state["threads"].get(key, parent)
@@ -139,8 +144,6 @@ class SlackReplyPoller:
                 chat_postMessage=lambda **params: self.api("chat.postMessage", params)))
             if key not in self.relay.thread_store.poll_mappings():
                 break  # The first claim closes this parent, including uncertain delivery.
-        state["after"] = key
-        InstructionStore._atomic_json(self.path, state)
         self._health("polling", mapped_threads=len(keys), results=results)
         return results
 

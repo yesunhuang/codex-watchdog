@@ -37,6 +37,16 @@ if (-not (Test-Path -LiteralPath $icon -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $platformGuide -PathType Leaf)) {
     throw "Packaged platform support guide is missing: $platformGuide"
 }
+$receiptGuide = Join-Path $package "docs\NOTIFICATION_RECEIPTS.md"
+if (-not (Test-Path -LiteralPath $receiptGuide -PathType Leaf)) {
+    throw "Packaged notification receipt rollback guide is missing."
+}
+$receiptGuideText = Get-Content -LiteralPath $receiptGuide -Raw -Encoding UTF8
+foreach ($receiptGuidePhrase in @("notification-receipts-export", "--runtime", "sent", "uncertain")) {
+    if (-not $receiptGuideText.Contains($receiptGuidePhrase)) {
+        throw "Packaged notification receipt rollback guide is incomplete."
+    }
+}
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("codex-watchdog-package-test-" + [guid]::NewGuid().ToString("N"))
 $savedEnvironment = @{}
