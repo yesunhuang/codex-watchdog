@@ -126,8 +126,9 @@ def test_post_send_write_failure_is_not_replayed(tmp_path, monkeypatch):
             raise OSError("fixture confirmation failure")
         commit(store)
     monkeypatch.setattr(DualDeliveryReceipts, "_commit", fail_confirmation)
-    with pytest.raises(OSError):
-        calls.notifier(tmp_path).notify(EVENT)
+    first = calls.notifier(tmp_path).notify(EVENT)
+    assert first.status == "delivery_failed"
+    assert first.provider_outcomes == {"slack": "uncertain", "lark": "sent"}
     result = calls.notifier(tmp_path).notify(EVENT)
     assert result.status == "delivery_failed"
     assert len(calls.slack) == len(calls.lark) == 1

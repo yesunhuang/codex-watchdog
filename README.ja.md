@@ -359,6 +359,8 @@ Feishu/Lark の polling では、有効な WatchDog 通知で **Reply in thread*
 両 provider の runtime を旧版に戻す前に、すべての WatchDog process を停止し、
 [receipt export の手順](docs/NOTIFICATION_RECEIPTS.md)に従ってください。
 
+通知の送信が終了した後の失敗や結果不明は、そのイベントと provider に限定されます。他の provider と以後の独立した通知は継続し、結果不明の送信を無条件に再試行しません。[通知の復旧と rollback](docs/NOTIFICATION_RECEIPTS.md)を参照してください。
+
 ## ドキュメント
 
 - Install: [Windows](WINDOWS_PACKAGE.md)、[macOS](docs/MACOS_PACKAGE.md)、

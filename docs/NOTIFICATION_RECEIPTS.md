@@ -20,6 +20,30 @@ notifications use point reads and small committed writes; migration and explicit
 rollback export are separate one-time history-sized operations. Missing,
 incompatible or ambiguous state fails closed.
 
+## Ended notification attempts
+
+A failed or uncertain provider attempt is terminal once its send has ended.
+Its exact event/provider is not retried; other providers and later independent
+notifications continue. Controlled notifications record the terminal aggregate
+before releasing their ownership barrier. A provider confirmation-write failure
+keeps its uncertain claim and does not abort healthy providers' turns.
+
+Each exact sender/target has a schema-1 intent under
+`notifications/control-attempts/` and a crash-releasing kernel lease spanning
+prepare, send and receipt commit. After restart, a new holder can reconcile that
+exact saved operation as terminal uncertain without sending or dispatching work.
+Recovery uses bounded point lookups and only still-active reply mappings; closed
+or evicted tickets stay closed. A live lease, missing sender proof, incompatible
+intent or unrelated native-writer barrier remains fenced. Age or timeout alone
+does not prove that a send ended. Legacy unfinished effects lacking this sender
+intent require exact operator diagnosis and approved recovery.
+
+Compatible upgrades preserve existing profiles, runtimes, provider receipts,
+credentials and routes. The additive intent does not change provider schemas.
+Keep the current binary and intent evidence until any unfinished send is
+reconciled before returning to an older binary; old versions cannot perform
+the new sender reconciliation.
+
 ## Rollback to a previous binary
 
 Stop every WatchDog process using the runtime normally, then use the current

@@ -564,7 +564,7 @@ def test_observation_failure_reports_but_brief_contention_does_not(scenario, mon
         assert result["notification"]["status"] == "audit_only"
 
 
-def test_uncertain_alert_keeps_canonical_barrier_and_is_never_replayed(scenario):
+def test_ended_uncertain_alert_is_terminal_and_is_never_replayed(scenario):
     store, local, writer, clock, clients, make_agent = scenario
     agent, owner = detached(scenario)
     attempts = []
@@ -576,9 +576,9 @@ def test_uncertain_alert_keeps_canonical_barrier_and_is_never_replayed(scenario)
 
     owner.health.notifier = UncertainNotifier()
     writer[0] = None
-    assert agent.step()[0]["notification"]["status"] == "blocked"
-    assert store.read()["external_effect"] is not None
-    assert agent.step()[0]["notification"]["reason"] == "control_notification_outcome_uncertain"
+    assert agent.step()[0]["notification"]["status"] == "uncertain"
+    assert store.read()["external_effect"] is None
+    assert agent.step()[0]["notification"]["duplicate"]
     assert len(attempts) == 1
 
 
@@ -897,7 +897,7 @@ def test_initial_resume_exit_is_not_retried_until_native_attachment(scenario, mo
     assert len(clients) == 1
 
 
-def test_exited_backend_preserves_uncertain_notification_barrier(scenario):
+def test_exited_backend_can_recover_after_ended_uncertain_notification(scenario, monkeypatch):
     store, local, writer, clock, clients, make_agent = scenario
     agent, owner = detached(scenario)
     class UncertainNotifier:
@@ -906,11 +906,37 @@ def test_exited_backend_preserves_uncertain_notification_barrier(scenario):
     owner.health.notifier = UncertainNotifier()
     clients[0].process.returncode = -15
     writer[0] = None
-    assert agent.step(observe=False)[0]["recovery"]["reason"] == "control_release_not_safe"
-    barrier = store.read()["external_effect"]
-    assert barrier is not None and not agent.controllers
-    assert agent.step(observe=False)[0]["reason"] == "control_external_effect_unresolved"
-    assert store.read()["external_effect"] == barrier and len(clients) == 1
+    result = agent.step(observe=False)[0]
+    assert result["notification"]["status"] == "uncertain"
+    assert store.read()["external_effect"] is None and not agent.controllers
+    agent.retry_after.clear()
+    monkeypatch.setattr(agent, "_cycle", lambda item: SimpleNamespace(status="completed"))
+    assert agent.step()[0]["state"] == "owned"
+    assert store.read()["external_effect"] is None and len(clients) == 2
+
+
+def test_owner_loop_reconciles_crash_left_sender_before_observing_existing_writer(scenario, monkeypatch):
+    from codex_watchdog.notification_attempts import local_attempt
+    from codex_watchdog.notifications import NotificationEvent
+    store, local, writer, clock, clients, make_agent = scenario
+    agent, owner = detached(scenario)
+    token = agent.controllers[THREAD]["token"]
+    runtime = owner.binding.runtime
+    event = NotificationEvent("fixture", "stopped", "crash-left", "Fixture", "Fixture")
+    attempt = local_attempt(runtime, store)
+    with attempt.lease():
+        intent = attempt.start(token, event.event_fingerprint())
+        store.prepare_notification(token, intent["fingerprint"], intent["fingerprint"],
+                                   intent["operation_id"], intent["sender"])
+    # No notifier/provider is used to reconcile this uncertain, ended intent.
+    owner.health.notifier = SimpleNamespace(notify=lambda _: pytest.fail("unexpected alert"))
+    cycles = []
+    monkeypatch.setattr(agent, "_cycle", lambda item: cycles.append(item["token"]) or SimpleNamespace(status="completed"))
+    assert agent.step()[0]["state"] == "owned"
+    assert store.read()["external_effect"] is None and cycles == [token]
+    assert len(clients) == 1 and not clients[0].closed
+    receipt = json.loads(store.effect_path("notification", intent["fingerprint"]).read_text())
+    assert receipt["result"]["status"] == "uncertain" and receipt["result"]["terminal"]
 
 
 def test_auto_cli_passes_repository_scope(scenario, monkeypatch):

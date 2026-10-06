@@ -335,6 +335,8 @@ Remote-SSH/分离运行应通过独立于 SSH 连接的持久用户服务启动 
 飞书/Lark 轮询模式请在有效的 WatchDog 通知上使用 **在话题中回复（Reply in thread）**。
 回退双 provider runtime 前，先停止所有 WatchDog 进程，再按[回执导出步骤](docs/NOTIFICATION_RECEIPTS.md)操作。
 
+一次通知发送结束后，失败或结果不确定只影响该事件和对应 provider；其他 provider 和后续独立通知仍可继续。不确定的发送不会盲目重试。详见[通知恢复与回退](docs/NOTIFICATION_RECEIPTS.md)。
+
 ## 文档
 
 - 安装：[Windows](WINDOWS_PACKAGE.md)、[macOS](docs/MACOS_PACKAGE.md)、

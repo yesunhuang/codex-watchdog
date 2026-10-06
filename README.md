@@ -379,6 +379,8 @@ For Feishu/Lark polling, use **Reply in thread** on an active WatchDog notificat
 Before rolling back a dual-provider runtime, stop every WatchDog process and
 follow the [receipt export procedure](docs/NOTIFICATION_RECEIPTS.md).
 
+Once a notification send ends, a failed or uncertain provider outcome is terminal for that exact event. Other providers and later independent notifications continue; uncertain sends are never blindly retried. See [notification recovery and rollback](docs/NOTIFICATION_RECEIPTS.md).
+
 ## Documentation
 
 - Setup: [Windows](WINDOWS_PACKAGE.md), [macOS](docs/MACOS_PACKAGE.md),

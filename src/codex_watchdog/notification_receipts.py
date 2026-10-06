@@ -189,22 +189,32 @@ class DualDeliveryReceipts(AbstractContextManager):
     def claim(self, fingerprint, provider):
         self._fingerprint(fingerprint)
         self._provider(provider)
-        self._begin()
-        self.db.execute("INSERT OR IGNORE INTO receipts(fingerprint) VALUES(?)", (fingerprint,))
-        changed = self.db.execute("UPDATE receipts SET " + provider + "='uncertain' "
-                                  "WHERE fingerprint=? AND " + provider + " IS NULL", (fingerprint,)).rowcount
-        self._commit()
+        try:
+            self._begin()
+            self.db.execute("INSERT OR IGNORE INTO receipts(fingerprint) VALUES(?)", (fingerprint,))
+            changed = self.db.execute("UPDATE receipts SET " + provider + "='uncertain' "
+                                      "WHERE fingerprint=? AND " + provider + " IS NULL", (fingerprint,)).rowcount
+            self._commit()
+        except BaseException:
+            if self.db.in_transaction:
+                self.db.rollback()
+            raise
         return changed == 1
 
     def confirm_sent(self, fingerprint, provider):
         self._fingerprint(fingerprint)
         self._provider(provider)
-        self._begin()
-        changed = self.db.execute("UPDATE receipts SET " + provider + "='sent' "
-                                  "WHERE fingerprint=? AND " + provider + "='uncertain'", (fingerprint,)).rowcount
-        if changed != 1:
-            raise NotificationReceiptError("notification_receipts_confirmation_invalid")
-        self._commit()
+        try:
+            self._begin()
+            changed = self.db.execute("UPDATE receipts SET " + provider + "='sent' "
+                                      "WHERE fingerprint=? AND " + provider + "='uncertain'", (fingerprint,)).rowcount
+            if changed != 1:
+                raise NotificationReceiptError("notification_receipts_confirmation_invalid")
+            self._commit()
+        except BaseException:
+            if self.db.in_transaction:
+                self.db.rollback()
+            raise
 
     def export(self):
         """Offline caller owns foreground-run.lock as well as notifications.lock."""

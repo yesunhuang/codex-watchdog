@@ -6,6 +6,7 @@ from pathlib import Path
 import uuid
 
 from .control_state import ControlError
+from .notification_attempts import local_attempt, remote_attempt
 
 
 REMOTE_CONTROL_SOURCE = r'''
@@ -101,13 +102,15 @@ def run_control(request):
     action = control.get("action")
     token = control.get("token")
     repo = request["repo_path"]
-    if action == "acquire":
+    if action in ("acquire", "notification_context"):
         thread = control_resolve(repo, request["storage_key"], request.get("expected_session_ids"))
     else:
         thread = canonical_uuid(control.get("thread_id"))
         if thread is None or not control_exact_thread(repo, thread):
             raise ControlError("control_exact_thread_unavailable")
     store = ControlStore(remote_codex_home(), thread, repo)
+    if action == "notification_context":
+        return {"status": "ok", "session_id": thread}
     if action == "relay":
         if not store.path.exists():
             if control_state_home(remote_codex_home()) != remote_codex_home().resolve():
@@ -171,7 +174,13 @@ def run_control(request):
             value["remote_state"] = state
             control_atomic_json(store.path, value)
     elif action == "notification_prepare":
-        receipt = store.prepare_notification(token, control["event_id"], control["fingerprint"])
+        receipt = store.prepare_notification(token, control["event_id"], control["fingerprint"],
+                                             control.get("operation_id"), control.get("sender"))
+        return {"status": "ok", "receipt": receipt}
+    elif action == "notification_reconcile":
+        receipt = store.reconcile_notification(token, control["event_id"], control["fingerprint"],
+                                               control["operation_id"], control["sender"], control["result"],
+                                               control.get("relay_mappings", ()))
         return {"status": "ok", "receipt": receipt}
     elif action == "notification_finish":
         receipt = store.finish_notification(token, control["event_id"], control["operation_id"], control["result"],
@@ -215,6 +224,7 @@ def run_control(request):
 class RemoteControlClient:
     def __init__(self, adapter, runtime, *, instance=None, locality=None):
         self.adapter = adapter
+        self.runtime = Path(runtime).resolve()
         self.instance = instance or str(uuid.uuid4())
         self.locality = locality or hashlib.sha256(
             (os.environ.get("COMPUTERNAME", os.environ.get("HOSTNAME", "desktop"))
@@ -231,6 +241,7 @@ class RemoteControlClient:
         return result
 
     def acquire(self, target, state, ttl=900, relay_mappings=()):
+        self.reconcile_notification(target)
         return self.request(target, "acquire", authority=target.authority, initial_state=state, ttl=ttl,
                             relay_mappings=relay_mappings)
 
@@ -238,6 +249,7 @@ class RemoteControlClient:
         return self.request(target, "save", token=token, state=state)
 
     def probe(self, target, token, **options):
+        self.reconcile_notification(target, token["thread_id"])
         result = self.adapter.probe(target, control=dict(action="probe", token=token,
                                                          thread_id=token["thread_id"]), **options)
         if result.get("status") != "ok":
@@ -246,13 +258,34 @@ class RemoteControlClient:
 
     def notify(self, target, token, event, notifier):
         return _notify_with_receipt(
-            event, notifier,
-            lambda fingerprint: self.request(target, "notification_prepare", token=token,
-                event_id=fingerprint, fingerprint=fingerprint)["receipt"],
+            event, notifier, remote_attempt(self.runtime, target, token["thread_id"]), token,
+            lambda fingerprint, operation, sender: self.request(target, "notification_prepare", token=token,
+                event_id=fingerprint, fingerprint=fingerprint,
+                operation_id=operation, sender=sender)["receipt"],
             lambda fingerprint, operation, result, mappings: self.request(
                 target, "notification_finish", token=token, event_id=fingerprint,
                 operation_id=operation, result=result, relay_mappings=mappings),
+            lambda value, result, mappings: self._reconcile_attempt(target, value, result, mappings),
         )
+
+    def _reconcile_attempt(self, target, value, result, mappings):
+        return self.request(target, "notification_reconcile", token=value["token"],
+            event_id=value["fingerprint"], fingerprint=value["fingerprint"],
+            operation_id=value["operation_id"], sender=value["sender"],
+            result=result, relay_mappings=mappings)
+
+    def reconcile_notification(self, target, thread_id=None):
+        if thread_id is None:
+            expected = target.expected_session_ids
+            thread_id = (expected[0] if expected and len(expected) == 1 else
+                         self.request(target, "notification_context")["session_id"])
+        attempt = remote_attempt(self.runtime, target, thread_id)
+        # No historical scan and no RPC when there is no pending local intent.
+        if not attempt.path.exists():
+            return
+        with attempt.lease():
+            attempt.reconcile(lambda value, result, mappings:
+                              self._reconcile_attempt(target, value, result, mappings))
 
 
 def notify_local_control(store, token, event, notifier):
@@ -261,29 +294,73 @@ def notify_local_control(store, token, event, notifier):
     The captured canonical capability and external-send barrier still apply;
     this grants no thread discovery, writer, queue or replacement authority.
     """
+    runtime = getattr(notifier, "runtime", None) or store.read().get("runtime_path") or store.directory / "runtime"
     return _notify_with_receipt(
-        event, notifier,
-        lambda fingerprint: store.prepare_notification(token, fingerprint, fingerprint),
+        event, notifier, local_attempt(runtime, store), token,
+        lambda fingerprint, operation, sender: store.prepare_notification(
+            token, fingerprint, fingerprint, operation, sender),
         lambda fingerprint, operation, result, mappings: store.finish_notification(
             token, fingerprint, operation, result, mappings),
+        lambda value, result, mappings: store.reconcile_notification(value["token"], value["fingerprint"],
+            value["fingerprint"], value["operation_id"], value["sender"], result, mappings),
     )
 
 
-def _notify_with_receipt(event, notifier, prepare, finish):
-    fingerprint = event.event_fingerprint()
-    prepared = prepare(fingerprint)
-    if prepared["duplicate"]:
-        result = prepared.get("result")
-        if isinstance(result, dict):
-            # A failed send is not successful suppression. An uncertain result
-            # is never replayed, including by a restarted or replacement owner.
-            status = result.get("status")
-            if status in ("sent", "sent_fallback", "audit_only", "suppressed"):
-                status = "suppressed"
-            return dict(result, status=status, duplicate=True)
-        raise ControlError("control_notification_outcome_uncertain")
-    result = notifier.notify(event).to_dict()
-    mappings = getattr(notifier, "relay_thread_store", getattr(notifier, "slack_thread_store", None))
-    mappings = mappings.notification_mappings(fingerprint) if mappings is not None else ()
-    finish(fingerprint, prepared["operation_id"], result, mappings)
-    return result
+def reconcile_local_notifications(store, runtime):
+    attempt = local_attempt(runtime, store)
+    if not attempt.path.exists():
+        return
+    with attempt.lease():
+        attempt.reconcile(lambda value, result, mappings: store.reconcile_notification(
+            value["token"], value["fingerprint"], value["fingerprint"], value["operation_id"],
+            value["sender"], result, mappings))
+
+
+def _notify_with_receipt(event, notifier, attempt, token, prepare, finish, reconcile):
+    with attempt.lease():
+        attempt.reconcile(reconcile)
+        fingerprint = event.event_fingerprint()
+        mapping_store = getattr(notifier, "relay_thread_store", getattr(notifier, "slack_thread_store", None))
+        stores = getattr(mapping_store, "stores", (mapping_store,)) if mapping_store is not None else ()
+        sources = []
+        for store in stores:
+            journal = getattr(store, "journal", None)
+            if journal is not None:
+                sources.append(dict(provider=store.provider, namespace=journal.namespace,
+                                    scope=getattr(store, "scope", None)))
+        intent = attempt.start(token, fingerprint, sources)
+        prepared = prepare(fingerprint, intent["operation_id"], intent["sender"])
+        if prepared["duplicate"]:
+            attempt.finalized(intent)  # This invocation never started a send.
+            result = prepared.get("result")
+            if isinstance(result, dict):
+                status = result.get("status")
+                if status in ("sent", "sent_fallback", "audit_only", "suppressed"):
+                    status = "suppressed"
+                return dict(result, status=status, duplicate=True)
+            raise ControlError("control_notification_outcome_uncertain")
+        error = None
+        try:
+            result = dict(notifier.notify(event).to_dict(), terminal=True)
+        except BaseException as exc:
+            # The send phase has ended, even if its exact provider outcome is
+            # unknown. Persist uncertainty and never re-invoke this fingerprint.
+            error = exc
+            result = dict(status="uncertain", terminal=True, reason="notification_sender_ended",
+                          event_fingerprint=fingerprint, duplicate=False,
+                          error_sha256=hashlib.sha256(type(exc).__name__.encode()).hexdigest())
+        intent = attempt.terminal(intent, result, ())
+        mappings = []
+        # A provider's mapping read failure must not hide the healthy providers'
+        # immutable routes. Their existing journals remain authoritative.
+        for store in stores:
+            try:
+                mappings.extend(store.notification_mappings(fingerprint))
+            except Exception as exc:
+                result["mapping_error_sha256"] = hashlib.sha256(type(exc).__name__.encode()).hexdigest()
+        intent = attempt.terminal(intent, result, mappings)
+        finish(fingerprint, prepared["operation_id"], result, mappings)
+        attempt.finalized(intent)
+        if error is not None and not isinstance(error, Exception):
+            raise error
+        return result

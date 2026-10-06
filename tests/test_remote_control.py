@@ -329,3 +329,91 @@ def test_slack_mapping_survives_upgrade_notification_and_owner_handoff(helper, t
     replacement.cache_mappings(mappings, SlackRelayTarget("new", THREAD, "process_local"))
     assert replacement.path.read_bytes() == before
     assert client.notify(target, remote, event, MappedNotifier(tmp_path))["duplicate"]
+
+
+@pytest.mark.parametrize("boundary", ["prepare_reply_lost", "finish_before_commit", "finish_reply_lost"])
+def test_sender_restart_reconciles_exact_rpc_attempt_without_resending(helper, tmp_path, monkeypatch, boundary):
+    from codex_watchdog.notification_attempts import remote_attempt
+    from codex_watchdog.notifications import NotificationEvent
+    adapter, target, store, clock, writer = helper
+    client = RemoteControlClient(adapter, tmp_path, instance="desktop", locality="desktop-host")
+    token = client.acquire(target, {})["control"]["token"]
+    event = NotificationEvent("fixture", "stopped", "one", "Fixture", "Fixture")
+    notifier = Notifier(tmp_path)
+    original = adapter.probe
+    def disconnect(*args, **kwargs):
+        action = kwargs.get("control", {}).get("action")
+        if action == "notification_finish" and boundary == "finish_before_commit":
+            raise ControlError("control_transport_unavailable")
+        result = original(*args, **kwargs)
+        if ((action == "notification_prepare" and boundary == "prepare_reply_lost")
+                or (action == "notification_finish" and boundary == "finish_reply_lost")):
+            raise ControlError("control_transport_unavailable")
+        return result
+    monkeypatch.setattr(adapter, "probe", disconnect)
+    with pytest.raises(ControlError, match="transport_unavailable"):
+        client.notify(target, token, event, notifier)
+    attempted = len(notifier.events)
+    assert attempted == (0 if boundary == "prepare_reply_lost" else 1)
+    intent = remote_attempt(tmp_path, target, token["thread_id"]).read()
+    original_operation = intent["operation_id"]
+    monkeypatch.setattr(adapter, "probe", original)
+    restarted = RemoteControlClient(adapter, tmp_path, instance="replacement", locality="desktop-host")
+    clock[0] += 1000
+    replacement = restarted.acquire(target, {})["control"]["token"]
+    assert replacement["epoch"] == 2 and store.read()["external_effect"] is None
+    receipt = json.loads(store.effect_path("notification", event.event_fingerprint()).read_text())
+    assert receipt["state"] == "completed" and receipt["operation_id"] == original_operation
+    assert restarted.notify(target, replacement, event, notifier)["duplicate"]
+    assert len(notifier.events) == attempted
+    next_event = NotificationEvent("fixture", "stopped", "two", "Fixture", "Fixture")
+    assert restarted.notify(target, replacement, next_event, notifier)["status"] == "sent"
+    assert len(notifier.events) == attempted + 1
+
+
+def test_ended_notifier_exception_and_mapping_failure_do_not_freeze_remote_owner(helper, tmp_path):
+    from codex_watchdog.notifications import NotificationEvent
+    adapter, target, store, clock, writer = helper
+    client = RemoteControlClient(adapter, tmp_path)
+    token = client.acquire(target, {})["control"]["token"]
+    first = NotificationEvent("fixture", "stopped", "one", "Fixture", "Fixture")
+    failing = SimpleNamespace(notify=lambda _: (_ for _ in ()).throw(TimeoutError("fixture")))
+    assert client.notify(target, token, first, failing)["status"] == "uncertain"
+    assert store.read()["external_effect"] is None
+    assert client.notify(target, token, first, failing)["duplicate"]
+    mapping = SimpleNamespace(notification_mappings=lambda _: (_ for _ in ()).throw(OSError("fixture")))
+    second = NotificationEvent("fixture", "stopped", "two", "Fixture", "Fixture")
+    healthy = Notifier(tmp_path)
+    healthy.slack_thread_store = mapping
+    result = client.notify(target, token, second, healthy)
+    assert result["status"] == "sent" and result["mapping_error_sha256"]
+    assert store.read()["external_effect"] is None
+
+
+def test_pending_old_view_does_not_freeze_another_thread_in_same_window(helper, tmp_path, monkeypatch):
+    from codex_watchdog.notification_attempts import remote_attempt
+    from codex_watchdog.notifications import NotificationEvent
+    adapter, target, store, clock, writer = helper
+    client = RemoteControlClient(adapter, tmp_path)
+    token = client.acquire(target, {})["control"]["token"]
+    first = NotificationEvent("fixture", "stopped", "old", "Fixture", "Fixture")
+    original = adapter.probe
+    def fail_finish(*args, **kwargs):
+        if kwargs.get("control", {}).get("action") == "notification_finish":
+            raise ControlError("control_transport_unavailable")
+        return original(*args, **kwargs)
+    monkeypatch.setattr(adapter, "probe", fail_finish)
+    with pytest.raises(ControlError):
+        client.notify(target, token, first, Notifier(tmp_path))
+    pending = remote_attempt(tmp_path, target, THREAD).read()
+    assert pending["phase"] == "terminal"
+    monkeypatch.setattr(adapter, "probe", original)
+    other = "22222222-2222-4333-8444-555555555555"
+    adapter.namespace["control_exact_thread"] = lambda repo, thread: repo == REPO and thread == other
+    new_target = RemoteSshTarget(target.authority, target.repo_path, target.storage_key, (other,))
+    next_token = client.acquire(new_target, {})["control"]["token"]
+    assert next_token["thread_id"] == other
+    notifier = Notifier(tmp_path)
+    assert client.notify(new_target, next_token, first, notifier)["status"] == "sent"
+    assert len(notifier.events) == 1 and store.read()["external_effect"]["id"] == pending["operation_id"]
+    assert remote_attempt(tmp_path, target, THREAD).read() == pending

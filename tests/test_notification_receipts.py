@@ -215,10 +215,12 @@ def test_claim_and_confirmation_crashes_never_replay_attempted_provider(tmp_path
         commit(store)
     monkeypatch.setattr(storage.DualDeliveryReceipts, "_commit", interrupted)
     instance, calls = notifier(tmp_path)
-    with pytest.raises(OSError):
-        instance.notify(EVENT)
+    result = instance.notify(EVENT)
+    assert result.status == "delivery_failed"
     assert triggered
     attempted = list(calls)
+    healthy = "lark" if provider == "slack" else "slack"
+    assert healthy in attempted and result.provider_outcomes[healthy] == "sent"
     monkeypatch.setattr(storage.DualDeliveryReceipts, "_commit", commit)
     restarted, repeated = notifier(tmp_path)
     restarted.notify(EVENT)

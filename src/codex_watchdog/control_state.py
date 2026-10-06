@@ -489,7 +489,10 @@ class ControlStore:
         key = hashlib.sha256((kind + "\0" + event_id).encode("utf-8")).hexdigest()
         return self.directory / "effects" / (key + ".json")
 
-    def prepare_notification(self, token, event_id, fingerprint):
+    def prepare_notification(self, token, event_id, fingerprint, operation_id=None, sender=None):
+        if (operation_id is not None and not self._valid_identity(operation_id)
+                or sender is not None and re.fullmatch(r"[0-9a-f]{64}", str(sender)) is None):
+            raise ControlError("control_notification_sender_invalid")
         path = self.effect_path("notification", event_id)
         with self.guard(token) as value:
             if path.exists():
@@ -499,12 +502,16 @@ class ControlStore:
                 return dict(receipt, duplicate=True)
             if value["external_effect"] is not None:
                 raise ControlError("control_external_effect_unresolved")
-            operation = str(uuid.uuid4())
+            operation = operation_id or str(uuid.uuid4())
             value["external_effect"] = dict(id=operation, event_id=event_id, epoch=token["epoch"],
                                             instance=token["instance"], started=self.clock())
+            if sender is not None:
+                value["external_effect"].update(sender=sender, fingerprint=fingerprint)
             control_atomic_json(self.path, value)
             receipt = dict(schema_version=1, state="uncertain", fingerprint=fingerprint,
                            epoch=token["epoch"], instance=token["instance"], operation_id=operation)
+            if sender is not None:
+                receipt["sender"] = sender
             control_atomic_json(path, receipt)
             return dict(receipt, duplicate=False)
 
@@ -616,6 +623,57 @@ class ControlStore:
             # cannot publish a completed send while losing its reply address.
             control_atomic_json(self.path, value)
             receipt.update(state="completed", result=result)
+            control_atomic_json(path, receipt)
+            value["external_effect"] = None
+            control_atomic_json(self.path, value)
+            return receipt
+
+    def reconcile_notification(self, token, event_id, fingerprint, operation_id, sender,
+                               result, relay_mappings=()):
+        """Finish only an ended exact sender attempt, including lost RPC replies.
+
+        The sender holds its crash-releasing lease before calling this. The
+        original capability and persisted sender/operation join still apply;
+        this cannot clear a native writer barrier or another sender's attempt.
+        """
+        if (not isinstance(token, dict) or token.get("thread_id") != self.thread_id
+                or token.get("repo_path") != self.repo_path or not self._valid_identity(operation_id)
+                or re.fullmatch(r"[0-9a-f]{64}", str(sender)) is None or not isinstance(result, dict)):
+            raise ControlError("control_notification_sender_invalid")
+        path = self.effect_path("notification", event_id)
+        with control_file_lock(self.lock_path):
+            value = self.read()
+            receipt = control_read_json(path) if path.exists() else None
+            if receipt is not None:
+                if receipt.get("fingerprint") != fingerprint:
+                    raise ControlError("control_effect_id_collision")
+                # A duplicate prepare never issued this caller's operation.
+                if receipt.get("operation_id") != operation_id:
+                    return dict(receipt, duplicate=True)
+                if (receipt.get("epoch") != token.get("epoch")
+                        or receipt.get("instance") != token.get("instance")
+                        or receipt.get("sender") != sender):
+                    raise ControlError("control_notification_sender_mismatch")
+                if receipt.get("state") == "completed":
+                    self._recover_completed_external(value)
+                    return receipt
+            barrier = value["external_effect"]
+            if receipt is None and (barrier is None or barrier.get("id") != operation_id):
+                # Prepare did not reserve this operation: no send could start.
+                return dict(state="not_prepared")
+            self._check(value, token)
+            if (not isinstance(barrier, dict) or barrier.get("id") != operation_id
+                    or barrier.get("event_id") != event_id or barrier.get("sender") != sender
+                    or barrier.get("fingerprint") != fingerprint):
+                raise ControlError("control_notification_sender_mismatch")
+            if receipt is None:
+                # Crash between owner reservation and writing its effect file.
+                receipt = dict(schema_version=1, state="uncertain", fingerprint=fingerprint,
+                               epoch=token["epoch"], instance=token["instance"],
+                               operation_id=operation_id, sender=sender)
+            self.merge_relay_mappings(value, relay_mappings, event_id)
+            control_atomic_json(self.path, value)
+            receipt.update(state="completed", result=dict(result, terminal=True))
             control_atomic_json(path, receipt)
             value["external_effect"] = None
             control_atomic_json(self.path, value)

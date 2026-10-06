@@ -20,6 +20,7 @@ from .remote_ssh import RemoteSshTarget, _REMOTE_SCRIPT
 from .storage import FileLock, StoreBusyError, InstructionStore
 from .workspace_registry import TrackedWorkspace, WorkspaceRegistry
 from .node_observation import NodeObservation
+from .remote_control import RemoteControlClient, reconcile_local_notifications
 
 
 def bind_for_operator(binding, workspace, lease_seconds):
@@ -262,6 +263,18 @@ class LinuxAutoWatchdog:
                     continue
                 store = item["store"] if item else self.store_factory(self.codex_home, thread, repo)
                 value = store.read()
+                if value.get("external_effect") is not None and isinstance(value.get("runtime_path"), str):
+                    runtime = Path(value["runtime_path"])
+                    reconcile_local_notifications(store, runtime)
+                    target = value.get("remote_target")
+                    if isinstance(target, dict):
+                        target = RemoteSshTarget(target["authority"], target["repo_path"], target["storage_key"],
+                                                 (store.thread_id,))
+                        client = (item["service"].remote_control if item and
+                                  getattr(item["service"], "remote_control", None) is not None else
+                                  RemoteControlClient(HostRemoteAdapter(self.codex_home), runtime))
+                        client.reconcile_notification(target)
+                    value = store.read()
                 if item is None:
                     if self.stopping:
                         continue

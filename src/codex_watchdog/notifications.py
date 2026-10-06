@@ -450,9 +450,10 @@ class NotificationResult:
     state_path: Path
     state_persisted: bool
     error_sha256: Optional[str] = None
+    provider_outcomes: Optional[Dict[str, str]] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        result = {
             "status": self.status,
             "channel": self.channel,
             "event_fingerprint": self.event_fingerprint,
@@ -463,6 +464,9 @@ class NotificationResult:
             "state_persisted": self.state_persisted,
             "error_sha256": self.error_sha256,
         }
+        if self.provider_outcomes is not None:
+            result["provider_outcomes"] = dict(self.provider_outcomes)
+        return result
 
 
 @dataclass(frozen=True)
@@ -471,6 +475,7 @@ class _DeliveryResult:
     channel: str
     attempted_channels: Tuple[str, ...]
     error_sha256: Optional[str]
+    provider_outcomes: Optional[Dict[str, str]] = None
 
 
 def _default_http_post(url: str, payload: bytes, timeout: float) -> int:
@@ -666,6 +671,7 @@ class EnvironmentNotifier:
                     state_path=self.state_path,
                     state_persisted=False,
                     error_sha256=delivery.error_sha256,
+                    provider_outcomes=delivery.provider_outcomes,
                 )
             state["last_events"][dedupe_key] = {
                 "fingerprint": fingerprint,
@@ -692,6 +698,7 @@ class EnvironmentNotifier:
                     state_path=self.state_path,
                     state_persisted=False,
                     error_sha256=combined_error,
+                    provider_outcomes=delivery.provider_outcomes,
                 )
             return NotificationResult(
                 status=delivery.status,
@@ -703,11 +710,13 @@ class EnvironmentNotifier:
                 state_path=self.state_path,
                 state_persisted=True,
                 error_sha256=delivery.error_sha256,
+                provider_outcomes=delivery.provider_outcomes,
             )
 
     def _deliver(self, event: NotificationEvent) -> _DeliveryResult:
         attempts = []
         failures = []
+        outcomes = None
 
         if len(self.config.interactive_providers) > 1:
             delivery = self._deliver_both(event)
@@ -716,6 +725,7 @@ class EnvironmentNotifier:
             if delivery.channel != "local_audit":
                 return delivery
             attempts.extend(delivery.attempted_channels)
+            outcomes = delivery.provider_outcomes
             if delivery.error_sha256:
                 failures.append(delivery.error_sha256)
 
@@ -759,6 +769,7 @@ class EnvironmentNotifier:
                     "smtp",
                     tuple(attempts),
                     self._combine_error_digests(tuple(failures)),
+                    outcomes,
                 )
 
         if self.config.windows_message_configured:
@@ -774,25 +785,40 @@ class EnvironmentNotifier:
                     "windows_msg",
                     tuple(attempts),
                     self._combine_error_digests(tuple(failures)),
+                    outcomes,
                 )
 
         if not attempts:
-            return _DeliveryResult("audit_only", "local_audit", (), None)
+            return _DeliveryResult("audit_only", "local_audit", (), None, outcomes)
         return _DeliveryResult(
             "delivery_failed",
             "local_audit",
             tuple(attempts),
             self._combine_error_digests(tuple(failures)),
+            outcomes,
         )
 
     def _deliver_both(self, event: NotificationEvent) -> _DeliveryResult:
-        with DualDeliveryReceipts(self.runtime, atomic_writer=self.atomic_writer) as receipts:
-            return self._deliver_with_receipts(event, receipts)
+        opened = False
+        try:
+            with DualDeliveryReceipts(self.runtime, atomic_writer=self.atomic_writer) as receipts:
+                opened = True
+                return self._deliver_with_receipts(event, receipts)
+        except Exception:
+            if opened or "onebot" not in self.config.interactive_providers:
+                raise
+            # Slack/Feishu cannot safely send without their claim store. OneBot
+            # has its own durable journal and must still get its bounded turn.
+            return self._deliver_with_receipts(event, None)
 
     def _deliver_with_receipts(self, event, receipts):
         fingerprint = event.event_fingerprint()
-        receipt = receipts.get(fingerprint)
+        try:
+            receipt = receipts.get(fingerprint) if receipts is not None else None
+        except Exception:
+            receipt = None
         delivered, failures, attempts = [], [], []
+        outcomes = {}
         configuration = {"slack": self.config.slack_configured, "lark": self.config.lark.configured,
                          "onebot": self.config.onebot.configured}
         for provider in self.config.interactive_providers:
@@ -804,35 +830,59 @@ class EnvironmentNotifier:
                 try:
                     self._send_onebot(event)
                 except Exception as error:
+                    outcomes[provider] = "uncertain"
                     failures.append(self._error_digest("onebot_failed", error))
                 else:
+                    outcomes[provider] = "sent"
                     delivered.append(provider)
                 continue
+            if receipt is None:
+                outcomes[provider] = "failed"
+                failures.append(sha256_text(provider + "_receipt_unavailable"))
+                continue
             if receipt.get(provider) == "sent":
+                outcomes[provider] = "sent"
                 delivered.append(provider)
                 continue
             if receipt.get(provider) == "uncertain":
+                outcomes[provider] = "uncertain"
                 failures.append(sha256_text(provider + "_delivery_unconfirmed"))
                 continue
             if not configured:
+                outcomes[provider] = "failed"
                 failures.append(sha256_text(provider + "_configuration_incomplete"))
                 continue
             # Commit before sending. A timeout/crash/failed confirmation keeps
             # the indexed uncertain claim and never causes automatic replay.
-            if not receipts.claim(fingerprint, provider):
-                raise ValueError("dual notification receipt changed before claim")
+            try:
+                claimed = receipts.claim(fingerprint, provider)
+            except Exception as error:
+                outcomes[provider] = "failed"
+                failures.append(self._error_digest(provider + "_claim_failed", error))
+                continue
+            if not claimed:
+                outcomes[provider] = "uncertain"
+                failures.append(sha256_text(provider + "_receipt_changed"))
+                continue
             attempts.append(provider)
             try:
                 (self._send_slack if provider == "slack" else self._send_lark)(event)
             except Exception as error:
+                outcomes[provider] = "uncertain"
                 failures.append(self._error_digest(provider + "_failed", error))
                 continue
-            receipts.confirm_sent(fingerprint, provider)
+            try:
+                receipts.confirm_sent(fingerprint, provider)
+            except Exception as error:
+                outcomes[provider] = "uncertain"
+                failures.append(self._error_digest(provider + "_confirmation_failed", error))
+                continue
+            outcomes[provider] = "sent"
             delivered.append(provider)
         return _DeliveryResult(
             "sent" if len(delivered) == len(self.config.interactive_providers) else "delivery_failed",
             "+".join(delivered) or "local_audit", tuple(attempts),
-            self._combine_error_digests(tuple(failures)))
+            self._combine_error_digests(tuple(failures)), outcomes)
 
     def _send_slack(self, event: NotificationEvent) -> None:
         try:
