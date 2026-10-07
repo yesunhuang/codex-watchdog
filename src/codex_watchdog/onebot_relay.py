@@ -7,6 +7,7 @@ from .lark_mapping import LarkThreadStore
 from .models import MAX_PROMPT_CHARS, sha256_text
 from .onebot_transport import OneBotConnection, OneBotError, identifier
 from .relay import ExactThreadRelay, ReplyResult, _DELIVERED_STATES
+from .relay_authority import relay_guarded
 from .storage import FileLock, StoreBusyError
 
 
@@ -154,6 +155,7 @@ class OneBotReplyRelay(ExactThreadRelay):
             acl=self._session_acl,
         )
 
+    @relay_guarded
     def handle_event(self, payload):
         # Called only from the authenticated connection to the selected bot.
         value = human_message(payload, self.config.self_id)

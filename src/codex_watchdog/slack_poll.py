@@ -3,6 +3,7 @@
 import json
 import threading
 import time
+from contextlib import nullcontext
 from decimal import Decimal
 from types import SimpleNamespace
 from urllib.error import HTTPError
@@ -56,6 +57,17 @@ class SlackReplyPoller:
         self.thread = None
         self.next_poll = 0.0
 
+    def _guard(self):
+        authority = getattr(self.relay, "relay_authority", None)
+        return authority.guard() if authority is not None else nullcontext()
+
+    def _write(self, state):
+        authority = getattr(self.relay, "relay_authority", None)
+        if authority is not None:
+            authority.write_cursor("slack", "slack-active", state)
+        else:
+            InstructionStore._atomic_json(self.path, state)
+
     def _api(self, method, params):
         request = Request("https://slack.com/api/" + method,
                           data=urlencode(params).encode(),
@@ -67,14 +79,23 @@ class SlackReplyPoller:
         return value
 
     def _read(self):
-        if not self.path.exists():
-            return dict(schema_version=1, after=None, threads={})
-        state = json.loads(self.path.read_text(encoding="utf-8"))
+        authority = getattr(self.relay, "relay_authority", None)
+        default = dict(schema_version=1, after=None, threads={})
+        if authority is not None:
+            # Legacy migration is performed once by the authority, never by a
+            # newly selected node's poller or its stale local cursor file.
+            state = authority.read_cursor("slack", "slack-active", default)
+        elif not self.path.exists():
+            return default
+        else:
+            state = json.loads(self.path.read_text(encoding="utf-8"))
         if (not isinstance(state, dict) or state.get("schema_version") != 1
                 or not isinstance(state.get("threads"), dict)
                 or any(not valid_slack_timestamp(ts) for ts in state["threads"].values())):
             raise ValueError("slack_poll_cursor_invalid")
         if "closed_cursor" in state:
+            if authority is not None:
+                raise ValueError("slack_poll_cursor_invalid")
             # Retire only the obsolete control lane, preserving active cursors
             # and unknown fields. The exact old file remains recoverable.
             from .messaging_profile import write_new
@@ -94,23 +115,24 @@ class SlackReplyPoller:
 
     def poll_once(self):
         """Caller holds the listener lock; unread replies retain their cursors."""
-        state = self._read()
-        mappings = self.relay.thread_store.poll_mappings()
-        keys = sorted(mappings)
-        retained = {key: value for key, value in state["threads"].items() if key in mappings}
-        if retained != state["threads"]:
-            state["threads"] = retained
-            InstructionStore._atomic_json(self.path, state)
-        if not keys:
-            self._health("waiting_for_mapped_notification")
-            return []
-        later = [key for key in keys if key > (state.get("after") or "")]
-        key = (later or keys)[0]
-        # Scheduling progress is independent of reply progress. Persist it
-        # before this parent's API, validation, handler or ACK can fail, so
-        # another active parent gets the next attempt even after a restart.
-        state["after"] = key
-        InstructionStore._atomic_json(self.path, state)
+        with self._guard():
+            state = self._read()
+            mappings = self.relay.thread_store.poll_mappings()
+            keys = sorted(mappings)
+            retained = {key: value for key, value in state["threads"].items() if key in mappings}
+            if retained != state["threads"]:
+                state["threads"] = retained
+                self._write(state)
+            if not keys:
+                self._health("waiting_for_mapped_notification")
+                return []
+            later = [key for key in keys if key > (state.get("after") or "")]
+            key = (later or keys)[0]
+            # Scheduling progress is independent of reply progress. Persist it
+            # before this parent's API, validation, handler or ACK can fail, so
+            # another active parent gets the next attempt even after a restart.
+            state["after"] = key
+            self._write(state)
         mapping = mappings[key]
         parent = mapping["thread_ts"]
         oldest = state["threads"].get(key, parent)
@@ -134,16 +156,25 @@ class SlackReplyPoller:
             # A channel is not supplied by conversations.replies; use only the
             # request's saved mapping, never text parsed from a Slack message.
             event = dict(message, channel=channel, thread_ts=parent)
-            result = self.relay.handle_polled_message(event)
-            results.append(result.to_dict())
-            if result.status == "deferred":
-                break  # No dispatch occurred. Retry this exact message later.
-            state["threads"][key] = message["ts"]
-            InstructionStore._atomic_json(self.path, state)
-            self.relay.acknowledge(event, result, SimpleNamespace(
-                chat_postMessage=lambda **params: self.api("chat.postMessage", params)))
-            if key not in self.relay.thread_store.poll_mappings():
-                break  # The first claim closes this parent, including uncertain delivery.
+            # The provider request runs without the shared lock. Revalidate
+            # its captured authority before admission, cursor writes or ACKs.
+            with self._guard():
+                state = self._read()
+                if key not in self.relay.thread_store.poll_mappings():
+                    break
+                current = state["threads"].get(key, parent)
+                if Decimal(message["ts"]) <= Decimal(current):
+                    continue
+                result = self.relay.handle_polled_message(event)
+                results.append(result.to_dict())
+                if result.status == "deferred":
+                    break  # No dispatch occurred. Retry this exact message later.
+                state["threads"][key] = message["ts"]
+                self._write(state)
+                self.relay.acknowledge(event, result, SimpleNamespace(
+                    chat_postMessage=lambda **params: self.api("chat.postMessage", params)))
+                if key not in self.relay.thread_store.poll_mappings():
+                    break  # The first claim closes this parent, including uncertain delivery.
         self._health("polling", mapped_threads=len(keys), results=results)
         return results
 

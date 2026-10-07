@@ -9,6 +9,7 @@ from .lark_mapping import LarkThreadStore
 from .lark_transport import LarkApi, LarkConnection, LarkTransportError, valid_id
 from .models import MAX_PROMPT_CHARS, sha256_text
 from .relay import ExactThreadRelay, ReplyResult, _DELIVERED_STATES
+from .relay_authority import relay_guarded, relay_ack_guarded
 from .storage import FileLock, StoreBusyError
 
 
@@ -75,6 +76,7 @@ class LarkReplyRelay(ExactThreadRelay):
             message = payload["event"]["message"]
             self.acknowledge(message.get("message_id"), result, message.get("chat_id"))
 
+    @relay_ack_guarded
     def acknowledge(self, message_id, result, chat_id=None):
         if result.status != "queued":
             return
@@ -108,6 +110,7 @@ class LarkReplyRelay(ExactThreadRelay):
             acl=self._session_acl,
         )
 
+    @relay_guarded
     def handle_event(self, payload):
         if not isinstance(payload, dict) or payload.get("schema") != "2.0":
             return ReplyResult("ignored_event_type")

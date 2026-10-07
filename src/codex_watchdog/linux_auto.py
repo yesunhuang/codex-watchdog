@@ -20,6 +20,7 @@ from .remote_ssh import RemoteSshTarget, _REMOTE_SCRIPT
 from .storage import FileLock, StoreBusyError, InstructionStore
 from .workspace_registry import TrackedWorkspace, WorkspaceRegistry
 from .node_observation import NodeObservation
+from .relay_authority import SessionRelayAuthority, bind_service_authority
 from .remote_control import RemoteControlClient, reconcile_local_notifications
 
 
@@ -159,9 +160,20 @@ class LinuxAutoWatchdog:
             service = self.service_factory(runtime, codex_home=self.codex_home,
                                             registry=WorkspaceRegistry(runtime), remote_ssh_adapter=adapter,
                                             auto_discovery=False)
+            observation = NodeObservation(store, token) if self.node_local else None
+            config = getattr(getattr(service, "notifier", None), "config", None)
+            portable_messaging = (getattr(service, "slack_reply_relay", None) is not None
+                or config is not None and (getattr(config, "slack_configured", False)
+                    or getattr(getattr(config, "lark", None), "configured", False)
+                    or getattr(getattr(config, "onebot", None), "configured", False)))
+            authority = (SessionRelayAuthority(store, token, observation, target.workspace_id)
+                         if observation is not None and portable_messaging else None)
+            if authority is not None:
+                bind_service_authority(service, authority)
+                observation.relay_handoff_safe = authority.handoff_safe
             relay = getattr(service, "slack_reply_relay", None)
             if relay is not None:
-                mappings = store.relay_mappings()
+                mappings = store.relay_mappings() if authority is None else ()
                 if mappings:
                     # Native observation creates notifications through the same
                     # remote-control target used by _cycle. Executing the helper
@@ -177,7 +189,8 @@ class LinuxAutoWatchdog:
             owner = self.owner_factory(binding, executable=self.executable, service=service, **owner_options)
             item = dict(store=store, token=token, owner=owner, service=service, target=target, locks=locks)
             if self.node_local:
-                item["observation"] = NodeObservation(store, token)
+                item["observation"] = observation
+                item["relay_authority"] = authority
                 adapter.git_admission_check = item["observation"].validate_snapshot
             self.controllers[store.thread_id] = item
             return item
@@ -333,6 +346,9 @@ class LinuxAutoWatchdog:
                         ) if observation else nullcontext(True)
                         with admission as admitted:
                             if admitted and observe and result["owner_state"] != "released":
+                                if item.get("relay_authority") is not None:
+                                    item["relay_authority"].activate()
+                                    item["relay_authority"].reconcile_completions()
                                 cycle = self._cycle(item)
                                 if cycle.status != "completed":
                                     raise ControlError("control_observation_failed")

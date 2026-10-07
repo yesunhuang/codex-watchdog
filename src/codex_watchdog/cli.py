@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import sys
 import uuid
@@ -113,6 +114,13 @@ def build_parser() -> argparse.ArgumentParser:
     linux_auto.add_argument("--exclude", action="append", default=[], help="exclude an exact repository path or name")
     commands.add_parser("linux-release", help="request idle writer release before VS Code reattachment")
     commands.add_parser("linux-status", help="show privacy-safe Linux binding and owner status")
+    migration = commands.add_parser("linux-relay-authority-migrate",
+        help="plan or apply the one-time offline shared-session relay migration")
+    migration.add_argument("--apply", action="store_true")
+    migration.add_argument("--rollback", action="store_true",
+                           help="offline rollback before canonical relay state has been used")
+    migration.add_argument("--quiescence", type=_path,
+                           help="fresh private native receipts proving every old cluster listener stopped")
 
     hook = commands.add_parser(
         "hook", help="handle one native Codex hook event from stdin"
@@ -349,6 +357,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         try:
             locality_identity()
+            if args.command == "linux-relay-authority-migrate":
+                from .linux_relay_migration import plan_authority, apply_authority
+                home = args.codex_home or detect_platform_adapter().default_codex_home()
+                if args.apply and args.rollback:
+                    print(json.dumps(dict(status="blocked", reason="relay_migration_action_ambiguous")))
+                    return 1
+                if (args.apply or args.rollback) and args.quiescence is None:
+                    print(json.dumps(dict(status="blocked", reason="relay_migration_quiescence_required")))
+                    return 1
+                if args.rollback:
+                    from .relay_authority_rollback import rollback_authority
+                    result = rollback_authority(home, args.quiescence)
+                else:
+                    result = (apply_authority(home, args.quiescence) if args.apply else
+                              dict(status="preview", **plan_authority(home)["summary"]))
+                print(json.dumps(result, sort_keys=True))
+                return 0
             if args.command == "linux-auto-run":
                 from .linux_auto import LinuxAutoWatchdog
                 return LinuxAutoWatchdog(
@@ -392,6 +417,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             reason = (str(exc) if isinstance(exc, LinuxBindingError) else
                       "linux_owner_already_running" if isinstance(exc, StoreBusyError) else
                       "linux_setup_failed")
+            if (args.command == "linux-relay-authority-migrate"
+                    and re.fullmatch(r"relay_[a-z0-9_]{1,100}", str(exc))):
+                reason = str(exc)
             print(json.dumps({"status": "blocked", "reason": reason}, sort_keys=True))
             return 1
     if args.command == "doctor":

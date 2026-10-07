@@ -24,6 +24,7 @@ from .remote_control import RemoteControlClient
 from .notifications import NotificationEvent
 from .slack_presentation import slack_message_with_host
 from .relay import ExactThreadRelay, ReplyResult as SlackReplyResult
+from .relay_authority import relay_guarded, relay_ack_guarded
 
 
 _DELIVERED_STATES = frozenset({"enqueued", "consumed_or_started", "started"})
@@ -164,6 +165,7 @@ class SlackReplyRelay(ExactThreadRelay):
         self.acknowledge(event, result, client)
         return result
 
+    @relay_guarded
     def handle_polled_message(self, event):
         # Only the poller calls this entry point, after validating its whole page.
         text = event.get("text") if isinstance(event, dict) else None
@@ -172,6 +174,7 @@ class SlackReplyRelay(ExactThreadRelay):
             return self.handle_message(event, _from_poll=True)
         return self.handle_message(event)
 
+    @relay_ack_guarded
     def acknowledge(self, event, result, client) -> None:
         if self._bot_marked(event) or result.status.startswith("bot_"):
             self._acknowledge_bot(result, client)
@@ -325,6 +328,7 @@ class SlackReplyRelay(ExactThreadRelay):
         routes.finish_binding_hello(event_key, status="sent")
         return True
 
+    @relay_guarded
     def handle_message(
         self, event: Any, *, event_id: Optional[str] = None,
         authenticated_team_id: Optional[str] = None,

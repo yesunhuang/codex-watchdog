@@ -624,6 +624,11 @@ class EnvironmentNotifier:
         return selected[0] if len(selected) == 1 else CombinedThreadStores(*selected)
 
     def notify(self, event: NotificationEvent) -> NotificationResult:
+        authority = getattr(self, "relay_authority", None)
+        if authority is not None:
+            with authority.guard():
+                with current_effect("notification"):
+                    return self._guarded_notify(event)
         with current_effect("notification"):
             return self._guarded_notify(event)
 
@@ -647,7 +652,11 @@ class EnvironmentNotifier:
                 )
 
             previous = state["last_events"].get(dedupe_key)
-            if previous is not None and previous["fingerprint"] == fingerprint:
+            imported = False
+            if getattr(self, "relay_runtime", None) is not None:
+                from .relay_notification_migration import previous_notification
+                imported = previous_notification(self.relay_runtime, fingerprint)
+            if imported or previous is not None and previous["fingerprint"] == fingerprint:
                 return NotificationResult(
                     status="suppressed",
                     channel=None,
@@ -718,7 +727,8 @@ class EnvironmentNotifier:
         failures = []
         outcomes = None
 
-        if len(self.config.interactive_providers) > 1:
+        protected = len(self.config.interactive_providers) > 1 or getattr(self, "relay_runtime", None) is not None
+        if protected:
             delivery = self._deliver_both(event)
             # Preserve SMTP/desktop fallback when neither messaging provider
             # delivered. A partial send remains visibly failed, not all-sent.
@@ -729,7 +739,7 @@ class EnvironmentNotifier:
             if delivery.error_sha256:
                 failures.append(delivery.error_sha256)
 
-        if self.config.selected_interactive_transport == "lark" and self.config.lark.configured:
+        if not protected and self.config.selected_interactive_transport == "lark" and self.config.lark.configured:
             attempts.append("lark")
             try:
                 self._send_lark(event)
@@ -738,7 +748,7 @@ class EnvironmentNotifier:
             else:
                 return _DeliveryResult("sent", "lark", tuple(attempts), None)
 
-        if self.config.selected_interactive_transport == "slack" and self.config.slack_configured:
+        if not protected and self.config.selected_interactive_transport == "slack" and self.config.slack_configured:
             attempts.append("slack")
             try:
                 self._send_slack(event)
@@ -788,7 +798,7 @@ class EnvironmentNotifier:
                     outcomes,
                 )
 
-        if not attempts:
+        if not attempts and not failures:
             return _DeliveryResult("audit_only", "local_audit", (), None, outcomes)
         return _DeliveryResult(
             "delivery_failed",
@@ -801,7 +811,8 @@ class EnvironmentNotifier:
     def _deliver_both(self, event: NotificationEvent) -> _DeliveryResult:
         opened = False
         try:
-            with DualDeliveryReceipts(self.runtime, atomic_writer=self.atomic_writer) as receipts:
+            with DualDeliveryReceipts(getattr(self, "relay_runtime", self.runtime),
+                                      atomic_writer=self.atomic_writer) as receipts:
                 opened = True
                 return self._deliver_with_receipts(event, receipts)
         except Exception:

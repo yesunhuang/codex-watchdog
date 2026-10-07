@@ -361,6 +361,8 @@ Feishu/Lark の polling では、有効な WatchDog 通知で **Reply in thread*
 
 通知の送信が終了した後の失敗や結果不明は、そのイベントと provider に限定されます。他の provider と以後の独立した通知は継続し、結果不明の送信を無条件に再試行しません。[通知の復旧と rollback](docs/NOTIFICATION_RECEIPTS.md)を参照してください。
 
+同じユーザーの Codex ホームを共有する設定済み Linux ノードでは、メッセージ権限、チケット、カーソル、通知 receipt を正確な session に保持し、検証済みの実行ノードに引き継ぎます。native writer、queue、boot state は各ノードに残ります。既存の node installation には状態を保持する一度の offline import が必要です。[共有 session relay authority](docs/LINUX_SESSION_RELAY_AUTHORITY.md) を参照してください。
+
 ## ドキュメント
 
 - Install: [Windows](WINDOWS_PACKAGE.md)、[macOS](docs/MACOS_PACKAGE.md)、

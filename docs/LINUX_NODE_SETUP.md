@@ -32,8 +32,10 @@ monitoring behavior.
 
 Unconfigured nodes retain their previous layout. Installation bytes and a private
 notification environment file may be shared; volatile state must not be shared.
-The generated unit forces Slack **poll mode**, which reads only that node's own
-mapped parents. It cannot consume a different dog's Socket Mode events. Provider
+The generated unit forces Slack **poll mode**. Shared messaging state belongs to
+the exact session; only its verified native executor may admit replies, advance
+cursors or send acknowledgements. It cannot consume another dog's Socket Mode
+events. Provider
 credentials are referenced in place, never copied into the unit or package.
 
 ## Install on a new node
@@ -91,7 +93,16 @@ bindings, copy another node's runtime or manually reset owner epochs.
 
 Changing login nodes is not a handoff protocol. Finish or explicitly pause the
 old node's work before opening work on another node; the new node discovers its
-own native process. Replies to old Slack parents remain with their originating
-node. To stop a node service, use `systemctl --user stop "$wd_unit"`; it requests
+own native process. After the initial [shared relay import](LINUX_SESSION_RELAY_AUTHORITY.md),
+valid mapped replies resolve that session's verified current executor without
+changing the original envelope, grants or UUID claims. PID/boot/queue state is
+never copied. A stale-boot owner still needs the documented native recovery;
+the shared authority does not bypass that fence. To stop a node service, use
+`systemctl --user stop "$wd_unit"`; it requests
 graceful idle release and can wait for active work. Do not force-kill a live
 writer merely to make service shutdown faster.
+
+Existing node-mode messaging runtimes require a one-time offline, state-preserving
+import before the new authority can activate. Stop and verify every old listener
+while preserving native work and queues; do not delete saved configuration or
+start a fresh competing runtime. See [migration and rollback](LINUX_SESSION_RELAY_AUTHORITY.md).

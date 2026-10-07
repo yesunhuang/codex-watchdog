@@ -337,6 +337,8 @@ Remote-SSH/分离运行应通过独立于 SSH 连接的持久用户服务启动 
 
 一次通知发送结束后，失败或结果不确定只影响该事件和对应 provider；其他 provider 和后续独立通知仍可继续。不确定的发送不会盲目重试。详见[通知恢复与回退](docs/NOTIFICATION_RECEIPTS.md)。
 
+已配置且共享同一用户 Codex 主目录的 Linux 节点，以精确会话为单位保存消息授权、票据、游标和通知回执，并跟随已验证的执行节点。原生写入者、队列及启动状态仍保留在节点本地。现有节点安装需要一次保留原状态的离线导入，详见[共享会话消息权限](docs/LINUX_SESSION_RELAY_AUTHORITY.md)。
+
 ## 文档
 
 - 安装：[Windows](WINDOWS_PACKAGE.md)、[macOS](docs/MACOS_PACKAGE.md)、

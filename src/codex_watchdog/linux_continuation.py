@@ -1,10 +1,13 @@
 """Opt-in continuation of an interrupted turn after exact Linux writer acquisition."""
 
+from contextlib import closing
 import json
+import sqlite3
 import time
 import uuid
 
 from .control_context import current_control, effect_guard
+from .app_server import AppServerError
 from .linux_binding import LinuxBindingError, read_json
 from .models import sha256_text, utc_now
 from .notifications import NotificationEvent, notification_workspace_label
@@ -47,6 +50,15 @@ class LinuxContinuation:
                     ) or not isinstance(value.get("notifications", {}), dict)
                     or any(not isinstance(notice, dict) for notice in value.get("notifications", {}).values())):
                 raise ValueError()
+            attempt = value.get("native_queue_start")
+            if attempt is not None:
+                if (not isinstance(attempt, dict) or attempt.get("state") not in (
+                        "uncertain", "requested", "observed")
+                        or str(uuid.UUID(attempt["queue_message_id"])) != attempt["queue_message_id"]):
+                    raise ValueError()
+                if attempt["state"] == "requested":
+                    if str(uuid.UUID(attempt["response_turn_id"])) != attempt["response_turn_id"]:
+                        raise ValueError()
         except (KeyError, ValueError, TypeError, AttributeError) as exc:
             raise LinuxBindingError("linux_continuation_state_invalid") from exc
         return value
@@ -62,6 +74,8 @@ class LinuxContinuation:
                   "interrupted_turn_sha256": sha256_text(value["interrupted_turn_id"])}
         if value.get("attention"):
             result["attention"] = value["attention"]
+        if value.get("native_queue_start"):
+            result["native_queue_start"] = value["native_queue_start"]["state"]
         notices = value.get("notifications", {})
         if notices:
             result["notifications"] = {key: notice.get("status", "uncertain")
@@ -144,6 +158,10 @@ class LinuxContinuation:
                     value["continuation_turn_id"] = str(uuid.UUID(queued["started_turn_id"]))
                 except (KeyError, ValueError, TypeError, AttributeError) as exc:
                     raise LinuxBindingError("linux_continuation_start_unverified") from exc
+                if value.get("native_queue_start"):
+                    value["native_queue_start"]["state"] = "observed"
+                    if value.get("attention") == "continuation_queue_start_uncertain":
+                        value.pop("attention")
             self._save(value)
         elif value["status"] != "prepared":
             raise LinuxBindingError("linux_continuation_receipt_missing")
@@ -176,9 +194,101 @@ class LinuxContinuation:
                 self._notify(value, workspace, "started")
             if value.get("attention") == "continuation_interrupted":
                 self._notify(value, workspace, "interrupted")
-            if value["status"] in ("uncertain", "dispatching"):
+            if (value["status"] in ("uncertain", "dispatching")
+                    or value.get("native_queue_start", {}).get("state") == "uncertain"):
                 self._notify(value, workspace, "uncertain")
             return self._summary(value)
+
+    def _start_enqueued(self, owner, workspace, value):
+        """Start the existing head item after an interrupted native turn.
+
+        Recent native queue watchers intentionally leave interrupted threads
+        stopped. thread/queue/start atomically starts an existing item only if
+        idle, retaining its client ID and deleting it through the native queue.
+        Never turn queue contents into a new prompt or repeat an uncertain RPC.
+        Called under the existing writer admission fence and continuation lock.
+        """
+        from .linux_owner import writer_pid
+
+        if (value.get("native_queue_start") is not None
+                or owner.thread_status != "idle" or owner.approval_required
+                or self._latest(owner) != (value["interrupted_turn_id"], "interrupted")):
+            return
+        record_path = self.dispatcher.records / (sha256_text(value["instruction_id"]) + ".json")
+        with record_path.open("rb") as handle:
+            raw = handle.read(65537)
+        try:
+            record = json.loads(raw) if len(raw) <= 65536 else None
+        except (TypeError, ValueError) as exc:
+            raise LinuxBindingError("linux_continuation_queue_start_unverified") from exc
+        if not isinstance(record, dict) or record.get("schema_version") != 2:
+            raise LinuxBindingError("linux_continuation_queue_start_unverified")
+        if (record.get("thread_id") != owner.thread
+                or record.get("instruction_id") != value["instruction_id"]
+                or record.get("state") != "enqueued"
+                or record.get("prompt_sha256") != sha256_text(CONTINUATION_PROMPT)):
+            raise LinuxBindingError("linux_continuation_queue_start_unverified")
+        try:
+            queue_id = str(uuid.UUID(record["queue_message_id"]))
+        except (KeyError, ValueError, TypeError, AttributeError) as exc:
+            raise LinuxBindingError("linux_continuation_queue_start_unverified") from exc
+        database = self.dispatcher._select_queue_database()
+        if database is None:
+            return
+        with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+            columns = {row[1] for row in db.execute("PRAGMA table_info(queued_items)")}
+            if "queue_order" not in columns:
+                return  # An older/unknown queue cannot prove FIFO targeting.
+            head = db.execute("SELECT id,payload_json FROM queued_items WHERE thread_id=? "
+                              "ORDER BY queue_order LIMIT 1", (owner.thread,)).fetchone()
+        if head is None or head[0] != queue_id:
+            return  # Never bypass a human or another admitted item ahead of us.
+        try:
+            payload = json.loads(head[1])
+        except (TypeError, ValueError) as exc:
+            raise LinuxBindingError("linux_continuation_queue_start_unverified") from exc
+        expected = (f"[CODEX_WATCHDOG_WAKE id={value['instruction_id']} "
+                    f"sha256={record['prompt_sha256']}]\n" + CONTINUATION_PROMPT)
+        user_input = payload.get("UserInput") if isinstance(payload, dict) else None
+        content = user_input.get("content") if isinstance(user_input, dict) else None
+        if (not isinstance(content, list) or len(content) != 1
+                or not isinstance(content[0], dict)
+                or content[0].get("type") != "text" or content[0].get("text") != expected):
+            raise LinuxBindingError("linux_continuation_queue_start_unverified")
+        current = owner.client.request("thread/read", {"threadId": owner.thread, "includeTurns": False})
+        owner._check_thread(current, workspace)
+        binding = self.binding.load()
+        if (owner.release_requested or owner.yield_requested or owner.approval_required
+                or binding["state"] != "armed" or binding["expires_at"] <= time.time()
+                or owner.thread_status != "idle" or current["thread"].get("status", {}).get("type") != "idle"
+                or writer_pid(self.binding.codex_home, owner.thread) != owner.client.process.pid
+                or self._latest(owner) != (value["interrupted_turn_id"], "interrupted")):
+            return
+        binding = self.binding.load()
+        if (owner.release_requested or owner.yield_requested or owner.approval_required
+                or owner.thread_status != "idle" or binding["state"] != "armed"
+                or binding["expires_at"] <= time.time()
+                or writer_pid(self.binding.codex_home, owner.thread) != owner.client.process.pid):
+            return
+        # Persist before the RPC: even a crash or lost reply cannot dispatch it twice.
+        attempt = {"state": "uncertain", "queue_message_id": queue_id, "created_at": utc_now()}
+        value["native_queue_start"] = attempt
+        self._save(value)
+        try:
+            result = owner.client.request("thread/queue/start", {
+                "threadId": owner.thread, "queuedSubmissionId": queue_id,
+            })
+            turn = result["turn"]
+            identifier = str(uuid.UUID(turn["id"]))
+            if turn["status"] != "inProgress":
+                raise ValueError()
+        except (AppServerError, KeyError, ValueError, TypeError, AttributeError):
+            value["attention"] = "continuation_queue_start_uncertain"
+            self._save(value)
+            return
+        attempt.update(state="requested", response_turn_id=identifier)
+        self._save(value)
+        # The ordinary queue/rollout receipt still establishes actual admission.
 
     def step(self, owner, workspace):
         # Called under the owner's existing control fence and lifetime locks.
@@ -187,6 +297,9 @@ class LinuxContinuation:
         with FileLock(self.lock):
             value = self._read(owner.thread)
             self._observe_receipt(value, owner.thread)
+            if value is not None and value["status"] == "enqueued":
+                self._start_enqueued(owner, workspace, value)
+                return self._summary(value)
             if value is not None and value["status"] not in ("prepared", "started"):
                 return self._summary(value)
 

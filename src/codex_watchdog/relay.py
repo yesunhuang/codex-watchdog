@@ -202,9 +202,14 @@ class ExactThreadRelay:
         if target.execution_locality == "remote_ssh":
             adapter = self.remote_ssh_adapter
             if not getattr(adapter, "supports_control", False):
+                if getattr(self, "relay_authority", None) is not None:
+                    return ReplyResult("deferred", target.workspace_id, instruction_id,
+                                       "relay_authority_native_fence_required")
                 return None
-            remote = RemoteSshTarget(target.remote_authority, target.remote_repo_path,
-                                     target.remote_storage_key, (target.thread_id,))
+            authority = getattr(self, "relay_authority", None)
+            remote = (authority.resolve_target(target) if authority is not None else
+                      RemoteSshTarget(target.remote_authority, target.remote_repo_path,
+                                      target.remote_storage_key, (target.thread_id,)))
         else:
             codex_home = getattr(self.queue_dispatcher, "codex_home", None)
             if codex_home is None:
@@ -233,11 +238,19 @@ class ExactThreadRelay:
                                                    reply_ticket=ticket_id),
                               wake=dict(instruction_id=instruction_id, prompt=text))
         if probe.get("legacy") is True:
+            if getattr(self, "relay_authority", None) is not None:
+                return ReplyResult("deferred", target.workspace_id, instruction_id,
+                                   "relay_authority_native_fence_required")
             return None
         if probe.get("status") != "ok":
             return ReplyResult("deferred", target.workspace_id, instruction_id,
                                      probe.get("reason", "control_transport_unavailable"))
         delivery = probe.get("wake", {}).get("state", "uncertain")
+        authority = getattr(self, "relay_authority", None)
+        if authority is not None and delivery in _DELIVERED_STATES:
+            authority.record_native_delivery(self.thread_store, event_key, probe["wake"],
+                                             instruction_id=instruction_id,
+                                             prompt_sha256=sha256_text(text))
         control = RemoteControlClient(adapter, self.runtime)
         return ReplyResult(
             "duplicate" if probe.get("duplicate") else "queued" if delivery in _DELIVERED_STATES else "uncertain",

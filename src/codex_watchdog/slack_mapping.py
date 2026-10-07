@@ -63,7 +63,8 @@ class SlackThreadStore:
     @property
     def journal(self):
         from .reply_tickets import ReplyTickets
-        return ReplyTickets(self.path, self.lock_path, "slack", self.runtime, self._legacy_state)
+        return ReplyTickets(self.path, self.lock_path, "slack", self.runtime, self._legacy_state,
+                            authority=getattr(self, "relay_authority", None))
 
     def record_thread(self, channel_id, thread_ts, target, event_fingerprint):
         key = self.thread_key(channel_id, thread_ts)

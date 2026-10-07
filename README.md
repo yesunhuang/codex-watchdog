@@ -381,6 +381,8 @@ follow the [receipt export procedure](docs/NOTIFICATION_RECEIPTS.md).
 
 Once a notification send ends, a failed or uncertain provider outcome is terminal for that exact event. Other providers and later independent notifications continue; uncertain sends are never blindly retried. See [notification recovery and rollback](docs/NOTIFICATION_RECEIPTS.md).
 
+On configured Linux nodes sharing one current-user Codex home, messaging grants, tickets, cursors and notification receipts belong to the exact session and follow its verified executor. Native writers, queues and boot state remain node-local. Existing node installations need one offline state-preserving import; see [shared session relay authority](docs/LINUX_SESSION_RELAY_AUTHORITY.md).
+
 ## Documentation
 
 - Setup: [Windows](WINDOWS_PACKAGE.md), [macOS](docs/MACOS_PACKAGE.md),

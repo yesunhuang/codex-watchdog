@@ -8,8 +8,10 @@ import json
 import re
 import threading
 import time
+from contextlib import nullcontext
 from datetime import datetime
 
+from .control_state import ControlBusy
 from .lark_transport import LarkApi, LarkTransportError, valid_id
 from .models import sha256_text, utc_now
 from .messaging_device import device_label
@@ -33,6 +35,13 @@ class LarkReplyPoller:
         self.stop = threading.Event()
         self.thread = None
         self._binding_discovery = None
+
+    def _guard(self):
+        authority = getattr(self.relay, "relay_authority", None)
+        return authority.guard() if authority is not None else nullcontext()
+
+    def _current_state(self, state):
+        return self._read_active() if getattr(self.relay, "relay_authority", None) is not None else state
 
     def _read(self, chat_id=None, baseline_ms=None, *, create=True):
         chat_hash = self.chat_hash if chat_id is None else sha256_text(chat_id)
@@ -70,20 +79,21 @@ class LarkReplyPoller:
     def poll_once(self):
         """Rotate valid tickets before attempts; one parent's fault is local."""
         journal = self.relay.thread_store.journal
-        with journal.transaction() as db:
-            mappings = journal.active(db)  # Existing last-four/provider/session policy.
-        state = self._read_active()
-        state["parents"] = {key: value for key, value in state["parents"].items() if key in mappings}
-        seed_errors = {}
-        for key, mapping in mappings.items():
-            if key not in state["parents"]:
-                try:
-                    state["parents"][key] = self._new_cursor(mapping)
-                except Exception as error:
-                    seed_errors[key] = self._error_code(error)
-        # Retain every known active root's first-adoption floor before a restart
-        # can move it, even when its provider visit is beyond this tick's budget.
-        self._save_active(state)
+        with self._guard():
+            with journal.transaction() as db:
+                mappings = journal.active(db)  # Existing last-four/provider/session policy.
+            state = self._read_active()
+            state["parents"] = {key: value for key, value in state["parents"].items() if key in mappings}
+            seed_errors = {}
+            for key, mapping in mappings.items():
+                if key not in state["parents"]:
+                    try:
+                        state["parents"][key] = self._new_cursor(mapping)
+                    except Exception as error:
+                        seed_errors[key] = self._error_code(error)
+            # Retain every known active root's first-adoption floor before a restart
+            # can move it, even when its provider visit is beyond this tick's budget.
+            self._save_active(state)
         keys = sorted(mappings)
         after = state["after_key"]
         if after is not None:
@@ -91,17 +101,23 @@ class LarkReplyPoller:
         results, failures = [], []
         for key in keys[:self.PARENTS_PER_TICK]:
             # Persist rotation before provider/handler work, including restart.
-            state["after_key"] = key
-            self._save_active(state)
+            with self._guard():
+                state = self._current_state(state)
+                state["after_key"] = key
+                self._save_active(state)
             try:
                 if key in seed_errors:
                     raise LarkTransportError(seed_errors[key])
                 if self._active(key):
                     results.extend(self._poll_root(key, mappings[key], state))
                 if not self._active(key):
-                    state["parents"].pop(key, None)
-                    self._save_active(state)
+                    with self._guard():
+                        state = self._current_state(state)
+                        state["parents"].pop(key, None)
+                        self._save_active(state)
             except Exception as error:
+                if isinstance(error, ControlBusy):
+                    raise  # A stale authority must stop ingress for this tick.
                 code = self._error_code(error)
                 if code == "lark_history_rate_limited":
                     raise LarkTransportError(code) from None  # Provider-wide backoff.
@@ -116,7 +132,11 @@ class LarkReplyPoller:
             if code == "lark_history_rate_limited":
                 raise LarkTransportError(code) from None
             failures.append(dict(reason=code))
-        self._save_active(state)
+        with self._guard():
+            # Other admitted callbacks may have advanced a shared cursor while
+            # the provider was being read; never republish the older snapshot.
+            state = self._current_state(state)
+            self._save_active(state)
         self._health("retrying" if failures else "polling" if mappings else "waiting_for_active_tickets",
                      results=results, **(dict(reason=failures[0]["reason"], failures=failures,
                                              retry_seconds=10) if failures else {}))
@@ -142,9 +162,14 @@ class LarkReplyPoller:
         return str(error) if isinstance(error, LarkTransportError) and str(error) in known else "lark_poll_failed"
 
     def _read_active(self):
-        if not self.active_path.exists():
-            return dict(schema_version=1, scope=self.relay.config.scope, after_key=None, parents={})
-        state = json.loads(self.active_path.read_text(encoding="utf-8"))
+        authority = getattr(self.relay, "relay_authority", None)
+        default = dict(schema_version=1, scope=self.relay.config.scope, after_key=None, parents={})
+        if authority is not None:
+            state = authority.read_cursor("lark", "lark-active:" + self.relay.config.scope, default)
+        elif not self.active_path.exists():
+            return default
+        else:
+            state = json.loads(self.active_path.read_text(encoding="utf-8"))
         if (not isinstance(state, dict)
                 or not {"schema_version", "scope", "after_key", "parents"}.issubset(state)
                 or type(state.get("schema_version")) is not int or state["schema_version"] != 1
@@ -173,13 +198,18 @@ class LarkReplyPoller:
         return state
 
     def _save_active(self, state):
-        InstructionStore._atomic_json(self.active_path, state)
+        authority = getattr(self.relay, "relay_authority", None)
+        if authority is not None:
+            authority.write_cursor("lark", "lark-active:" + self.relay.config.scope, state)
+        else:
+            InstructionStore._atomic_json(self.active_path, state)
 
     def _active(self, key):
         journal = self.relay.thread_store.journal
-        with journal.transaction() as db:
-            return db.execute("SELECT 1 FROM records WHERE namespace=? AND kind='threads' AND key=? AND active=1",
-                              (journal.namespace, key)).fetchone() is not None
+        with self._guard():
+            with journal.transaction() as db:
+                return db.execute("SELECT 1 FROM records WHERE namespace=? AND kind='threads' AND key=? AND active=1",
+                                  (journal.namespace, key)).fetchone() is not None
 
     def _baseline(self, mapping):
         if not valid_id(mapping.get("chat_id"), "oc") or not valid_id(mapping.get("message_id"), "om"):
@@ -193,6 +223,10 @@ class LarkReplyPoller:
                 raise ValueError()
         except (ValueError, TypeError, KeyError, AttributeError, OverflowError):
             raise LarkTransportError("lark_mapping_time_invalid") from None
+        if getattr(self.relay, "relay_authority", None) is not None:
+            # Shared authority migration owns previous floors. A node-local
+            # legacy file must never select or rewind the portable cursor.
+            return max(baseline, self.started_ms)
         # Only a completed, exactly scoped old cursor proves a later floor.
         # Retain its bytes for rollback; never resume its chronological backlog.
         path = self.path.with_name("poll-cursor-" + sha256_text(mapping["chat_id"]) + ".json")
@@ -231,6 +265,15 @@ class LarkReplyPoller:
         return sha256_text(json.dumps({key: message.get(key) for key in fields}, sort_keys=True, separators=(",", ":")))
 
     def _handle_message(self, message, mapping, cursor, state):
+        with self._guard():
+            state = self._current_state(state)
+            key = self.relay.thread_store._address(mapping["chat_id"], mapping["message_id"])
+            if not self._active(key):
+                return None
+            cursor = state["parents"][key]
+            return self._handle_message_owned(message, mapping, cursor, state)
+
+    def _handle_message_owned(self, message, mapping, cursor, state):
         created, mid = int(message["create_time"]), message["message_id"]
         if created < cursor["after_ms"] or (created == cursor["after_ms"] and mid in cursor["seen_ids"]):
             return None
@@ -271,19 +314,30 @@ class LarkReplyPoller:
         return result
 
     def _poll_root(self, key, mapping, state):
-        cursor = state["parents"].get(key)
-        if cursor is None:
-            cursor = self._new_cursor(mapping)
-            state["parents"][key] = cursor
-            self._save_active(state)
+        with self._guard():
+            state = self._current_state(state)
+            if not self._active(key):
+                return []
+            cursor = state["parents"].get(key)
+            if cursor is None:
+                cursor = self._new_cursor(mapping)
+                state["parents"][key] = cursor
+                self._save_active(state)
         if cursor["thread_id"] is None:
             thread_id = self.api.thread_for_root(mapping["message_id"], destination=mapping["chat_id"])
             if thread_id is None:
                 return [{"status": "waiting_for_native_thread"}]
             if not self._thread_id(thread_id):
                 raise LarkTransportError("lark_poll_thread_id_invalid")
-            cursor["thread_id"] = thread_id
-            self._save_active(state)
+            with self._guard():
+                state = self._current_state(state)
+                if not self._active(key):
+                    return []
+                cursor = state["parents"][key]
+                if cursor["thread_id"] not in (None, thread_id):
+                    raise LarkTransportError("lark_poll_thread_id_invalid")
+                cursor["thread_id"] = thread_id
+                self._save_active(state)
         results = []
         if cursor["pending"] is not None:
             pending = cursor["pending"]
@@ -347,7 +401,11 @@ class LarkReplyPoller:
 
     def start(self):
         if self.thread is None:
-            self._save_active(self._read_active())
+            # Node observers select their shared epoch after creating the
+            # controller. Its listener may start first, but may not initialize
+            # portable state until poll_once proves the captured authority.
+            if getattr(self.relay, "relay_authority", None) is None:
+                self._save_active(self._read_active())
             self.stop.clear()
             self.thread = threading.Thread(target=self._run, name="watchdog-lark-replies", daemon=True)
             self.thread.start()

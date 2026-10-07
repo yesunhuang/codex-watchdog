@@ -235,3 +235,19 @@ idle remote restart, stale-epoch refusal, and desktop handback with the VS Code
 retry above. Queue journals and protected settings were unchanged. Crash and busy
 handback cases also have deterministic tests; native restart used an idle release.
 Packaged fixtures and other desktop/platform topologies remain separate checks.
+
+## Continuing already queued native input
+
+An interrupted native turn can leave its queue paused. A detached Linux owner
+may call the supported `thread/queue/start` operation once for the exact FIFO
+head that this WatchDog already enqueued, after verifying its immutable text,
+digest, thread, idle native writer and ownership/approval/release fences. The
+start intent is durable before the call. A timeout or malformed response remains
+uncertain; it is not retried, re-enqueued or treated as model completion.
+Native admission and final output are established separately by passive evidence.
+This does not start arbitrary queued user work or bypass an active writer.
+
+The existing latest-completion snapshot can coalesce rapidly consecutive completed
+turns; an individual notification for every such turn is not guaranteed. Shared
+relay authority preserves receipts and targeting but does not backfill old output
+or remove the documented stale-boot and other-window coverage limits.

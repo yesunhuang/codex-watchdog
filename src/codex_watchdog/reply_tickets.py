@@ -34,11 +34,19 @@ def ticket_time(entry):
 
 
 class ReplyTickets:
-    def __init__(self, path, lock_path, provider, runtime, legacy_reader):
+    def __init__(self, path, lock_path, provider, runtime, legacy_reader, *, authority=None):
         self.path, self.lock_path = Path(path), Path(lock_path)
         self.database = Path(runtime) / provider / "reply-tickets.sqlite3"
         self.namespace = str(self.path.relative_to(Path(runtime))).replace("\\", "/")
         self.legacy_reader = legacy_reader
+        self.authority = authority
+        self.provider = provider
+        if authority is not None:
+            self.path = authority.runtime / self.namespace
+            self.database = authority.runtime / provider / "reply-tickets.sqlite3"
+            # Initial migration is explicit and complete before activation.
+            # A new namespace may start empty; polling never imports old state.
+            self.legacy_reader = lambda: {}
 
     def _backup_v1(self, db):
         backup = self.database.with_name(self.database.name + ".v1-backup")
@@ -72,7 +80,9 @@ class ReplyTickets:
 
     @contextmanager
     def transaction(self):
-        with FileLock(self.lock_path):
+        lock = (self.authority.journal_lock(self.provider) if self.authority is not None
+                else FileLock(self.lock_path))
+        with lock:
             self.database.parent.mkdir(parents=True, exist_ok=True)
             db = sqlite3.connect(str(self.database), timeout=1)
             try:
@@ -99,6 +109,9 @@ class ReplyTickets:
                     self._active_indexes(db)
                     db.execute("DELETE FROM records WHERE kind='route_poll_cursors'")
                     db.execute("PRAGMA user_version=2")
+                if self.authority is not None:
+                    db.execute("CREATE INDEX IF NOT EXISTS session_relay_pending "
+                               "ON records(thread_id,namespace,key) WHERE active=1 AND kind='events'")
                 if not db.execute("SELECT 1 FROM sources WHERE namespace=?", (self.namespace,)).fetchone():
                     self._migrate(db)
                 else:
@@ -170,16 +183,33 @@ class ReplyTickets:
             active_scope="provider_session", legacy_policy="retired_all", migrated_at=utc_now()))
 
     def get(self, db, kind, key):
-        row = db.execute("SELECT value FROM records WHERE namespace=? AND kind=? AND key=?",
+        row = db.execute("SELECT value,thread_id FROM records WHERE namespace=? AND kind=? AND key=?",
                          (self.namespace, kind, key)).fetchone()
-        return json.loads(row[0]) if row else None
+        if (row and kind == "threads" and self.authority is not None
+                and row[1] != self.authority.thread_id):
+            return None
+        value = json.loads(row[0]) if row else None
+        if isinstance(value, dict) and value.get("relay_authority_quarantine") is True:
+            raise ValueError("relay_authority_historical_identity_quarantined")
+        return value
 
     def put(self, db, kind, key, value):
+        thread_id = value.get("target", {}).get("thread_id")
+        if self.authority is not None:
+            thread_id = thread_id or self.authority.thread_id
+            if thread_id != self.authority.thread_id:
+                raise ValueError("relay_authority_foreign_session")
         db.execute("""INSERT INTO records(namespace,kind,key,value,fingerprint,thread_id,created_at)
             VALUES(?,?,?,?,?,?,?) ON CONFLICT(namespace,kind,key) DO UPDATE SET value=excluded.value,
             fingerprint=excluded.fingerprint,thread_id=excluded.thread_id""",
             (self.namespace, kind, key, json.dumps(value, sort_keys=True), value.get("event_fingerprint"),
-             value.get("target", {}).get("thread_id"), value.get("created_at")))
+             thread_id, value.get("created_at")))
+        if self.authority is not None and kind == "events":
+            pending = ((value.get("state") in ("dispatching", "uncertain")
+                or value.get("delivery_status") in ("enqueued", "consumed_or_started", "started"))
+                    and value.get("native_completed") is not True)
+            db.execute("UPDATE records SET active=? WHERE namespace=? AND kind=? AND key=?",
+                       (int(pending), self.namespace, kind, key))
 
     def record(self, db, key, entry, *, active=True):
         prior = self.get(db, "threads", key)
@@ -212,10 +242,19 @@ class ReplyTickets:
                        (namespace, old_key))
 
     def claim(self, db, key):
+        if self.authority is not None:
+            return db.execute("UPDATE records SET active=0 WHERE namespace=? AND kind='threads' "
+                              "AND key=? AND active=1 AND thread_id=?",
+                              (self.namespace, key, self.authority.thread_id)).rowcount == 1
         return db.execute("""UPDATE records SET active=0 WHERE namespace=? AND kind='threads'
             AND key=? AND active=1""", (self.namespace, key)).rowcount == 1
 
     def active(self, db):
+        if self.authority is not None:
+            return {key: json.loads(value) for key, value in db.execute(
+                "SELECT key,value FROM records INDEXED BY session_active_tickets "
+                "WHERE namespace=? AND kind='threads' AND active=1 AND thread_id COLLATE NOCASE=? "
+                "ORDER BY created_at,key", (self.namespace, self.authority.thread_id))}
         return {key: json.loads(value) for key, value in db.execute(
             "SELECT key,value FROM records INDEXED BY namespace_active_tickets "
             "WHERE namespace=? AND kind='threads' AND active=1 "
@@ -226,6 +265,8 @@ class ReplyTickets:
             entries = self.active(db).values()
             return [v for v in entries if (fingerprint is None or v["event_fingerprint"] == fingerprint)
                     and (thread_ids is None or v["target"]["thread_id"] in thread_ids)]
-        return [json.loads(row[0]) for row in db.execute(
+        values = [json.loads(row[0]) for row in db.execute(
             "SELECT value FROM records WHERE namespace=? AND kind='threads' AND fingerprint=?",
             (self.namespace, fingerprint))]
+        return [entry for entry in values if self.authority is None
+                or entry.get("target", {}).get("thread_id") == self.authority.thread_id]

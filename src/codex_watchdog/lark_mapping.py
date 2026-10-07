@@ -78,7 +78,8 @@ class LarkThreadStore:
     @property
     def journal(self):
         from .reply_tickets import ReplyTickets
-        return ReplyTickets(self.path, self.lock_path, self.provider, self.runtime, self._legacy_state)
+        return ReplyTickets(self.path, self.lock_path, self.provider, self.runtime, self._legacy_state,
+                            authority=getattr(self, "relay_authority", None))
 
     def prepare_notification(self, fingerprint, payload_sha256):
         if not self._digest(fingerprint) or not self._digest(payload_sha256):

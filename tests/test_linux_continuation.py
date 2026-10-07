@@ -71,6 +71,10 @@ def scenario(tmp_path, monkeypatch):
             if method == "thread/turns/list":
                 assert params == {"threadId": THREAD, "limit": 1, "sortDirection": "desc", "itemsView": "notLoaded"}
                 return {"data": [{"id": data.latest, "status": data.status}]} if data.latest else {"data": []}
+            if method == "thread/queue/start":
+                assert params == {"threadId": THREAD, "queuedSubmissionId": QUEUE}
+                return getattr(data, "queue_start_response", {
+                    "turn": {"id": CONTINUED, "status": "inProgress"}})
             assert method in ("thread/read", "thread/resume")
             return {"thread": {"id": THREAD, "cwd": str(repo), "status": {"type": data.native_status}}}
 
@@ -738,3 +742,162 @@ def test_automatic_thread_filter_accepts_repeated_exact_ids_and_rejects_invalid(
     assert args.thread == [THREAD, CONTINUED]
     with pytest.raises(SystemExit):
         build_parser().parse_args(["linux-auto-run", "--thread", "a project name"])
+
+
+def _native_queue(s):
+    """The real native payload and FIFO schema of interrupted queue tests."""
+    s.step()
+    with sqlite3.connect(s.binding.codex_home / "queue_1.sqlite") as db:
+        db.execute("ALTER TABLE queued_items ADD COLUMN queue_order INTEGER DEFAULT 0")
+        db.execute("UPDATE queued_items SET payload_json=? WHERE id=?", (json.dumps({
+            "UserInput": {"content": [{"type": "text", "text": s.sent[0], "text_elements": []}],
+                          "client_id": "51111111-2222-4333-8444-555555555555"}}), QUEUE))
+
+
+def _start_calls(s):
+    return [params for method, params in s.calls if method == "thread/queue/start"]
+
+
+def test_interrupted_native_queue_starts_existing_head_once_and_waits_for_admission(scenario):
+    s = scenario
+    _native_queue(s)
+    result = s.step()
+    assert result["continuation"]["native_queue_start"] == "requested"
+    assert result["continuation"]["status"] == "enqueued"
+    assert _start_calls(s) == [{"threadId": THREAD, "queuedSubmissionId": QUEUE}]
+    assert len(s.sent) == 1 and not s.notices
+    s.step()
+    s.owner.client.close()
+    s.owner = s.make_owner()
+    s.step()
+    assert len(_start_calls(s)) == 1 and len(s.sent) == 1
+    s.started()
+    result = s.step()
+    assert result["continuation"]["native_queue_start"] == "observed"
+    assert result["continuation"]["status"] == "started"
+    assert [x.event_type for x in s.notices] == ["linux_continuation_started"]
+
+
+@pytest.mark.parametrize("failure", ["lost_reply", "crash", "malformed_reply"])
+def test_native_queue_start_persists_intent_before_effect_and_never_retries_uncertainty(scenario, failure):
+    from codex_watchdog.app_server import AppServerError
+    s = scenario
+    _native_queue(s)
+    def fail(method, params):
+        if method == "thread/queue/start":
+            value = json.loads((s.binding.runtime / "linux/continuation.json").read_text())
+            assert value["native_queue_start"]["state"] == "uncertain"
+            assert value["native_queue_start"]["queue_message_id"] == QUEUE
+            if failure == "crash":
+                raise SystemExit("crashed after durable intent")
+            if failure == "malformed_reply":
+                raise KeyError("missing turn")
+            raise AppServerError("app_server_request_timeout")
+    s.request_hook = fail
+    if failure == "crash":
+        with pytest.raises(SystemExit):
+            s.step()
+    else:
+        assert s.step()["continuation"]["native_queue_start"] == "uncertain"
+    s.request_hook = None
+    s.owner.client.close()
+    s.owner = s.make_owner()
+    s.step()
+    assert len(_start_calls(s)) == len(s.sent) == 1
+    assert [x.event_type for x in s.notices] == ["linux_continuation_uncertain"]
+    # Later exact native evidence supersedes an uncertain RPC; it never resends.
+    s.started()
+    result = s.step()
+    assert result["continuation"]["native_queue_start"] == "observed"
+    assert "attention" not in result["continuation"]
+    assert len(_start_calls(s)) == len(s.sent) == 1
+
+
+@pytest.mark.parametrize("response", [None, {}, {"turn": None},
+    {"turn": {"id": 5, "status": "inProgress"}},
+    {"turn": {"id": [], "status": "inProgress"}},
+    {"turn": {"id": "invalid", "status": "inProgress"}},
+    {"turn": {"id": CONTINUED, "status": "completed"}}])
+def test_malformed_native_start_reply_retains_uncertainty_without_crashing_or_replay(scenario, response):
+    s = scenario
+    _native_queue(s)
+    s.queue_start_response = response
+    result = s.step()["continuation"]
+    assert result["native_queue_start"] == "uncertain"
+    assert result["attention"] == "continuation_queue_start_uncertain"
+    assert result["status"] == "enqueued"
+    assert len(_start_calls(s)) == len(s.sent) == 1
+    assert [notice.event_type for notice in s.notices] == ["linux_continuation_uncertain"]
+    del s.queue_start_response
+    s.owner.client.close()
+    s.owner = s.make_owner()
+    s.step()
+    assert len(_start_calls(s)) == len(s.sent) == len(s.notices) == 1
+    s.started()
+    result = s.step()["continuation"]
+    assert result["native_queue_start"] == "observed" and result["status"] == "started"
+    assert "attention" not in result
+    assert len(_start_calls(s)) == len(s.sent) == 1
+
+
+def test_continuation_does_not_jump_other_queued_input(scenario):
+    s = scenario
+    _native_queue(s)
+    with sqlite3.connect(s.binding.codex_home / "queue_1.sqlite") as db:
+        db.execute("INSERT INTO queued_items VALUES (?,?,?,-1)", (CONTINUED, THREAD, "human input"))
+    s.step()
+    assert not _start_calls(s)
+    assert len(s.sent) == 1
+
+
+@pytest.mark.parametrize("payload", ["not json", "[]", '{"UserInput":null}',
+                                     '{"UserInput":{"content":[null]}}',
+                                     '{"UserInput":{"content":[{"type":"text","text":"other input"}]}}'])
+def test_native_queue_start_rejects_unverified_payload(scenario, payload):
+    s = scenario
+    _native_queue(s)
+    with sqlite3.connect(s.binding.codex_home / "queue_1.sqlite") as db:
+        db.execute("UPDATE queued_items SET payload_json=?", (payload,))
+    with pytest.raises(LinuxBindingError, match="linux_continuation_queue_start_unverified"):
+        s.step()
+    assert not _start_calls(s)
+
+
+@pytest.mark.parametrize("gate", ["turn_changed", "signal", "approval", "writer", "yield"])
+def test_native_queue_start_rechecks_after_final_read(scenario, gate):
+    s = scenario
+    _native_queue(s)
+    count = []
+    def race(method, params):
+        if method == "thread/turns/list":
+            count.append(method)
+            if len(count) == 2:
+                if gate == "turn_changed":
+                    s.latest, s.status = CONTINUED, "completed"
+                elif gate == "signal":
+                    s.owner.release_requested = True
+                elif gate == "approval":
+                    s.owner.approval_required = True
+                elif gate == "yield":
+                    s.owner.yield_requested = True
+                else:
+                    s.writer = 999
+    s.request_hook = race
+    s.step()
+    assert not _start_calls(s)
+    assert len(s.sent) == 1
+
+
+@pytest.mark.parametrize("attempt", [{"state":"retry", "queue_message_id":QUEUE},
+    {"state":"requested", "queue_message_id":QUEUE, "response_turn_id":"unknown"},
+    {"state":"uncertain", "queue_message_id":"unknown"}, "invalid"])
+def test_invalid_persisted_queue_start_is_fenced(scenario, attempt):
+    s = scenario
+    _native_queue(s)
+    path = s.binding.runtime / "linux/continuation.json"
+    value = json.loads(path.read_text())
+    value["native_queue_start"] = attempt
+    InstructionStore._atomic_json(path, value)
+    with pytest.raises(LinuxBindingError, match="linux_continuation_state_invalid"):
+        s.step()
+    assert not _start_calls(s)
