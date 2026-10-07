@@ -10,9 +10,11 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import sqlite3
+from types import SimpleNamespace
 import uuid
 
 from .reply_tickets import ACTIVE_TICKET_LIMIT
@@ -111,6 +113,35 @@ def _validate_registry(value):
     return principals
 
 
+def _validate_binding_row(row, body):
+    """Preserve the numeric epochs emitted by the existing binding journal."""
+    from .binding_challenges import BindingChallenges
+
+    try:
+        stamp = row["created_at"]
+        if (not isinstance(stamp, str)
+                or re.fullmatch(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?", stamp) is None
+                or not math.isfinite(float(stamp))):
+            raise ValueError()
+        provider, scope = body.get("provider"), body.get("scope")
+        bindings = BindingChallenges(SimpleNamespace(provider=provider, scope=scope), provider, scope)
+        if row["kind"] == "bind_challenges":
+            bindings._validate_challenge(body)
+            expected_key = bindings.routes._route_key(body["thread_id"])
+        else:
+            bindings._validate_operation(body)
+            expected_key = body["op_key"]
+        if (row["namespace"] != provider + "/" + scope + "/relay-state.json"
+                or row["key"] != expected_key
+                or _uuid(row["thread_id"]) != _uuid(body["thread_id"])):
+            raise ValueError()
+        # SQLite converts numeric epochs to TEXT with its own precision. Also,
+        # an upsert retains the first column timestamp while later challenge
+        # generations update the payload epoch. Neither is a new identity.
+    except (ValueError, TypeError, KeyError, OverflowError):
+        raise ValueError(_INVALID) from None
+
+
 def _row(value):
     if not isinstance(value, dict) or set(value) != set(_FIELDS):
         raise ValueError(_INVALID)
@@ -131,7 +162,9 @@ def _row(value):
         raise ValueError(_INVALID)
     if result["thread_id"] is not None:
         _uuid(result["thread_id"])
-    if result["created_at"] is not None:
+    if result["kind"] in ("bind_challenges", "bind_operations"):
+        _validate_binding_row(result, body)
+    elif result["created_at"] is not None:
         _stamp(result["created_at"])
     if type(result["active"]) is not int or result["active"] not in (0, 1):
         raise ValueError(_INVALID)

@@ -80,6 +80,14 @@ readiness publication can resume from the same verified plan; changed sources,
 unplanned staged authorization or damaged installed state are refused. Original
 databases, owners, native state, user settings and credentials remain intact.
 
+Existing Feishu/Lark and OneBot binding challenges and operations retain their
+numeric epoch timestamps. The importer validates finite numeric SQLite metadata
+and the established binding schema and exact identity without rewriting either
+timestamp. SQLite conversion can change text precision, and a later binding
+generation can update its payload while retaining the first metadata timestamp.
+Other record kinds retain their ISO timestamp checks. Conflicting copies of a
+binding still fail closed; migration does not reopen or complete a challenge.
+
 Conflicting historical parent/notification identities become inert occupied-key
 quarantine records. No hostname, payload or timestamp selects a winner. Conflicts
 in grants, logical UUIDs or physical claims fail the import. A quarantined parent

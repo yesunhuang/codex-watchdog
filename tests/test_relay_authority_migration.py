@@ -4,9 +4,14 @@ import itertools
 import json
 import os
 import sqlite3
+from datetime import datetime
 
 import pytest
 
+from codex_watchdog.binding_challenges import BindingChallenges
+from codex_watchdog.lark_mapping import LarkThreadStore
+from codex_watchdog.models import sha256_text
+from codex_watchdog.onebot_relay import OneBotThreadStore
 from codex_watchdog.relay_authority_migration import (
     merge_poll_cursors, merge_records, merge_records_with_quarantine, read_snapshot,
 )
@@ -197,6 +202,287 @@ def test_real_v2_snapshot_is_read_only_and_repeatable(tmp_path):
     assert len(rows) == 1 and rows[0]["active"] == 1
     assert read_snapshot(path) == (rows, digest)
     assert len(digest) == 64
+
+
+def binding_fixture(runtime, monkeypatch, provider, state="pending", *, hello=None):
+    """Persist established binding APIs, including updates retaining first metadata."""
+    monkeypatch.setattr("codex_watchdog.lark_mapping.utc_now", lambda: STAMP)
+    monkeypatch.setattr("codex_watchdog.binding_challenges.utc_now", lambda: STAMP)
+    scope = sha256_text("migration-binding-fixture\0" + provider)
+    if provider == "lark":
+        store = LarkThreadStore(runtime, scope)
+        chat, user, destination = "oc_" + "a" * 12, "ou_" + "b" * 12, "oc_" + "c" * 12
+        message = lambda number: "om_" + str(3000000000 + number)
+    else:
+        store = OneBotThreadStore(runtime, scope)
+        chat, user, destination = "group:1000001", "1000002", "private:2000001"
+        message = lambda number: str(3000000 + number)
+    target = RelayTarget("control-fixture", SESSION, "process_local")
+    now = [datetime.fromisoformat(STAMP.replace("Z", "+00:00")).timestamp() + 30.1234567]
+    challenges = BindingChallenges(store, provider, scope, clock=lambda: now[0])
+
+    def parent(number):
+        fingerprint = sha256_text("binding-notification:" + str(number))
+        store.prepare_notification(fingerprint, fingerprint)
+        store.finish_notification(fingerprint, chat, message(number), target)
+        return message(number)
+
+    result = challenges.begin("binding-event:1", chat, parent(1), user, "bind",
+                              message_id=message(11), created_at=now[0] + 1.2345678)
+    assert result["status"] == "pending"
+    if state != "pending":
+        completed = challenges.complete(result["challenge"], user, destination,
+                                        message_id=message(21), created_at=now[0] + 1.9876543)
+        assert completed["status"] == "bound"
+        if hello is not None:
+            assert challenges.claim_hello(completed["operation_key"]) is not None
+            if hello != "claimed":
+                challenges.finish_hello(completed["operation_key"], hello)
+        if state in ("cleared", "rebound"):
+            now[0] += 100.456789
+            if state == "cleared":
+                result = challenges.unbind("binding-event:2", chat, parent(2), user, "unbind",
+                                           message_id=message(12), created_at=now[0] + 1.2345678)
+                assert result["status"] == "unbound"
+            else:
+                result = challenges.begin("binding-event:2", chat, parent(2), user, "bind",
+                                          message_id=message(12), created_at=now[0] + 1.2345678)
+                assert result["status"] == "pending"
+    return store, challenges
+
+
+def raw_binding_rows(path):
+    with sqlite3.connect(path) as db:
+        db.row_factory = sqlite3.Row
+        return [dict(entry) for entry in db.execute(
+            "SELECT * FROM records ORDER BY namespace,kind,key")]
+
+
+def assert_binding_rows_valid(challenges, rows):
+    validators = {"bind_challenges": challenges._validate_challenge,
+                  "bind_operations": challenges._validate_operation,
+                  "bind_completions": challenges._validate_completion,
+                  "bind_operation_messages": challenges._validate_op_message}
+    for entry in rows:
+        if entry["kind"] in validators:
+            validators[entry["kind"]](body(entry))
+
+
+@pytest.mark.parametrize("provider", ["lark", "onebot"])
+@pytest.mark.parametrize("state", ["pending", "consumed", "cleared", "rebound"])
+def test_real_binding_numeric_epochs_snapshot_without_rewriting_original(tmp_path, monkeypatch, provider, state):
+    store, challenges = binding_fixture(tmp_path / "runtime", monkeypatch, provider, state)
+    path = store.journal.database
+    original, raw = path.read_bytes(), raw_binding_rows(path)
+    assert_binding_rows_valid(challenges, raw)
+    numeric = [entry for entry in raw if entry["kind"] in ("bind_challenges", "bind_operations")]
+    assert numeric and all(isinstance(entry["created_at"], str) for entry in numeric)
+    assert all(type(body(entry)["created_at"]) in (int, float) for entry in numeric)
+    assert all(isinstance(float(entry["created_at"]), float) for entry in numeric)
+    challenge = next(entry for entry in numeric if entry["kind"] == "bind_challenges")
+    assert body(challenge)["status"] == {"pending": "pending", "consumed": "consumed",
+                                        "cleared": "cleared", "rebound": "pending"}[state]
+    if state in ("cleared", "rebound"):
+        assert body(challenge)["generation"] == 2
+        assert body(challenge)["created_at"] - float(challenge["created_at"]) >= 100
+    rows, digest = read_snapshot(path)
+    assert read_snapshot(path) == (rows, digest)
+    assert path.read_bytes() == original and raw_binding_rows(path) == raw
+    assert [(entry["namespace"], entry["kind"], entry["key"], entry["created_at"],
+             entry["fingerprint"], entry["thread_id"], entry["active"], body(entry)) for entry in rows] == [
+           (entry["namespace"], entry["kind"], entry["key"], entry["created_at"],
+            entry["fingerprint"], entry["thread_id"], entry["active"], body(entry)) for entry in raw]
+    assert merge_records([("source", rows)]) == rows
+
+
+@pytest.mark.parametrize("provider", ["lark", "onebot"])
+@pytest.mark.parametrize("hello", [None, "claimed", "sent", "uncertain"])
+def test_bound_completion_and_hello_statuses_keep_iso_metadata(tmp_path, monkeypatch, provider, hello):
+    store, challenges = binding_fixture(tmp_path / "runtime", monkeypatch, provider, "consumed", hello=hello)
+    path = store.journal.database
+    original = path.read_bytes()
+    rows, _ = read_snapshot(path)
+    assert_binding_rows_valid(challenges, rows)
+    completion = next(entry for entry in rows if entry["kind"] == "bind_completions")
+    assert completion["created_at"] == body(completion)["created_at"] == STAMP
+    assert body(completion)["status"] == "bound" and body(completion)["hello_status"] == hello
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("provider", ["lark", "onebot"])
+@pytest.mark.parametrize("state", ["pending", "consumed", "cleared", "rebound"])
+def test_binding_epochs_preserved_through_read_only_authority_plan(tmp_path, monkeypatch, provider, state):
+    from codex_watchdog.linux_relay_migration import plan_authority
+    home = (tmp_path / "codex-home").resolve()
+    node = home / "watchdog-nodes" / "fixture-node"
+    runtime = node / "watchdog-control" / SESSION / "runtime"
+    runtime.mkdir(parents=True)
+    (node / "node.json").write_text(json.dumps(dict(schema_version=1, node=node.name, codex_home=str(home))))
+    repository = (tmp_path / "fixture-repo").resolve()
+    repository.mkdir()
+    with sqlite3.connect(home / "state_5.sqlite") as db:
+        db.execute("CREATE TABLE threads(id TEXT,cwd TEXT,archived INTEGER,source TEXT,thread_source TEXT)")
+        db.execute("INSERT INTO threads VALUES(?,?,0,'vscode','user')", (SESSION, str(repository)))
+    store, challenges = binding_fixture(runtime, monkeypatch, provider, state)
+    raw = raw_binding_rows(store.journal.database)
+    assert_binding_rows_valid(challenges, raw)
+    before = {path: path.read_bytes() for path in home.rglob("*") if path.is_file()}
+    plan = plan_authority(home)
+    assert plan["summary"]["sessions"] == {SESSION: str(repository)}
+    assert plan["summary"]["records"][provider] == len(raw)
+    assert len(plan["summary"]["plan_sha256"]) == 64
+    assert {path: path.read_bytes() for path in home.rglob("*") if path.is_file()} == before
+    assert raw_binding_rows(store.journal.database) == raw
+    assert {entry["key"]: (entry["created_at"], body(entry)) for entry in plan["merged"][provider]} == {
+           entry["key"]: (entry["created_at"], body(entry)) for entry in raw}
+
+
+@pytest.mark.parametrize("provider", ["lark", "onebot"])
+@pytest.mark.parametrize("kind", ["bind_challenges", "bind_operations"])
+def test_binding_sqlite_legacy_precision_and_unknown_fields_remain_verbatim(tmp_path, monkeypatch, provider, kind):
+    store, _ = binding_fixture(tmp_path / "runtime", monkeypatch, provider)
+    path = store.journal.database
+    entry = next(entry for entry in raw_binding_rows(path) if entry["kind"] == kind)
+    payload = body(entry)
+    payload["unknown_binding_extension"] = {"retain": [True, "choice"]}
+    # Older SQLite numeric-to-TEXT conversion retains 15 significant digits;
+    # newer SQLite builds can preserve all digits. Do not depend on host SQLite.
+    text_epoch = format(payload["created_at"], ".15g")
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE records SET value=?,created_at=? WHERE kind=? AND key=?",
+                   (json.dumps(payload), text_epoch, kind, entry["key"]))
+    original, raw = path.read_bytes(), raw_binding_rows(path)
+    rows, _ = read_snapshot(path)
+    migrated = next(entry for entry in rows if entry["kind"] == kind)
+    assert migrated["created_at"] == text_epoch and body(migrated) == payload
+    assert path.read_bytes() == original and raw_binding_rows(path) == raw
+    assert merge_records([("source", rows)]) == rows
+
+
+@pytest.mark.parametrize("provider", ["lark", "onebot"])
+@pytest.mark.parametrize("kind", ["bind_challenges", "bind_operations"])
+@pytest.mark.parametrize("metadata", [None, "not-an-epoch", "NaN", "Infinity", "-Infinity", "1e999",
+                                      "true", "false", "+1", "01.2", ".5", "1.", " 1", STAMP])
+def test_binding_snapshot_refuses_malformed_numeric_metadata_without_writes(tmp_path, monkeypatch, provider, kind, metadata):
+    store, _ = binding_fixture(tmp_path / "runtime", monkeypatch, provider)
+    path = store.journal.database
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE records SET created_at=? WHERE kind=?", (metadata, kind))
+    original, raw = path.read_bytes(), raw_binding_rows(path)
+    with pytest.raises(ValueError, match="^relay_authority_migration_snapshot_invalid$"):
+        read_snapshot(path)
+    assert path.read_bytes() == original and raw_binding_rows(path) == raw
+
+
+@pytest.mark.parametrize("provider", ["lark", "onebot"])
+@pytest.mark.parametrize("kind", ["bind_challenges", "bind_operations"])
+@pytest.mark.parametrize("metadata", [True, False, 1791388830, 1791388830.125])
+def test_binding_merge_refuses_nontext_numeric_metadata(tmp_path, monkeypatch, provider, kind, metadata):
+    store, _ = binding_fixture(tmp_path / "runtime", monkeypatch, provider)
+    entry = next(entry for entry in raw_binding_rows(store.journal.database) if entry["kind"] == kind)
+    entry["created_at"] = metadata
+    with pytest.raises(ValueError, match="^relay_authority_migration_record_invalid$"):
+        merge_records([("source", [entry])])
+
+
+@pytest.mark.parametrize("provider", ["lark", "onebot"])
+@pytest.mark.parametrize("kind", ["bind_challenges", "bind_operations"])
+@pytest.mark.parametrize("epoch", [True, False, None, "1791388830.125", "not-an-epoch",
+                                   float("nan"), float("inf"), -float("inf"), {}, []])
+def test_binding_snapshot_refuses_invalid_payload_epochs_without_writes(tmp_path, monkeypatch, provider, kind, epoch):
+    store, _ = binding_fixture(tmp_path / "runtime", monkeypatch, provider)
+    path = store.journal.database
+    entry = next(entry for entry in raw_binding_rows(path) if entry["kind"] == kind)
+    payload = body(entry)
+    payload["created_at"] = epoch
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE records SET value=? WHERE kind=? AND key=?",
+                   (json.dumps(payload), kind, entry["key"]))
+    original, raw = path.read_bytes(), raw_binding_rows(path)
+    with pytest.raises(ValueError, match="^relay_authority_migration_snapshot_invalid$"):
+        read_snapshot(path)
+    assert path.read_bytes() == original and raw_binding_rows(path) == raw
+
+
+@pytest.mark.parametrize("provider", ["lark", "onebot"])
+@pytest.mark.parametrize("expires", [True, False, None, "1791388930", float("nan"), float("inf")])
+def test_binding_pending_expiry_keeps_established_finite_number_guard(tmp_path, monkeypatch, provider, expires):
+    store, _ = binding_fixture(tmp_path / "runtime", monkeypatch, provider)
+    entry = next(entry for entry in raw_binding_rows(store.journal.database) if entry["kind"] == "bind_challenges")
+    payload = body(entry)
+    payload["expires_at"] = expires
+    entry["value"] = json.dumps(payload)
+    with pytest.raises(ValueError, match="^relay_authority_migration_record_invalid$"):
+        merge_records([("source", [entry])])
+
+
+@pytest.mark.parametrize("provider", ["lark", "onebot"])
+@pytest.mark.parametrize("kind,field,value", [
+    ("bind_challenges", "schema_version", True),
+    ("bind_challenges", "status", "bound"),
+    ("bind_challenges", "generation", True),
+    ("bind_challenges", "user_id", "invalid"),
+    ("bind_challenges", "token_hash", "invalid"),
+    ("bind_challenges", "thread_id", OTHER),
+    ("bind_operations", "schema_version", True),
+    ("bind_operations", "status", "bound"),
+    ("bind_operations", "fingerprint", "invalid"),
+    ("bind_operations", "recorded_at", ""),
+    ("bind_operations", "op", "run"),
+    ("bind_operations", "thread_id", OTHER),
+])
+def test_binding_migration_uses_existing_schema_and_exact_identity_guards(tmp_path, monkeypatch, provider, kind, field, value):
+    store, _ = binding_fixture(tmp_path / "runtime", monkeypatch, provider)
+    entry = next(entry for entry in raw_binding_rows(store.journal.database) if entry["kind"] == kind)
+    payload = body(entry)
+    payload[field] = value
+    entry["value"] = json.dumps(payload)
+    with pytest.raises(ValueError, match="^relay_authority_migration_record_invalid$"):
+        merge_records([("source", [entry])])
+
+
+@pytest.mark.parametrize("provider", ["lark", "onebot"])
+@pytest.mark.parametrize("kind", ["bind_challenges", "bind_operations"])
+@pytest.mark.parametrize("change", [dict(namespace="slack/poll-relay-state.json"),
+                                      dict(key="unrelated-key"), dict(thread_id=OTHER), dict(active=1)])
+def test_binding_migration_refuses_wrong_namespace_key_session_or_active_ticket(tmp_path, monkeypatch, provider, kind, change):
+    store, _ = binding_fixture(tmp_path / "runtime", monkeypatch, provider)
+    entry = next(entry for entry in raw_binding_rows(store.journal.database) if entry["kind"] == kind)
+    entry.update(change)
+    with pytest.raises(ValueError, match="^relay_authority_migration_record_invalid$"):
+        merge_records([("source", [entry])])
+
+
+@pytest.mark.parametrize("provider", ["lark", "onebot"])
+@pytest.mark.parametrize("kind", ["bind_challenges", "bind_operations"])
+@pytest.mark.parametrize("change", ["metadata", "payload"])
+def test_numeric_binding_duplicate_conflicts_never_choose_timestamp_winner(tmp_path, monkeypatch, provider, kind, change):
+    store, _ = binding_fixture(tmp_path / "runtime", monkeypatch, provider)
+    entry = next(entry for entry in raw_binding_rows(store.journal.database) if entry["kind"] == kind)
+    alternate = dict(entry)
+    if change == "metadata":
+        alternate["created_at"] = "1791388899.25"
+    else:
+        payload = body(alternate)
+        payload["created_at"] += 1
+        alternate["value"] = json.dumps(payload)
+    for copies in ([("old", [entry]), ("new", [alternate])],
+                   [("new", [alternate]), ("old", [entry])]):
+        with pytest.raises(ValueError, match="^relay_authority_migration_record_conflict$"):
+            merge_records(copies)
+        with pytest.raises(ValueError, match="^relay_authority_migration_record_conflict$"):
+            merge_records_with_quarantine(copies)
+
+
+@pytest.mark.parametrize("kind", ["threads", "notifications", "session_routes", "bind_completions", "future_kind"])
+@pytest.mark.parametrize("stamp", ["1791388830.125", "1.79138883e9", "NaN", "2026-10-07T16:00:00"])
+def test_numeric_binding_compatibility_does_not_relax_other_iso_timestamp_policy(kind, stamp):
+    entry = ticket(1) if kind == "threads" else row(kind, "fixture", dict(created_at=STAMP))
+    payload = body(entry)
+    payload["created_at"] = stamp
+    entry.update(created_at=stamp, value=json.dumps(payload))
+    with pytest.raises(ValueError, match="^relay_authority_migration_record_invalid$"):
+        merge_records([("source", [entry])])
 
 
 def test_snapshot_includes_committed_wal_without_changing_original(tmp_path):
