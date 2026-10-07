@@ -611,7 +611,9 @@ with lock.open("w") as handle:
                 time.sleep(0.02)
             assert ready.exists(), "native writer fixture did not start"
             previous_epoch = 0
+            health = node_runtime.parent / "watchdog-control" / THREAD / "runtime/slack/poll-health.json"
             for _ in range(2):
+                previous_health = health.read_bytes() if health.exists() else None
                 process = subprocess.Popen([str(executable), "--runtime", str(node_runtime),
                     "--codex-home", str(node_home), "linux-auto-run", "--interval", "1",
                     "--repo", str(node_repo), "--codex-executable", "/bin/false"],
@@ -636,11 +638,22 @@ with lock.open("w") as handle:
                                      process.stderr.read() if process.poll() is not None else "no observation")
                 assert observation["epoch"] > previous_epoch and native_writer.poll() is None
                 previous_epoch = observation["epoch"]
-                health = node_runtime.parent / "watchdog-control" / THREAD / "runtime/slack/poll-health.json"
-                deadline = time.monotonic() + 5
-                while not health.exists() and time.monotonic() < deadline:
+                # The listener starts before exact native authority activation.
+                # Its first health record can be a fenced retry; require the
+                # actual ready state after bounded retry, including on restart.
+                deadline = time.monotonic() + 25
+                latest_health = None
+                while time.monotonic() < deadline:
+                    assert process.poll() is None, "node controller exited before Slack readiness"
+                    try:
+                        observed_health = health.read_bytes()
+                        latest_health = json.loads(observed_health) if observed_health != previous_health else None
+                    except (FileNotFoundError, json.JSONDecodeError):
+                        pass
+                    if latest_health and latest_health.get("status") == "waiting_for_mapped_notification":
+                        break
                     time.sleep(0.02)
-                assert json.loads(health.read_text())["status"] == "waiting_for_mapped_notification"
+                assert latest_health and latest_health["status"] == "waiting_for_mapped_notification", latest_health
                 process.send_signal(signal.SIGTERM)
                 stdout, stderr = process.communicate(timeout=15)
                 assert process.returncode == 0, (stdout, stderr)

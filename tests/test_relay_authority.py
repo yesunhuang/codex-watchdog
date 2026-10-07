@@ -615,7 +615,9 @@ def _bounded_query_plans(queries):
     assert sum(query["rows"] for query in queries) <= 4
     for query in queries:
         description = " ".join(row[3] for row in query["plan"])
-        assert "SEARCH records USING INDEX session_relay_pending" in description
+        # SQLite 3.26 (the RHEL 8 baseline) includes TABLE in this label.
+        # Keep the indexed seek, compound key and bounded-operation checks.
+        assert "SEARCH records USING INDEX session_relay_pending" in description.replace("SEARCH TABLE ", "SEARCH ")
         assert "namespace,key" in description.replace(" ", "")
         assert "SCAN" not in description and "TEMP B-TREE" not in description
         assert query["steps"] <= 256
