@@ -584,6 +584,12 @@ def main() -> None:
             database.execute("CREATE TABLE threads(id,cwd,source,thread_source,archived,rollout_path,updated_at)")
             database.execute("INSERT INTO threads VALUES (?,?,'vscode','user',0,?,?)",
                              (THREAD, str(node_repo), str(node_rollout), int(time.time())))
+        # Exact native admission must be able to prove this thread's queue is
+        # empty. A missing queue database deliberately fences authority rather
+        # than treating unknown pending work as zero.
+        with sqlite3.connect(node_home / "queue_1.sqlite") as database:
+            database.execute("CREATE TABLE queued_items(id,thread_id,payload_json)")
+            database.execute("CREATE TABLE queued_thread_revisions(thread_id,revision)")
         ready, release = root / "native-writer-ready", root / "native-writer-release"
         native_child = '''import fcntl,os,pathlib,sys,time
 lock,ready,release=map(pathlib.Path,sys.argv[1:4])
@@ -630,7 +636,7 @@ with lock.open("w") as handle:
                         if not line:
                             break
                         for row in json.loads(line)["owners"]:
-                            if row.get("state") == "observing":
+                            if row.get("state") == "observing" and not row.get("observation"):
                                 observation = row
                         if observation:
                             break
