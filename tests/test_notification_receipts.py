@@ -90,8 +90,8 @@ def test_invalid_legacy_is_preserved_without_creating_store_or_sending(tmp_path,
     path.write_text(json.dumps(bad))
     original = path.read_bytes()
     instance, calls = notifier(tmp_path)
-    with pytest.raises(storage.NotificationReceiptError):
-        instance.notify(EVENT)
+    result = instance.notify(EVENT)
+    assert result.status == "delivery_failed" and result.attempted_channels == ()
     assert path.read_bytes() == original and not calls
     assert not (path.parent / "dual-deliveries.sqlite3").exists()
 
@@ -175,8 +175,8 @@ def test_migration_failure_recovers_without_losing_history_or_sending(tmp_path, 
     monkeypatch.setattr(storage.DualDeliveryReceipts, "_commit", commit)
     instance, calls = notifier(tmp_path)
     instance.atomic_writer = writer
-    with pytest.raises(OSError):
-        instance.notify(EVENT)
+    result = instance.notify(EVENT)
+    assert result.status == "delivery_failed" and result.attempted_channels == ()
     assert triggered and not calls
     monkeypatch.setattr(storage, "snapshot_state", original_snapshot)
     monkeypatch.setattr(storage.DualDeliveryReceipts, "_commit", original_commit)
@@ -191,8 +191,8 @@ def test_fresh_creation_commit_before_marker_recovers(tmp_path):
         raise OSError("synthetic marker failure")
     instance, calls = notifier(tmp_path)
     instance.atomic_writer = failed_marker
-    with pytest.raises(OSError):
-        instance.notify(EVENT)
+    result = instance.notify(EVENT)
+    assert result.status == "delivery_failed" and result.attempted_channels == ()
     assert not calls and not (tmp_path / "notifications/dual-deliveries.json").exists()
     with opened(tmp_path) as store:
         assert store.get(FP) == {} and store.claim(FP, "slack")

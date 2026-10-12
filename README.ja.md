@@ -64,8 +64,10 @@ server は必須ではありません。
   WebSocket で generic OneBot 11 を話し、platform 固有の login と protocol maintenance は外部 backend
   が担当します。**NapCat は実機検証済みの QQ reference backend です。WatchDog は NapCat や QQ runtime
   を同梱しません。**
-- **各 conversation の execution owner は一つです。** ownership、destination、delivery が曖昧なら、
-  推測せずに操作を止めます。
+- **各 conversation の execution owner は一つです。** 現在の owner、destination、authorization を
+  確認できない場合は、その操作だけを保留します。
+- **best-effort で、試行は最大一回です。** 許可された一回の試行前に操作を記録します。失敗や
+  結果不明の配信 は自動再試行せず、証拠を保持したまま後続の独立した処理を続けます。
 - **軽量な協調を保ちます。** native session、file、既存ツール、成熟した protocol adapter を再利用し、
   team role や review rule は project の `AGENTS.md` に置きます。
 

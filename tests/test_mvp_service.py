@@ -707,7 +707,7 @@ def test_return_intent_is_ignored_until_a_parked_stop_arrives(tmp_path: Path) ->
     assert [event.event_type for event in notifier.events] == ["codex_parked"]
 
 
-def test_remote_oid_stays_pending_until_existing_queue_record_is_consumed(
+def test_remote_oid_is_attempted_once_without_reconciling_old_outcome(
     tmp_path: Path,
 ) -> None:
     runtime = tmp_path / "runtime"
@@ -745,23 +745,16 @@ def test_remote_oid_stays_pending_until_existing_queue_record_is_consumed(
 
     assert first.workspaces[0].wake["kind"] == "remote_update"
     assert first.workspaces[0].wake["status"] == "enqueued"
-    assert second.workspaces[0].wake["status"] == "enqueued"
-    assert second.workspaces[0].wake["deduplicated"] is True
-    assert third.workspaces[0].wake["status"] == "consumed_or_started"
-    assert queue.remote_calls == [
-        (THREAD_A, OID_B, "watchdog"),
-        (THREAD_A, OID_B, "watchdog"),
-        (THREAD_A, OID_B, "watchdog"),
-    ]
+    assert second.workspaces[0].wake is None
+    assert third.workspaces[0].wake is None
+    assert queue.remote_calls == [(THREAD_A, OID_B, "watchdog")]
     assert not mutator.preserve_calls
-    assert first.workspaces[0].initial_git["head_oid"] == OID_A
-    assert first.workspaces[0].final_git["head_oid"] == OID_A
     assert first_state["pending_remote_oid"] == OID_B
     assert first_state["last_remote_oid"] is None
     assert second_state["pending_remote_oid"] == OID_B
     state = json.loads(service.state_path("watchdog").read_text(encoding="utf-8"))
-    assert state["pending_remote_oid"] is None
-    assert state["last_remote_oid"] == OID_B
+    assert state["pending_remote_oid"] == OID_B  # No invented consumption.
+    assert state["last_attempted_remote_oid"] == OID_B
 
 
 def test_transient_observation_preserves_cursor_pending_wake_and_temporal_prompt(
@@ -818,17 +811,18 @@ def test_transient_observation_preserves_cursor_pending_wake_and_temporal_prompt
     second = service.run_once().workspaces[0]
 
     assert second.stop_count == 1
-    assert second.wake["status"] == "started"
-    assert queue.remote_calls == [(THREAD_A, OID_B, "watchdog")]
-    assert resume.is_file()
+    assert second.wake is None
+    assert queue.remote_calls == []  # Legacy pending ID is already ineligible.
+    assert queue.resume_calls == [THREAD_A]
+    assert not resume.exists()  # Independent resume work is no longer blocked.
     assert [event.event_type for event in notifier.events] == ["codex_parked"]
     final_state = json.loads(service.state_path("watchdog").read_text(encoding="utf-8"))
     assert final_state["audit_cursor"] != original_state["audit_cursor"]
-    assert final_state["pending_remote_oid"] is None
-    assert final_state["last_remote_oid"] == OID_B
+    assert final_state["pending_remote_oid"] == OID_B
+    assert final_state["last_attempted_remote_oid"] == OID_B
 
 
-def test_newer_remote_oid_does_not_replace_an_enqueued_pending_wake(
+def test_newer_remote_oid_is_independent_of_an_enqueued_pending_wake(
     tmp_path: Path,
 ) -> None:
     runtime = tmp_path / "runtime"
@@ -856,10 +850,11 @@ def test_newer_remote_oid_does_not_replace_an_enqueued_pending_wake(
     service.run_once()
 
     state = json.loads(service.state_path("watchdog").read_text(encoding="utf-8"))
-    assert state["pending_remote_oid"] == OID_B
+    assert state["pending_remote_oid"] == OID_C
+    assert state["last_attempted_remote_oid"] == OID_C
     assert queue.remote_calls == [
         (THREAD_A, OID_B, "watchdog"),
-        (THREAD_A, OID_B, "watchdog"),
+        (THREAD_A, OID_C, "watchdog"),
     ]
 
 

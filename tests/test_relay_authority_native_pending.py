@@ -14,6 +14,7 @@ from codex_watchdog.models import sha256_text
 from codex_watchdog.slack_poll import SlackPollingThreadStore
 from test_linux_node import THREAD, nodes
 from test_node_relay_epoch import _observer
+from test_node_observation import foreign_absence
 
 
 QUEUE_ID = "33333333-3333-4333-8333-333333333333"
@@ -73,6 +74,7 @@ def replacement(native):
     home, repo, host, roots, pid = native
     host[0], pid[0] = "login-b.example", 123
     observation = _observer(home, repo, instance="dog-b", boot="boot-b")
+    observation.foreign_writer_check = lambda expected: foreign_absence(expected, home)
     current = authority(observation)
     observation.relay_handoff_safe = current.handoff_safe
     return observation, current
@@ -88,7 +90,7 @@ def test_native_queued_item_blocks_handoff_after_confirmed_relay_enqueue(nodes):
     assert selected.handoff_safe() is False
     with candidate.guard(rollout_stamp=stamp(home)) as admitted:
         assert admitted is False
-    assert candidate.reason == "control_node_relay_pending"
+    assert candidate.reason == "control_node_observation_foreign_queue"
     assert candidate.path.read_bytes() == saved
     assert (home / "queue_1.sqlite").read_bytes() == native_queue
     with pytest.raises(cs.ControlBusy, match="relay_not_selected"):
@@ -122,6 +124,7 @@ def test_native_queue_unavailable_or_ambiguous_cannot_prove_handoff_safe(nodes, 
     assert selected.handoff_safe() is False
     with candidate.guard(rollout_stamp=stamp(home)) as admitted:
         assert admitted is False
+    assert candidate.reason == "control_node_observation_foreign_queue_unverified"
     assert candidate.path.read_bytes() == saved
 
 

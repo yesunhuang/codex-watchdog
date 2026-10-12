@@ -1,28 +1,35 @@
-# Codex WatchDog 2.2.7
+# Codex WatchDog 2.2.8
 
-Linux shared-home relay state now uses one indexed authority for each provider.
-The explicit offline migration preserves existing grants, routes, request UUIDs,
-uncertain deliveries and notification suppression. It requires verified stopped
-listeners and native ownership evidence; an unreachable node is not proof that
-its listener stopped. Conflicting authorization or request identities fail closed.
-See [migration and rollback](LINUX_SESSION_RELAY_AUTHORITY.md).
+WatchDog now reserves each logical effect durably before one permitted external
+attempt. Failed, uncertain, timed-out and crash-left attempts remain ineligible
+for automatic retry. Their original evidence is preserved, while later distinct
+commands, Git observations, notifications and supported handoffs can proceed.
+Historical wake, acknowledgement and completion records no longer gate routine
+activation. Completion reconciliation remains an explicit bounded forensic tool.
 
-Existing Feishu/Lark and OneBot binding records migrate without changing their
-numeric timestamps. SQLite text precision and later binding generations remain
-compatible. ISO checks for other records and strict conflict checks are preserved.
+Current native writers, queued work, live ownership, sender leases and in-flight
+sends retain their guards. Exact-session grants, principals, routes, one-shot
+tickets and UUID deduplication are preserved. Closed or evicted tickets remain
+untracked; the last four valid tickets per provider/session and bounded indexed
+polling, failure isolation and provider backoff remain in effect.
 
-Passive native completion reconciliation requires the exact durable admission,
-matching completed turn and absence of its queued item. It never redispatches an
-old command. Saved credentials, pairings, destinations and settings are reused.
-Closed and evicted tickets remain untracked; the last four still-valid tickets
-per provider and session retain bounded polling and failure isolation.
+Linux handoffs use current authenticated native ownership evidence rather than
+historical receipt settlement. A cross-node transition still needs a verified
+peer transport; automatic peer-route configuration is not included. A refusal
+affects that transition, while independent selected-owner work can continue.
+Existing shared authority state is reused without repeating its offline import.
+See [Linux authority, recovery and rollback](LINUX_SESSION_RELAY_AUTHORITY.md).
 
-Windows x64, Linux x64, Linux ARM64 and macOS ARM64 preview are built from one
-canonical public revision. Windows acceptance includes its embedded application
-icon and the immediately previous public 2.2.5 profile/runtime upgrade path.
-Native acceptance and deployment evidence remain separate from source tests.
+Saved profiles, credentials, pairings, destinations, grants and journals are
+reused. Windows x64, Linux x64, Linux ARM64 and macOS ARM64 preview are built from
+one canonical public revision. Package acceptance includes the immediately
+previous public 2.2.7 profile/runtime upgrade path and the embedded Windows icon.
+Source, package, native deployment and end-to-end acceptance remain distinct.
+Once the candidate has claimed an effect, older 2.2.7 senders and embedded
+helpers do not enforce those new claims. Recover with a reservation-aware build;
+do not automatically restart old senders against post-candidate state or restore
+an older journal. Retained old images support rollback before candidate activity.
 
-macOS remains an ARM64 preview. Other-window ownership coverage and Linux stale
-previous-boot writer recovery limitations remain. Native writer parking alone
-does not establish editor GUI recovery. No new grant or historical replay is
-introduced by this release.
+macOS remains an ARM64 preview. Other-window coverage and Linux stale-boot writer
+recovery limitations remain. Native writer parking does not establish editor GUI
+recovery. No historical request replay or access expansion is introduced.

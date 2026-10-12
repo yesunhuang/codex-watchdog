@@ -423,8 +423,10 @@ def test_notifier_bound_failure_never_falls_back_to_webhook(tmp_path):
     assert not webhook_calls  # webhook must NOT be called for a bound session
 
 
-def test_notifier_unbound_failure_falls_back_to_webhook(tmp_path):
+def test_notifier_unbound_failure_does_not_attempt_same_slack_effect_by_webhook(tmp_path):
+    api_calls = []
     def _post(token, method, payload, timeout):
+        api_calls.append(method)
         raise RuntimeError("channel_error")
 
     webhook_calls: list = []
@@ -443,8 +445,16 @@ def test_notifier_unbound_failure_falls_back_to_webhook(tmp_path):
     rt = _target(3)
     event = NotificationEvent("ws-3", "codex_started", sha256_text("fp3"), "subject", "msg",
                                relay_target=rt)
-    notifier.notify(event)
-    assert len(webhook_calls) == 1  # fallback IS allowed for unbound sessions
+    assert notifier.notify(event).status == "delivery_failed"
+    repeated = notifier.notify(event)
+    assert repeated.status == "delivery_failed"
+    assert repeated.provider_outcomes == {"slack": "uncertain"}
+    assert len(api_calls) == 1 and not webhook_calls
+    # A different logical notification remains eligible even after uncertainty.
+    next_event = NotificationEvent("ws-3", "codex_started", sha256_text("next-fp3"), "subject", "msg",
+                                   relay_target=rt)
+    assert notifier.notify(next_event).status == "delivery_failed"
+    assert len(api_calls) == 2 and not webhook_calls
 
 
 # ── Notifier: end-to-end bind->future notification ───────────────────────────

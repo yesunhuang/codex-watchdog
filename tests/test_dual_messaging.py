@@ -99,18 +99,19 @@ def test_enabling_both_does_not_replay_legacy_events(tmp_path):
     calls = ProviderCalls()
     assert calls.notifier(tmp_path, replace(config(), interactive_transport="slack")).notify(EVENT).status == "sent"
     before = (tmp_path/"notifications/last-events.json").read_bytes()
+    receipt_before = (tmp_path/"notifications/dual-deliveries.json").read_bytes()
     assert calls.notifier(tmp_path).notify(EVENT).duplicate
     assert len(calls.slack) == 1 and not calls.lark
     assert (tmp_path/"notifications/last-events.json").read_bytes() == before
-    assert not (tmp_path/"notifications/dual-deliveries.json").exists()
+    assert (tmp_path/"notifications/dual-deliveries.json").read_bytes() == receipt_before
 
 
 def test_pre_send_journal_failure_prevents_network_and_preserves_legacy_state(tmp_path):
     calls = ProviderCalls()
     def fail(path, value):
         raise OSError("fixture disk failure")
-    with pytest.raises(OSError):
-        calls.notifier(tmp_path, atomic_writer=fail).notify(EVENT)
+    result = calls.notifier(tmp_path, atomic_writer=fail).notify(EVENT)
+    assert result.status == "delivery_failed" and result.attempted_channels == ()
     assert not calls.slack and not calls.lark
 
 
@@ -139,8 +140,8 @@ def test_corrupt_dual_receipt_is_preserved_without_sending(tmp_path):
     path.parent.mkdir()
     path.write_text('{"schema_version":2,"events":{}}')
     calls = ProviderCalls()
-    with pytest.raises(ValueError):
-        calls.notifier(tmp_path).notify(EVENT)
+    result = calls.notifier(tmp_path).notify(EVENT)
+    assert result.status == "delivery_failed" and result.attempted_channels == ()
     assert not calls.slack and not calls.lark
     assert json.loads(path.read_text())["schema_version"] == 2
 

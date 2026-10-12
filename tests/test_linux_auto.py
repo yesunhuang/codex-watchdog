@@ -440,7 +440,7 @@ def test_idle_parking_retains_host_epoch_and_completion_observation(scenario, mo
     assert len(clients) == 1 and store.read()["epoch"] == epoch
 
 
-def test_host_cycle_reconciles_the_saved_pending_wake(scenario):
+def test_host_cycle_does_not_implicitly_probe_the_saved_pending_wake(scenario):
     store, _, _, _, _, _ = scenario
     agent, _ = detached(scenario)
     item = agent.controllers[THREAD]
@@ -448,23 +448,24 @@ def test_host_cycle_reconciles_the_saved_pending_wake(scenario):
         value["remote_state"] = dict(pending_instruction_id="git-attention:fixture", retained=True)
         control_atomic_json(store.path, value)
     calls = []
+    before = store.path.read_bytes()
 
     def probe(target, token, **options):
         calls.append((target, token, options))
-        return dict(status="ok", control=dict(state=store.read()["remote_state"]),
-                    wake=dict(state="started"))
+        return dict(status="ok", control=dict(state=store.read()["remote_state"]))
 
     item["service"].remote_control = SimpleNamespace(probe=probe)
     item["service"]._run_remote_owned = lambda target, cycle, **options: options
     result = agent._cycle(item)
-    assert calls[0][2] == dict(pending_instruction_id="git-attention:fixture")
-    assert result["initial_probe"]["wake"]["state"] == "started"
+    assert calls[0][2] == {}
+    assert "wake" not in result["initial_probe"]
+    assert result["initial_state"]["pending_instruction_id"] == "git-attention:fixture"
     assert result["initial_state"]["retained"] is True
+    assert store.path.read_bytes() == before
 
 
 @pytest.mark.parametrize("scenario", [True], indirect=True)
-def test_history_changed_during_probe_cannot_notify_or_wake(scenario):
-    from codex_watchdog.control_state import ControlBusy
+def test_history_changed_during_probe_does_not_gate_independent_current_work(scenario):
     store, _, writer, _, _, _ = scenario
     agent, owner = detached(scenario)
     owner._idle_since -= 6
@@ -478,11 +479,17 @@ def test_history_changed_during_probe_cannot_notify_or_wake(scenario):
         return dict(status="ok", control=dict(state={}))
 
     item["service"].remote_control = SimpleNamespace(probe=changed_probe)
-    item["service"]._run_remote_owned = lambda *a, **k: pytest.fail("external effect after changed history")
+    calls = []
+    item["service"]._run_remote_owned = lambda *a, **k: (calls.append(k) or SimpleNamespace(status="completed"))
+    native_queue = (store.codex_home / "queue_1.sqlite").read_bytes()
+    old_owner = store.path.read_bytes()
     with item["observation"].guard(rollout_stamp=owner.rollout_stamp) as admitted:
         assert admitted
-        with pytest.raises(ControlBusy, match="history_changed"):
-            agent._cycle(item)
+        assert agent._cycle(item).status == "completed"
+    assert len(calls) == 1 and calls[0]["initial_state"]["session_id"] == THREAD
+    assert writer[0] is None
+    assert store.path.read_bytes() == old_owner
+    assert (store.codex_home / "queue_1.sqlite").read_bytes() == native_queue
 
 
 def test_host_git_courier_rechecks_admission_but_preserves_slack_relay(tmp_path):
@@ -515,10 +522,10 @@ def test_failed_alert_does_not_become_successful_suppression(scenario):
         config=NotificationConfig(slack_webhook_url="https://hooks.slack.invalid/fixture"), http_post=fail)
     writer[0] = None
     assert agent.step()[0]["notification"]["status"] == "delivery_failed"
-    assert agent.step()[0]["notification"]["status"] == "delivery_failed"
+    assert agent.step()[0]["notification"]["status"] == "suppressed"
     assert sends == [1]  # Never replay an external send with an uncertain outcome.
     state = json.loads(owner.health.path.read_text())
-    assert state["pending"] and "fixture secret" not in owner.health.path.read_text()
+    assert not state["pending"] and "fixture secret" not in owner.health.path.read_text()
 
 
 def test_loss_alert_survives_remote_process_restart_without_resending(scenario, monkeypatch):
@@ -678,6 +685,101 @@ def test_stopping_observer_releases_authority_without_touching_vscode(scenario):
     assert agent.step(observe=False)[0]["state"] == "released"
     assert writer[0] == 777 and not clients and not agent.controllers
     assert store.attach("desktop", "desktop-host", "vscode")["epoch"] == 3
+
+
+def _select_foreign_observer(item):
+    observation = item["observation"]
+    selected = json.loads(observation.path.read_text())
+    selected.update(node="node-b.example", boot_id="foreign-boot", writer_live=False)
+    selected["relay_owner"].update(node=selected["node"], boot_id=selected["boot_id"])
+    control_atomic_json(observation.path, selected)
+    return observation.path.read_bytes()
+
+
+@pytest.mark.parametrize("scenario", [True], indirect=True)
+@pytest.mark.parametrize("request_kind", ("stop", "operator_pause", "owner_release"))
+@pytest.mark.parametrize("writer_kind", ("absent", "vscode"))
+def test_foreign_observer_selection_cannot_starve_release_only_owner_step(
+        scenario, monkeypatch, request_kind, writer_kind):
+    from concurrent.futures import ThreadPoolExecutor
+    from codex_watchdog.control_state import ControlBusy
+    from codex_watchdog.node_observation import observation_lock
+    store, _, writer, _, clients, make_agent = scenario
+    agent = make_agent()
+    assert agent.step(observe=False)[0]["state"] == "observing"
+    item = agent.controllers[THREAD]
+    owner = item["owner"]
+    selected = _select_foreign_observer(item)
+    writer[0] = None if writer_kind == "absent" else 777
+    if request_kind == "stop":
+        agent.stopping = True
+    elif request_kind == "operator_pause":
+        with store.guard(item["token"]) as value:
+            value["auto_paused"] = True
+            control_atomic_json(store.path, value)
+    else:
+        owner.release_requested = True
+    monkeypatch.setattr(agent, "_cycle", lambda item: pytest.fail("release must not run observation work"))
+    step = owner.step
+    attempts = []
+
+    def release_step(**options):
+        assert owner.release_requested is True and options == {"observe": False}
+        def competing_admission():
+            with pytest.raises(ControlBusy, match="observation_busy"):
+                with observation_lock(item["observation"].lock_path):
+                    pytest.fail("release must retain the shared current-operation fence")
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(competing_admission).result(timeout=2)
+        attempts.append(True)
+        return step(**options)
+
+    monkeypatch.setattr(owner, "step", release_step)
+
+    result = agent.step()[0]
+
+    assert result["state"] == "released", result
+    assert not agent.controllers and not clients
+    assert writer[0] == (None if writer_kind == "absent" else 777)
+    assert owner.resume_requested is False and owner.binding.load()["state"] == "released"
+    assert item["observation"].path.read_bytes() == selected
+    assert store.read()["owner"] is None
+    assert attempts == [True]
+
+
+@pytest.mark.parametrize("scenario", [True], indirect=True)
+@pytest.mark.parametrize("current_work", ("active", "queued", "idle"))
+def test_release_only_foreign_standby_preserves_actual_native_work_until_idle(
+        scenario, monkeypatch, current_work):
+    store, _, writer, _, clients, _ = scenario
+    agent, owner = detached(scenario)
+    item = agent.controllers[THREAD]
+    selected = _select_foreign_observer(item)
+    client = clients[0]
+    if current_work == "active":
+        owner.thread_status = client.status = "active"
+    elif current_work == "queued":
+        with sqlite3.connect(store.codex_home / "queue_1.sqlite") as db:
+            db.execute("INSERT INTO queued_items VALUES (?,?,'{}')", ("current-work", THREAD))
+    agent.stopping = True
+    monkeypatch.setattr(agent, "_cycle", lambda item: pytest.fail("release must not admit external work"))
+
+    result = agent.step()[0]
+
+    assert result["state"] == ("released" if current_work == "idle" else "releasing"), result
+    assert item["observation"].path.read_bytes() == selected
+    assert [method for method, _ in client.calls].count("thread/resume") == 1
+    if current_work != "idle":
+        assert agent.controllers[THREAD] is item and not client.closed
+        assert writer[0] == client.process.pid
+        if current_work == "queued":
+            with sqlite3.connect(store.codex_home / "queue_1.sqlite") as db:
+                assert db.execute("SELECT id FROM queued_items WHERE thread_id=?", (THREAD,)).fetchall() == [("current-work",)]
+                db.execute("DELETE FROM queued_items WHERE thread_id=?", (THREAD,))
+        owner.thread_status = client.status = "idle"
+        assert agent.step()[0]["state"] == "released"
+    assert not agent.controllers and client.closed and writer[0] is None
+    assert len(clients) == 1 and item["observation"].path.read_bytes() == selected
 
 
 def test_operator_release_stays_paused_until_explicit_bind(scenario, monkeypatch):
@@ -915,7 +1017,7 @@ def test_exited_backend_can_recover_after_ended_uncertain_notification(scenario,
     assert store.read()["external_effect"] is None and len(clients) == 2
 
 
-def test_owner_loop_reconciles_crash_left_sender_before_observing_existing_writer(scenario, monkeypatch):
+def test_owner_loop_preserves_unknown_sender_without_gating_existing_writer(scenario, monkeypatch):
     from codex_watchdog.notification_attempts import local_attempt
     from codex_watchdog.notifications import NotificationEvent
     store, local, writer, clock, clients, make_agent = scenario
@@ -928,15 +1030,19 @@ def test_owner_loop_reconciles_crash_left_sender_before_observing_existing_write
         intent = attempt.start(token, event.event_fingerprint())
         store.prepare_notification(token, intent["fingerprint"], intent["fingerprint"],
                                    intent["operation_id"], intent["sender"])
-    # No notifier/provider is used to reconcile this uncertain, ended intent.
+    saved_intent = attempt.path.read_bytes()
+    saved_effect = store.read()["external_effect"]
+    receipt_path = store.effect_path("notification", intent["fingerprint"])
+    saved_receipt = receipt_path.read_bytes()
+    # Normal observation does not scan, relabel or resend old uncertain work.
     owner.health.notifier = SimpleNamespace(notify=lambda _: pytest.fail("unexpected alert"))
     cycles = []
     monkeypatch.setattr(agent, "_cycle", lambda item: cycles.append(item["token"]) or SimpleNamespace(status="completed"))
     assert agent.step()[0]["state"] == "owned"
-    assert store.read()["external_effect"] is None and cycles == [token]
+    assert store.read()["external_effect"] == saved_effect and cycles == [token]
     assert len(clients) == 1 and not clients[0].closed
-    receipt = json.loads(store.effect_path("notification", intent["fingerprint"]).read_text())
-    assert receipt["result"]["status"] == "uncertain" and receipt["result"]["terminal"]
+    assert attempt.path.read_bytes() == saved_intent
+    assert receipt_path.read_bytes() == saved_receipt
 
 
 def test_auto_cli_passes_repository_scope(scenario, monkeypatch):

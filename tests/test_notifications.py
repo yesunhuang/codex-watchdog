@@ -174,7 +174,7 @@ def test_slack_bot_delivery_persists_exact_reply_thread_without_message_text(
         assert secret not in durable
 
 
-def test_slack_webhook_fallback_keeps_sending_host_without_creating_reply_mapping(tmp_path, monkeypatch):
+def test_ambiguous_slack_api_failure_does_not_attempt_webhook_or_create_mapping(tmp_path, monkeypatch):
     monkeypatch.setattr("codex_watchdog.notifications.socket.gethostname", lambda: "sender-d.example")
     calls = []
     def reject(*args):
@@ -185,11 +185,9 @@ def test_slack_webhook_fallback_keeps_sending_host_without_creating_reply_mappin
     config = NotificationConfig(slack_webhook_url=WEBHOOK, slack_bot_token=SLACK_BOT_TOKEN,
                                 slack_channel_id=SLACK_CHANNEL)
     notifier = EnvironmentNotifier(tmp_path, config, slack_api_post=reject, http_post=post)
-    assert notifier.notify(event()).status == "sent"
-    assert len(calls) == 1
-    assert calls[0].startswith(event().subject + "\nMachine: sender-d.example\n")
-    assert calls[0].count("Machine: sender-d.example") == 1
-    assert "mapping is unavailable" in calls[0]
+    assert notifier.notify(event()).status == "delivery_failed"
+    assert calls == []
+    assert notifier.notify(event()).attempted_channels == ()
     assert not notifier.slack_thread_store.has_notification_mapping(event().event_fingerprint())
 
 
@@ -627,7 +625,7 @@ def test_windows_message_follows_failed_slack_and_smtp(tmp_path: Path) -> None:
     assert len(message_calls) == 1
 
 
-def test_all_configured_delivery_failures_are_hash_only_and_retried(
+def test_all_configured_delivery_failures_are_hash_only_and_not_retried(
     tmp_path: Path,
 ) -> None:
     calls = []
@@ -660,7 +658,8 @@ def test_all_configured_delivery_failures_are_hash_only_and_retried(
     assert second.status == "delivery_failed"
     assert second.duplicate is False
     assert second.state_persisted is False
-    assert calls == ["slack", "windows", "slack", "windows"]
+    assert second.attempted_channels == ()
+    assert calls == ["slack", "windows"]
 
 
 def test_environment_configuration_is_explicit_and_repr_redacts_values() -> None:
@@ -705,25 +704,31 @@ def test_incomplete_smtp_configuration_is_reported_without_attempt(
     assert PASSWORD not in json.dumps(result.to_dict())
 
 
-def test_malformed_state_fails_closed_without_delivery(tmp_path: Path) -> None:
+def test_malformed_cache_is_retained_while_durable_claims_fence_delivery(tmp_path: Path) -> None:
     state = tmp_path / "notifications" / "last-events.json"
     state.parent.mkdir(parents=True)
     state.write_text('{"schema_version": 99, "last_events": {}}', encoding="utf-8")
+    original = state.read_bytes()
     calls = []
 
     def post(_url: str, _payload: bytes, _timeout: float) -> int:
-        calls.append("unexpected")
+        calls.append("sent")
         return 200
 
-    result = EnvironmentNotifier(
+    notifier = EnvironmentNotifier(
         tmp_path, NotificationConfig(slack_webhook_url=WEBHOOK), http_post=post
-    ).notify(event())
+    )
+    result = notifier.notify(event())
 
     assert result.status == "state_error"
-    assert result.channel == "local_audit"
+    assert result.channel == "slack"
     assert result.state_persisted is False
     assert result.error_sha256 is not None
-    assert calls == []
+    assert calls == ["sent"] and state.read_bytes() == original
+    assert notifier.notify(event()).attempted_channels == ()
+    assert calls == ["sent"] and state.read_bytes() == original
+    assert notifier.notify(event("different")).channel == "slack"
+    assert calls == ["sent", "sent"] and state.read_bytes() == original
 
 
 def test_state_write_failure_reports_hash_only_after_delivery(tmp_path: Path) -> None:
@@ -731,7 +736,10 @@ def test_state_write_failure_reports_hash_only_after_delivery(tmp_path: Path) ->
         return 200
 
     def fail_write(_path: Path, _value: Dict[str, Any]) -> None:
-        raise OSError(f"cannot persist {WEBHOOK}")
+        from codex_watchdog.storage import InstructionStore
+        if _path.name == "last-events.json":
+            raise OSError(f"cannot persist {WEBHOOK}")
+        InstructionStore._atomic_json(_path, _value)
 
     result = EnvironmentNotifier(
         tmp_path,

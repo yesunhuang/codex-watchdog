@@ -7,7 +7,6 @@ offline operation; neither a handoff nor a polling tick copies old journals.
 from contextlib import contextmanager
 from copy import deepcopy
 from functools import wraps
-import json
 from pathlib import Path
 import threading
 
@@ -15,6 +14,11 @@ from .control_context import current_control, current_effect
 from .control_state import ControlBusy, ControlError, control_read_json, control_atomic_json
 from .node_observation import observation_lock
 from .models import sha256_text
+
+
+# A real native event exceeded 1 MiB. Four rows per provider still cap a
+# reconciliation cycle at twelve reads (24 MiB); larger records remain unread.
+_NATIVE_COMPLETION_BUDGET = 2 * 1024 * 1024
 
 
 def relay_guarded(method):
@@ -74,12 +78,6 @@ class SessionRelayAuthority:
         if (value.get("state") != "ready" or value.get("codex_home") != str(self.store.codex_home)
                 or value.get("storage") != "cluster_provider_journals_v1"):
             raise ControlError("relay_authority_cluster_invalid")
-        for provider in ("slack", "lark", "onebot"):
-            path = self.runtime / provider / "reply-tickets.sqlite3"
-            if path.is_symlink() or path.resolve() != path:
-                raise ControlError("relay_authority_path_invalid")
-            if provider in value.get("providers", ()) and not path.is_file():
-                raise ControlError("relay_authority_database_missing")
         if not self.manifest.exists():
             if not enroll:
                 raise ControlBusy("relay_authority_migration_required")
@@ -130,18 +128,9 @@ class SessionRelayAuthority:
                     if local.get("auto_paused") is True:
                         raise ControlBusy("relay_authority_paused")
             depth = getattr(self._local, "depth", 0)
-            if depth == 0 and not value["writer_live"]:
-                stamp = value.get("rollout_stamp")
-                if not isinstance(stamp, list) or len(stamp) != 4:
-                    raise ControlBusy("relay_authority_native_snapshot_required")
-                try:
-                    path = Path(stamp[0])
-                    info = path.stat()
-                    actual = [str(path), info.st_ino, info.st_size, info.st_mtime_ns]
-                except OSError:
-                    raise ControlBusy("relay_authority_native_snapshot_changed") from None
-                if actual != stamp:
-                    raise ControlBusy("relay_authority_native_snapshot_changed")
+            # Current selection, capability and held locks fence this effect.
+            # A historical transcript stamp is forensic evidence, not a lease
+            # for new independent traffic or an executor handoff prerequisite.
             self._local.depth = depth + 1
             try:
                 yield
@@ -153,6 +142,17 @@ class SessionRelayAuthority:
         # Observation -> provider journal -> SQLite. Reentrant locks use one
         # descriptor per path, avoiding lockf's close/unlock trap on GPFS.
         with self.guard():
+            if provider not in ("slack", "lark", "onebot"):
+                raise ControlError("relay_authority_provider_invalid")
+            path = self.runtime / provider / "reply-tickets.sqlite3"
+            if path.is_symlink() or path.resolve() != path:
+                raise ControlError("relay_authority_path_invalid")
+            cluster = control_read_json(self.root / "cluster.json")
+            providers = cluster.get("providers", ())
+            if not isinstance(providers, (list, tuple)):
+                raise ControlError("relay_authority_cluster_invalid")
+            if provider in providers and not path.is_file():
+                raise ControlError("relay_authority_database_missing")
             with observation_lock(self.runtime / "locks" / (provider + "-authority.lock")):
                 yield
 
@@ -177,7 +177,19 @@ class SessionRelayAuthority:
 
     def record_native_delivery(self, thread_store, event_key, receipt, *, instruction_id=None,
                                prompt_sha256=None):
+        """Best-effort bounded evidence; never discard an admitted dispatch ACK."""
+        try:
+            return self._record_native_delivery(thread_store, event_key, receipt,
+                instruction_id=instruction_id, prompt_sha256=prompt_sha256)
+        except Exception:
+            # The original event/UUID reservation remains terminal for
+            # automatic attempts even when optional evidence cannot be saved.
+            return False
+
+    def _record_native_delivery(self, thread_store, event_key, receipt, *, instruction_id=None,
+                                prompt_sha256=None):
         from .relay_native_completion import completion_progress
+        from .relay_completion_reconciliation import _BOUNDED_VALUE, _small_json
         # Validation is bounded and read-only. It never turns a transport ACK
         # or a disappeared queue row into model completion.
         if not isinstance(receipt, dict) or receipt.get("thread_id") != self.thread_id:
@@ -185,76 +197,87 @@ class SessionRelayAuthority:
         fields = ("thread_id", "instruction_id", "prompt_sha256", "rollout_path",
                   "rollout_baseline_offset", "queue_message_id")
         receipt = {field: receipt.get(field) for field in fields}
+        if any(isinstance(value, str) and len(value) > 4096 for value in receipt.values()):
+            raise ControlError("relay_authority_native_receipt_invalid")
         progress, _ = completion_progress(receipt, budget=32)
         if progress.get("invalid"):
             raise ControlError("relay_authority_native_receipt_invalid")
         journal = thread_store.journal
         with journal.transaction() as db:
             key = sha256_text(event_key)
-            event = journal.get(db, "events", key)
-            row = db.execute("SELECT thread_id FROM records WHERE namespace=? AND kind='events' AND key=?",
+            row = db.execute("SELECT " + _BOUNDED_VALUE + ",thread_id FROM records "
+                             "WHERE namespace=? AND kind='events' AND key=?",
                              (journal.namespace, key)).fetchone()
+            event = _small_json(row[0]) if row else None
             if (journal.authority is not self or not isinstance(event, dict)
-                    or row != (self.thread_id,)
+                    or row[1] != self.thread_id
+                    or event.get("relay_authority_quarantine") is True
                     or event.get("instruction_id") != receipt["instruction_id"]
                     or event.get("text_sha256") != receipt["prompt_sha256"]
                     or instruction_id is not None and instruction_id != receipt["instruction_id"]
                     or prompt_sha256 is not None and prompt_sha256 != receipt["prompt_sha256"]):
                 raise ControlError("relay_authority_native_receipt_mismatch")
-            old = journal.get(db, "relay_native_receipts", key)
+            old_row = db.execute("SELECT " + _BOUNDED_VALUE + " FROM records "
+                "WHERE namespace=? AND kind='relay_native_receipts' AND key=?",
+                (journal.namespace, key)).fetchone()
+            old = _small_json(old_row[0]) if old_row else None
             value = dict(thread_id=self.thread_id, receipt=deepcopy(receipt), progress=progress)
             if old is not None:
                 if old.get("progress", {}).get("receipt_sha256") != progress.get("receipt_sha256"):
                     raise ControlError("relay_authority_native_receipt_collision")
-                return
+                return True
             journal.put(db, "relay_native_receipts", key, value)
+        return True
 
     def reconcile_completions(self):
-        from .relay_native_completion import completion_progress
+        """Bounded optional forensics, isolated by provider and original row."""
+        from .relay_completion_reconciliation import _BOUNDED_VALUE, _small_json, _settle
+        result = dict(examined=0, completed=0, refusals=[])
         with self.guard():
             for provider in ("slack", "lark", "onebot"):
                 database = self.runtime / provider / "reply-tickets.sqlite3"
                 if not database.exists():
                     continue
-                journal = self.journal(provider)
-                with journal.transaction() as db:
-                    cursor = journal.get(db, "relay_reconcile_cursor", self.thread_id) or {}
-                    after = tuple(cursor.get("after", ()))
-                    if len(after) != 2 or not all(isinstance(item, str) for item in after):
-                        after = ("", "")
-                    query = ("SELECT namespace,key,value FROM records INDEXED BY session_relay_pending "
-                             "WHERE thread_id=? AND active=1 AND kind='events' ")
-                    # Two index seeks, at most four rows/provider/cycle (twelve
-                    # total), independent of completed or unresolved history.
-                    rows = db.execute(query + "AND (namespace,key)>(?,?) ORDER BY namespace,key LIMIT 4",
-                                      (self.thread_id, *after)).fetchall()
-                    if len(rows) < 4:
-                        rows += db.execute(query + "AND (namespace,key)<=(?,?) ORDER BY namespace,key LIMIT ?",
-                                           (self.thread_id, *after, 4-len(rows))).fetchall()
-                    for namespace, key, raw in rows:
-                        old_namespace = journal.namespace
-                        journal.namespace = namespace
-                        try:
-                            proof = journal.get(db, "relay_native_receipts", key)
-                            entry = json.loads(raw)
-                            receipt = proof.get("receipt") if isinstance(proof, dict) else None
-                            if (not isinstance(receipt, dict) or receipt.get("thread_id") != self.thread_id
-                                    or receipt.get("instruction_id") != entry.get("instruction_id")
-                                    or receipt.get("prompt_sha256") != entry.get("text_sha256")):
-                                continue
-                            progress, completed = completion_progress(receipt, proof.get("progress"),
-                                                                      budget=1048576)
-                            proof["progress"] = progress
-                            journal.put(db, "relay_native_receipts", key, proof)
-                            if completed and self._queue_absent(receipt):
-                                entry["native_completed"] = True
-                                entry["native_completion_turn_id"] = progress["turn_id"]
-                                entry["native_completion_receipt_sha256"] = progress["receipt_sha256"]
-                                journal.put(db, "events", key, entry)
-                        finally:
-                            journal.namespace = old_namespace
-                            journal.put(db, "relay_reconcile_cursor", self.thread_id,
-                                        dict(after=[namespace, key], thread_id=self.thread_id))
+                try:
+                    journal = self.journal(provider)
+                    examined, completed, refusals = 0, 0, []
+                    with journal.transaction() as db:
+                        saved = db.execute("SELECT " + _BOUNDED_VALUE + " FROM records "
+                            "WHERE namespace=? AND kind='relay_reconcile_cursor' AND key=?",
+                            (journal.namespace, self.thread_id)).fetchone()
+                        cursor = _small_json(saved[0]) if saved else {}
+                        if not isinstance(cursor, dict):
+                            raise ValueError("relay_completion_cursor_invalid")
+                        after = cursor.get("after", ("", ""))
+                        if (not isinstance(after, (list, tuple)) or len(after) != 2
+                                or not all(isinstance(item, str) and len(item) <= 1024 for item in after)):
+                            raise ValueError("relay_completion_cursor_invalid")
+                        query = ("SELECT namespace,key," + _BOUNDED_VALUE + " FROM records "
+                                 "INDEXED BY session_relay_pending "
+                                 "WHERE thread_id=? AND active=1 AND kind='events' ")
+                        # Two index seeks and at most four bounded rows/provider.
+                        rows = db.execute(query + "AND (namespace,key)>(?,?) ORDER BY namespace,key LIMIT 4",
+                                          (self.thread_id, *after)).fetchall()
+                        if len(rows) < 4:
+                            rows += db.execute(query + "AND (namespace,key)<=(?,?) ORDER BY namespace,key LIMIT ?",
+                                               (self.thread_id, *after, 4-len(rows))).fetchall()
+                        for namespace, key, raw in rows:
+                            try:
+                                completed += int(_settle(db, self.store, namespace, key, raw,
+                                                        _NATIVE_COMPLETION_BUDGET))
+                            except Exception:
+                                refusals.append(dict(provider=provider, reason="relay_completion_record_unavailable"))
+                            examined += 1
+                            cursor = dict(cursor, after=[namespace, key], thread_id=self.thread_id)
+                            journal.put(db, "relay_reconcile_cursor", self.thread_id, cursor)
+                    result["completed"] += completed
+                    result["examined"] += examined
+                    result["refusals"] += refusals
+                except Exception:
+                    # No provider or callback fault makes old unknown outcomes
+                    # a prerequisite for fresh traffic through another journal.
+                    result["refusals"].append(dict(provider=provider, reason="relay_completion_journal_unavailable"))
+        return result
 
     def _queue_absent(self, receipt):
         from contextlib import closing
@@ -286,24 +309,13 @@ class SessionRelayAuthority:
         return RemoteSshTarget(local["authority"], self.repo_path, local["storage_key"], (self.thread_id,))
 
     def handoff_safe(self):
-        """An unresolved portable dispatch cannot silently change executor."""
-        import sqlite3
+        """Preserve actual native FIFO work, independently of old audit outcomes."""
         from .linux_owner import pending_count
         try:
             if pending_count(self.store.codex_home, self.thread_id):
                 return False
         except ValueError:
             return False
-        for provider in ("slack", "lark", "onebot"):
-            database = self.runtime / provider / "reply-tickets.sqlite3"
-            if not database.exists():
-                continue
-            with observation_lock(self.runtime / "locks" / (provider + "-authority.lock")):
-                with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=1) as db:
-                    pending = db.execute("SELECT 1 FROM records INDEXED BY session_relay_pending "
-                        "WHERE thread_id=? AND active=1 AND kind='events' LIMIT 1", (self.thread_id,)).fetchone()
-                    if pending:
-                        return False
         return True
 
 

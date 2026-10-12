@@ -79,7 +79,7 @@ def test_live_send_lease_cannot_be_reconciled_or_taken_over(controlled):
         before = store.path.read_bytes()
         with pytest.raises(ControlBusy):
             reconcile_local_notifications(store, runtime)
-        with pytest.raises(ControlError, match="external_effect_unresolved"):
+        with pytest.raises(ControlBusy, match="operation_in_progress"):
             store.claim_remote("new", "host", "absent")
         assert store.path.read_bytes() == before
     finally:
@@ -186,7 +186,7 @@ def test_reconciliation_reads_only_exact_intent_and_does_not_scan_history(contro
     monkeypatch.setattr(Path, "glob", lambda *a, **kw: pytest.fail("history scan"))
     monkeypatch.setattr(Path, "rglob", lambda *a, **kw: pytest.fail("history scan"))
     reconcile_local_notifications(store, runtime)
-    assert reads == [attempt.path] and store.read()["external_effect"] is None
+    assert reads == [attempt.path] * 3 and store.read()["external_effect"] is None
 
 
 def test_wrong_sender_cannot_clear_another_exact_operation(controlled):

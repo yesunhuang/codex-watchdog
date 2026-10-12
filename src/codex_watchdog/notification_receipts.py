@@ -237,6 +237,103 @@ class DualDeliveryReceipts(AbstractContextManager):
                 "receipt_sha256": digest}
 
 
+class FallbackDeliveryReceipts(AbstractContextManager):
+    """Independent one-shot SMTP/desktop claims; existing dual receipts stay intact."""
+
+    def __init__(self, runtime):
+        self.directory = Path(runtime) / "notifications"
+        self.database = self.directory / "fallback-deliveries.sqlite3"
+        self.db = None
+
+    def __enter__(self):
+        if self.database.is_symlink():
+            raise NotificationReceiptError("notification_fallback_path_invalid")
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self.db = sqlite3.connect(str(self.database), timeout=1, isolation_level=None)
+        try:
+            self.db.execute("PRAGMA synchronous=FULL")
+            self.db.execute("BEGIN IMMEDIATE")
+            version = self.db.execute("PRAGMA user_version").fetchone()[0]
+            if version == 0:
+                if self.db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchone():
+                    raise NotificationReceiptError("notification_fallback_schema_invalid")
+                self.db.execute("""CREATE TABLE receipts (
+                    fingerprint TEXT NOT NULL,
+                    provider TEXT NOT NULL CHECK(provider IN ('smtp','windows_msg')),
+                    target_sha256 TEXT NOT NULL,
+                    payload_sha256 TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK(state IN ('uncertain','sent')),
+                    PRIMARY KEY(fingerprint,provider))""")
+                self.db.execute("PRAGMA user_version=1")
+            elif version != 1:
+                raise NotificationReceiptError("notification_fallback_schema_invalid")
+            fields = self.db.execute("PRAGMA table_info(receipts)").fetchall()
+            known = {row[1]: row for row in fields}
+            if (not {"fingerprint", "provider", "target_sha256", "payload_sha256", "state"} <= known.keys()
+                    or [row[1] for row in sorted(fields, key=lambda row: row[5]) if row[5]] != ["fingerprint", "provider"]
+                    or any(known[name][2].upper() != "TEXT" or known[name][3] != 1
+                           for name in ("fingerprint", "provider", "target_sha256", "payload_sha256", "state"))):
+                raise NotificationReceiptError("notification_fallback_schema_invalid")
+            self.db.commit()
+            return self
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
+
+    def __exit__(self, *_):
+        if self.db is not None:
+            try:
+                if self.db.in_transaction:
+                    self.db.rollback()
+            finally:
+                self.db.close()
+                self.db = None
+
+    @staticmethod
+    def _identity(fingerprint, provider, target_sha256, payload_sha256):
+        for value in (fingerprint, target_sha256, payload_sha256):
+            DualDeliveryReceipts._fingerprint(value)
+        if provider not in ("smtp", "windows_msg"):
+            raise NotificationReceiptError("notification_fallback_provider_invalid")
+
+    def claim(self, fingerprint, provider, target_sha256, payload_sha256):
+        """Return prior terminal eligibility, or None for one committed new claim."""
+        self._identity(fingerprint, provider, target_sha256, payload_sha256)
+        try:
+            self.db.execute("BEGIN IMMEDIATE")
+            previous = self.db.execute("SELECT target_sha256,payload_sha256,state FROM receipts "
+                "WHERE fingerprint=? AND provider=?", (fingerprint, provider)).fetchone()
+            if previous is not None:
+                if previous[:2] != (target_sha256, payload_sha256) or previous[2] not in ("uncertain", "sent"):
+                    raise NotificationReceiptError("notification_fallback_identity_collision")
+                self.db.commit()
+                return previous[2]
+            self.db.execute("INSERT INTO receipts(fingerprint,provider,target_sha256,payload_sha256,state) "
+                "VALUES(?,?,?,?,'uncertain')", (fingerprint, provider, target_sha256, payload_sha256))
+            self.db.commit()  # Durable before the one possible external attempt.
+            return None
+        except BaseException:
+            if self.db.in_transaction:
+                self.db.rollback()
+            raise
+
+    def confirm_sent(self, fingerprint, provider):
+        DualDeliveryReceipts._fingerprint(fingerprint)
+        if provider not in ("smtp", "windows_msg"):
+            raise NotificationReceiptError("notification_fallback_provider_invalid")
+        try:
+            self.db.execute("BEGIN IMMEDIATE")
+            changed = self.db.execute("UPDATE receipts SET state='sent' WHERE fingerprint=? "
+                "AND provider=? AND state='uncertain'", (fingerprint, provider)).rowcount
+            if changed != 1:
+                raise NotificationReceiptError("notification_fallback_confirmation_invalid")
+            self.db.commit()
+        except BaseException:
+            if self.db.in_transaction:
+                self.db.rollback()
+            raise
+
+
 def export_legacy(runtime, *, atomic_writer=InstructionStore._atomic_json):
     """Export a stopped runtime without loading configuration or credentials."""
     runtime = Path(runtime)

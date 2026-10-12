@@ -61,15 +61,17 @@ def test_host_priority_fences_live_desktop_and_falls_back_after_host_expiry(cont
 
 
 def test_host_priority_preserves_uncertain_send_and_completed_receipts(control):
-    store, _ = control
+    store, now = control
     local = attached(store)
     prepared = store.prepare_notification(local, "completion", "fingerprint")
-    before = store.path.read_bytes()
-    with pytest.raises(ControlError, match="external_effect_unresolved"):
-        store.claim_remote("host", "remote-host", "vscode", host_observer=True)
-    assert store.path.read_bytes() == before
-    store.finish_notification(local, "completion", prepared["operation_id"], {"status": "sent"}, ())
+    original = store.effect_path("notification", "completion").read_bytes()
+    assert store.claim_remote("host", "remote-host", "vscode", host_observer=True) is None
+    now[0] += 21  # A current foreign capability remains fenced until it ends.
     remote = store.claim_remote("host", "remote-host", "vscode", host_observer=True)
+    assert remote is not None
+    assert store.effect_path("notification", "completion").read_bytes() == original
+    assert store.prepare_notification(remote, "completion", "fingerprint")["duplicate"]
+    store.finish_notification(local, "completion", prepared["operation_id"], {"status": "sent"}, ())
     assert store.prepare_notification(remote, "completion", "fingerprint")["duplicate"]
 
 
@@ -236,22 +238,22 @@ def test_uncertain_send_is_never_replayed_by_a_replacement_owner(control):
     assert effects == ["sent"]
 
 
-def test_external_action_barrier_survives_timeout_disconnect_and_reboot(control):
+def test_external_action_claim_survives_without_blocking_distinct_owner_after_reboot(control):
     store, now = control
     token = attached(store)
     store.begin_external(token, "operation-one")
     now[0] += 3601
     rebooted = ControlStore(store.directory.parent.parent, THREAD, store.repo_path,
                             clock=lambda: 1, boot_id="boot-two")
-    for candidate in (store, rebooted):
-        with pytest.raises(ControlError, match="external_effect_unresolved"):
-            candidate.claim_remote("remote-one", "remote-host", "absent")
-        with pytest.raises(ControlError, match="external_effect_unresolved"):
-            candidate.attach("desktop-other", "desktop-host", "vscode")
-    with pytest.raises(ControlError, match="external_effect_mismatch"):
-        store.finish_external(token, "wrong-operation")
-    store.finish_external(token, "operation-one")
-    assert rebooted.claim_remote("remote-one", "remote-host", "absent")["epoch"] == 2
+    first = store.effect_path("external", "operation-one").read_bytes()
+    replacement = rebooted.claim_remote("remote-one", "remote-host", "absent")
+    assert replacement["epoch"] == 2
+    assert store.effect_path("external", "operation-one").read_bytes() == first
+    with pytest.raises(ControlError, match="stale_epoch"):
+        store.finish_external(token, "operation-one")
+    with pytest.raises(ControlError, match="duplicate"):
+        rebooted.begin_external(replacement, "operation-one")
+    rebooted.begin_external(replacement, "operation-two")
 
 
 def test_effect_and_handoff_share_one_kernel_lock(control):

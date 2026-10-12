@@ -29,9 +29,36 @@ class NotificationAttempt:
     def lease(self):
         return control_file_lock(self.lock_path)
 
+    def effect_path(self, fingerprint):
+        key = hashlib.sha256(str(fingerprint).encode()).hexdigest()
+        return self.path.with_name(self.path.stem + "-" + key + ".json")
+
+    def effect_lease(self, fingerprint):
+        return control_file_lock(self.effect_path(fingerprint).with_suffix(".lock"))
+
+    def _save(self, value):
+        # The indexed effect record, not this convenience pointer, permanently
+        # reserves eligibility. A broken historical pointer cannot block a
+        # different effect or erase its own original evidence.
+        control_atomic_json(self.effect_path(value["fingerprint"]), value)
+        if self.path.exists():
+            try:
+                old = self.read()
+                if old is not None and old["fingerprint"] != value["fingerprint"]:
+                    old_path = self.effect_path(old["fingerprint"])
+                    if not old_path.exists():
+                        control_atomic_json(old_path, old)
+            except (ControlError, OSError, ValueError):
+                return
+        control_atomic_json(self.path, value)
+
     def read(self):
+        if self.path.is_symlink():
+            raise ControlError("control_notification_attempt_invalid")
         if not self.path.exists():
             return None
+        if self.path.stat().st_size > 131072:
+            raise ControlError("control_notification_attempt_invalid")
         value = control_read_json(self.path)
         if (value.get("target") != self.target or value.get("sender") != self.sender
                 or value.get("phase") not in ("active", "terminal", "finalized")
@@ -44,19 +71,35 @@ class NotificationAttempt:
         return value
 
     def start(self, token, fingerprint, mapping_sources=()):
+        path = self.effect_path(fingerprint)
+        if path.is_symlink():
+            raise ControlError("control_notification_attempt_invalid")
+        if path.exists():
+            old = control_read_json(path)
+            if (old.get("target") != self.target or old.get("fingerprint") != fingerprint
+                    or old.get("sender") != self.sender):
+                raise ControlError("control_notification_attempt_invalid")
+            return dict(old, duplicate=True)
+        try:
+            previous = self.read()
+        except (ControlError, OSError, ValueError):
+            previous = None  # Retain malformed pointer; forensic repair is optional.
+        if previous is not None and previous["fingerprint"] == fingerprint:
+            control_atomic_json(path, previous)
+            return dict(previous, duplicate=True)
         value = dict(schema_version=1, phase="active", target=self.target, sender=self.sender,
                      token=dict(token), fingerprint=fingerprint, operation_id=str(uuid.uuid4()),
                      mapping_sources=list(mapping_sources))
-        control_atomic_json(self.path, value)  # Before the possibly disconnected prepare RPC.
+        self._save(value)  # Before the possibly disconnected prepare RPC.
         return value
 
     def terminal(self, value, result, mappings):
         value = dict(value, phase="terminal", result=result, relay_mappings=list(mappings))
-        control_atomic_json(self.path, value)  # All sends ended; finish-RPC failure cannot erase this.
+        self._save(value)  # All sends ended; finish-RPC failure cannot erase this.
         return value
 
     def finalized(self, value):
-        control_atomic_json(self.path, dict(value, phase="finalized"))
+        self._save(dict(value, phase="finalized"))
 
     def reconcile(self, finish):
         """Caller holds the lease; no scan, provider call, TTL/PID guess or replay."""

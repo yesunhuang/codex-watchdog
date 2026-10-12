@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import closing, ExitStack
+from itertools import islice
 import json
 from pathlib import Path
 import signal
@@ -38,18 +39,18 @@ def vscode_writer(pid: int) -> bool:
 
 
 def pending_count(codex_home: Path, thread: str) -> int:
-    counts = []
-    for path in codex_home.glob("queue_*.sqlite"):
-        try:
-            with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
-                counts.append(db.execute(
-                    "SELECT COUNT(*) FROM queued_items WHERE thread_id=?", (thread,)
-                ).fetchone()[0])
-        except sqlite3.Error:
-            continue
-    if len(counts) != 1:
+    paths = list(islice(codex_home.glob("queue_*.sqlite"), 2))
+    if len(paths) != 1:
         raise LinuxBindingError("linux_queue_unavailable_or_ambiguous")
-    return counts[0]
+    path = paths[0]
+    try:
+        if path.is_symlink() or path.resolve() != path or not path.is_file():
+            raise LinuxBindingError("linux_queue_unavailable_or_ambiguous")
+        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+            db.execute("PRAGMA query_only=ON")
+            return db.execute("SELECT COUNT(*) FROM queued_items WHERE thread_id=?", (thread,)).fetchone()[0]
+    except (sqlite3.Error, OSError):
+        raise LinuxBindingError("linux_queue_unavailable_or_ambiguous") from None
 
 
 def node_has_queued_wake(codex_home: Path, thread: str) -> bool:

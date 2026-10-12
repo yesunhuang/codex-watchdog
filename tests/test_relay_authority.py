@@ -23,6 +23,7 @@ from codex_watchdog.slack_bot_acl import BotRequestReused
 from codex_watchdog.slack_poll import SlackPollingThreadStore, SlackReplyPoller
 from codex_watchdog.slack_relay import SlackReplyRelay
 from test_linux_node import THREAD, nodes
+from test_node_observation import foreign_absence
 from test_slack_bot_acl import BOT, CHANNEL, Harness
 
 
@@ -57,10 +58,12 @@ def _node(nodes, node=LOGIN6, *, thread=THREAD, activate=True, boot=None,
     with sqlite3.connect(home / "queue_1.sqlite") as db:
         db.execute("CREATE TABLE IF NOT EXISTS queued_items(id,thread_id,payload_json)")
         db.execute("CREATE TABLE IF NOT EXISTS queued_thread_revisions(thread_id,revision)")
+    (home / "thread-writer-locks" / (thread + ".lock")).touch(exist_ok=True)
     store = cs.ControlStore(home, thread, repo, clock=lambda: clock, boot_id=boot or "boot-" + node)
     store.enroll_node()
     token = store.claim_remote(instance or "dog-" + node, node, "vscode", host_observer=True)
     observation = NodeObservation(store, token)
+    observation.foreign_writer_check = lambda expected: foreign_absence(expected, home)
     authority = SessionRelayAuthority(store, token, observation, "workspace-" + thread)
     cluster = authority.root / "cluster.json"
     if not cluster.exists():
@@ -256,7 +259,7 @@ def test_paused_token_cannot_modify_shared_claims_or_cursors(nodes):
 
 
 @pytest.mark.parametrize("outcome", ["dispatching", "uncertain", "enqueued", "consumed_or_started", "started"])
-def test_pending_portable_dispatch_blocks_handoff_without_reusing_native_state(nodes, outcome):
+def test_unknown_portable_dispatch_allows_handoff_without_reusing_native_state(nodes, outcome):
     home = nodes[0]
     first, six = _node(nodes)
     target = _target(first)
@@ -268,18 +271,18 @@ def test_pending_portable_dispatch_blocks_handoff_without_reusing_native_state(n
         six.store.finish_reply(args["event_key"], state_value="uncertain", delivery_status="exception")
     elif outcome != "dispatching":
         six.store.finish_reply(args["event_key"], state_value="delivered", delivery_status=outcome)
-    assert not first.handoff_safe()
+    assert first.handoff_safe()
     _park(nodes, first)
-    observation_before = first.observation.path.read_bytes()
     owner_before = first.store.path.read_bytes()
     native_db = (home / "state_5.sqlite").read_bytes()
+    before = _rows(six.store.journal.database)
     second, _ = _node(nodes, LOGIN3, activate=False)
-    assert not _admit(second, home)
-    assert second.observation.reason == "control_node_relay_pending"
-    assert first.observation.path.read_bytes() == observation_before
+    assert _admit(second, home)
+    assert second.observation.reason is None
     assert first.store.path.read_bytes() == owner_before
     assert (home / "state_5.sqlite").read_bytes() == native_db
-    assert second.expected is None
+    assert _rows(six.store.journal.database) == before
+    assert second.expected["relay_epoch"] == first.expected["relay_epoch"] + 1
 
 
 def test_existing_native_effect_composes_nested_authority_journal_locks(nodes):
@@ -413,24 +416,113 @@ def test_native_receipt_is_bound_to_exact_admitted_event_before_storage(nodes, m
     evidence = _completed_native_receipt(authority, args, **changes)
     key = "never-admitted-event" if mismatch == "unadmitted" else args["event_key"]
     before = _rows(harness.store.journal.database)
-    with pytest.raises(cs.ControlError, match="native_receipt"):
-        authority.record_native_delivery(harness.store, key, evidence)
+    assert authority.record_native_delivery(harness.store, key, evidence) is False
     assert _rows(harness.store.journal.database) == before
-    assert not authority.handoff_safe()
+    assert authority.handoff_safe()
 
 
-def test_exact_native_receipt_reconciles_original_pending_barrier_without_replay(nodes):
+def test_exact_native_receipt_updates_only_forensic_completion_without_replay(nodes):
     authority, harness, args = _admitted_native_fixture(nodes)
     evidence = _completed_native_receipt(authority, args)
     authority.record_native_delivery(harness.store, args["event_key"], evidence)
     harness.store.finish_reply(args["event_key"], state_value="delivered", delivery_status="enqueued")
-    assert not authority.handoff_safe()
+    assert authority.handoff_safe()  # Unknown history never gates independent work.
     authority.reconcile_completions()
     assert authority.handoff_safe()
     original = harness.store.lookup_reply(args["event_key"])
     assert original["native_completed"] is True
     assert original["instruction_id"] == args["instruction_id"]
     assert harness.store.claim_reply(**args) == (False, "enqueued")
+
+
+def _native_record_of_size(size):
+    # The real stalled line was 1,534,442 bytes. Keep valid, irrelevant JSON
+    # at that exact byte width rather than using an unterminated fragment.
+    prefix = b'{"type":"event_msg","payload":{"type":"agent_message","text":"'
+    suffix = b'"}}\n'
+    return prefix + b"x" * (size - len(prefix) - len(suffix)) + suffix
+
+
+def _pending_oversized_receipt(authority, harness, args, size, *, duplicate=False,
+                               wrong_turn=False):
+    receipt = _completed_native_receipt(authority, args)
+    path = Path(receipt["rollout_path"])
+    wake, terminal = path.read_bytes().splitlines(keepends=True)
+    if wrong_turn:
+        event = json.loads(terminal)
+        event["payload"]["turn_id"] = "55555555-5555-4555-8555-555555555555"
+        terminal = (json.dumps(event) + "\n").encode()
+    path.write_bytes(wake + _native_record_of_size(size) + terminal + (wake if duplicate else b""))
+    authority.record_native_delivery(harness.store, args["event_key"], receipt)
+    harness.store.finish_reply(args["event_key"], state_value="delivered", delivery_status="enqueued")
+    # Preserve actual progress stuck immediately before the oversized line,
+    # including its inode/boundary hash and already matched exact turn.
+    progress, completed = completion_progress(receipt, budget=1048576)
+    assert not completed and progress["offset"] == len(wake)
+    repeated, completed = completion_progress(receipt, progress, budget=1048576)
+    assert not completed and repeated["offset"] == progress["offset"]
+    assert repeated["reason"] == "native_event_unread" and not repeated["invalid"]
+    with harness.store.journal.transaction() as db:
+        key = sha256_text(args["event_key"])
+        proof = harness.store.journal.get(db, "relay_native_receipts", key)
+        proof["progress"] = repeated
+        harness.store.journal.put(db, "relay_native_receipts", key, proof)
+    return receipt, repeated
+
+
+def test_reconcile_advances_past_real_sized_record_to_exact_same_turn_eof_without_replay(nodes):
+    authority, harness, args = _admitted_native_fixture(nodes)
+    receipt, stalled = _pending_oversized_receipt(authority, harness, args, 1534442)
+    original_bytes = Path(receipt["rollout_path"]).read_bytes()
+    authority.reconcile_completions()
+    original = harness.store.lookup_reply(args["event_key"])
+    with harness.store.journal.transaction() as db:
+        progress = harness.store.journal.get(db, "relay_native_receipts", sha256_text(args["event_key"]))["progress"]
+    assert progress["offset"] == len(original_bytes) > stalled["offset"]
+    assert progress["turn_id"] == stalled["turn_id"] and progress["terminal"] and not progress["invalid"]
+    assert progress["bytes_read"] <= 2 * 1024 * 1024
+    assert original["native_completed"] is True and authority.handoff_safe()
+    assert harness.store.claim_reply(**args) == (False, "enqueued")
+    assert _active(harness.store) == {}  # Closed parent stays untracked.
+    assert Path(receipt["rollout_path"]).read_bytes() == original_bytes
+
+
+@pytest.mark.parametrize("case", ["wrong_turn", "duplicate_after_terminal"])
+def test_reconcile_oversized_record_does_not_weaken_same_turn_eof_proof(nodes, case):
+    authority, harness, args = _admitted_native_fixture(nodes)
+    receipt, stalled = _pending_oversized_receipt(authority, harness, args, 1534442,
+        wrong_turn=case == "wrong_turn", duplicate=case == "duplicate_after_terminal")
+    authority.reconcile_completions()
+    with harness.store.journal.transaction() as db:
+        progress = harness.store.journal.get(db, "relay_native_receipts", sha256_text(args["event_key"]))["progress"]
+    if case == "wrong_turn":
+        assert progress["offset"] == Path(receipt["rollout_path"]).stat().st_size
+        assert not progress["terminal"] and not progress["invalid"]
+    else:
+        assert progress["invalid"]  # EOF audit detects the second matching wake.
+    assert progress["turn_id"] == stalled["turn_id"]
+    assert harness.store.lookup_reply(args["event_key"]).get("native_completed") is not True
+    assert authority.handoff_safe()
+    assert harness.store.claim_reply(**args) == (False, "enqueued")
+    assert _active(harness.store) == {}
+
+
+def test_reconcile_above_record_cap_stays_unread_without_skipping_or_reopening(nodes):
+    authority, harness, args = _admitted_native_fixture(nodes)
+    receipt, stalled = _pending_oversized_receipt(authority, harness, args, 2 * 1024 * 1024 + 1)
+    before = Path(receipt["rollout_path"]).read_bytes()
+    for _ in range(2):
+        authority.reconcile_completions()
+        with harness.store.journal.transaction() as db:
+            progress = harness.store.journal.get(db, "relay_native_receipts", sha256_text(args["event_key"]))["progress"]
+        assert progress["offset"] == stalled["offset"]
+        assert progress["reason"] == "native_event_unread" and not progress["invalid"]
+        assert progress["bytes_read"] <= 2 * 1024 * 1024
+        assert harness.store.lookup_reply(args["event_key"]).get("native_completed") is not True
+        assert authority.handoff_safe()
+        assert harness.store.claim_reply(**args) == (False, "enqueued")
+        assert _active(harness.store) == {}
+    assert Path(receipt["rollout_path"]).read_bytes() == before
 
 
 @pytest.mark.parametrize("mismatch", ["thread", "instruction", "prompt"])
@@ -450,7 +542,7 @@ def test_persisted_native_proof_is_revalidated_against_original_pending_event(no
         authority.reconcile_completions()
     except cs.ControlError:
         pass  # A specific validation error is also a safe refusal.
-    assert not authority.handoff_safe()
+    assert authority.handoff_safe()
     assert harness.store.lookup_reply(args["event_key"]).get("native_completed") is not True
 
 
@@ -466,11 +558,11 @@ def test_first_relay_epoch_preserves_same_node_selected_observer_with_pending_wo
     # writer and unchanged node/boot, gaining relay fencing for the first time.
     assert _admit(authority, nodes[0])
     assert authority.expected["relay_epoch"] == 1
-    assert not authority.handoff_safe()  # First activation did not clear work.
+    assert authority.handoff_safe()  # The old receipt is retained, not retried.
     _park(nodes, authority)
     replacement, _ = _node(nodes, LOGIN3, activate=False)
-    assert not _admit(replacement, nodes[0])
-    assert replacement.observation.reason == "control_node_relay_pending"
+    assert _admit(replacement, nodes[0])
+    assert replacement.observation.reason is None
 
 
 def test_fresh_native_session_becomes_ready_after_completed_cluster_migration(nodes):
@@ -510,19 +602,19 @@ def test_same_boot_native_controller_restart_can_reconcile_without_changing_exec
 
 
 @pytest.mark.parametrize("changed", ["boot", "executor"])
-def test_boot_or_executor_change_cannot_recover_an_unresolved_relay_as_same_owner(nodes, changed):
+def test_boot_or_executor_change_selects_new_epoch_without_replaying_unknown_relay(nodes, changed):
     first, harness, args = _admitted_native_fixture(nodes)
     harness.store.finish_reply(args["event_key"], state_value="delivered", delivery_status="enqueued")
     if changed == "executor":
         _park(nodes, first)
-    before = first.observation.path.read_bytes()
+    before = _rows(harness.store.journal.database)
     replacement, _ = _node(nodes, LOGIN3 if changed == "executor" else LOGIN6,
         activate=False, clock=200, instance="dog-different",
         boot="boot-different" if changed == "boot" else None)
-    assert not _admit(replacement, nodes[0])
-    assert replacement.observation.reason == "control_node_relay_pending"
-    assert first.observation.path.read_bytes() == before
-    assert replacement.expected is None
+    assert _admit(replacement, nodes[0])
+    assert replacement.observation.reason is None
+    assert _rows(harness.store.journal.database) == before
+    assert replacement.expected["relay_epoch"] == first.expected["relay_epoch"] + 1
 
 
 @pytest.mark.parametrize("linked", ["authority", "sessions"])
@@ -582,7 +674,8 @@ def _observe_pending_queries(monkeypatch):
     class Cursor(sqlite3.Cursor):
         def execute(self, statement, parameters=()):
             self.observed = None
-            if statement.startswith("SELECT namespace,key,value FROM records INDEXED BY session_relay_pending"):
+            if (statement.startswith("SELECT namespace,key,")
+                    and "FROM records INDEXED BY session_relay_pending" in statement):
                 plan = self.connection.cursor().execute("EXPLAIN QUERY PLAN " + statement, parameters).fetchall()
                 self.observed = dict(sql=statement, parameters=parameters, plan=plan, steps=0)
                 queries.append(self.observed)
@@ -621,6 +714,63 @@ def _bounded_query_plans(queries):
         assert "namespace,key" in description.replace(" ", "")
         assert "SCAN" not in description and "TEMP B-TREE" not in description
         assert query["steps"] <= 256
+
+
+def test_reconcile_record_budget_and_row_rotation_bound_all_provider_work(nodes, monkeypatch):
+    from codex_watchdog import relay_native_completion as native
+    from codex_watchdog import relay_completion_reconciliation as reconciliation
+    authority, _ = _node(nodes)
+    journals = []
+    for provider in ("slack", "lark", "onebot"):
+        journal = _grow_history(authority, provider, 0, 8, 10000)
+        journals.append(journal)
+        for number in range(8):
+            receipt = _completed_native_receipt(authority,
+                dict(instruction_id="slackbot:stress-" + str(number), text="bounded fixture"))
+            original = Path(receipt["rollout_path"])
+            wake, terminal = original.read_bytes().splitlines(keepends=True)
+            if number < 4:
+                original.write_bytes(wake + _native_record_of_size(2 * 1024 * 1024 + 1) + terminal)
+            path = original.with_name("{}-{}.jsonl".format(provider, number))
+            original.rename(path)
+            receipt["rollout_path"] = str(path)
+            progress, _ = completion_progress(receipt, budget=32)
+            with journal.transaction() as db:
+                journal.put(db, "relay_native_receipts", "{:064x}".format(number),
+                    dict(thread_id=authority.thread_id, receipt=receipt, progress=progress))
+    calls = []
+    parse = native.completion_progress
+    def observed(receipt, progress=None, budget=65536):
+        result = parse(receipt, progress, budget=budget)
+        calls.append(dict(budget=budget, bytes_read=result[0]["bytes_read"], completed=result[1]))
+        return result
+    monkeypatch.setattr(native, "completion_progress", observed)
+    monkeypatch.setattr(reconciliation, "completion_progress", observed)
+    queries = _observe_pending_queries(monkeypatch)
+    authority.reconcile_completions()
+    assert len(calls) == 12 and sum(call["bytes_read"] for call in calls) == 24 * 1024 * 1024
+    assert all(call["budget"] == 2 * 1024 * 1024 and not call["completed"] for call in calls)
+    assert len(queries) == 3 and sum(query["rows"] for query in queries) == 12
+    for query in queries:
+        _bounded_query_plans([query])
+    calls.clear()
+    queries.clear()
+    authority.reconcile_completions()
+    assert len(calls) == 12 and sum(call["bytes_read"] for call in calls) <= 24 * 1024 * 1024
+    assert all(call["completed"] for call in calls)  # Oversized parents did not starve healthy receipts.
+    assert len(queries) == 3 and sum(query["rows"] for query in queries) == 12
+    for query in queries:
+        _bounded_query_plans([query])
+    for journal in journals:
+        with journal.transaction() as db:
+            assert db.execute("SELECT COUNT(*) FROM records WHERE kind='events' AND active=0").fetchone() == (10004,)
+            assert db.execute("SELECT COUNT(*) FROM records WHERE kind='events' AND active=1").fetchone() == (4,)
+            for number in range(4):
+                key = "{:064x}".format(number)
+                proof = journal.get(db, "relay_native_receipts", key)
+                assert proof["progress"]["reason"] == "native_event_unread"
+                assert proof["progress"]["offset"] < Path(proof["receipt"]["rollout_path"]).stat().st_size
+                assert journal.get(db, "events", key)["native_completed"] is False
 
 
 @pytest.mark.parametrize("provider", ["slack", "lark", "onebot"])

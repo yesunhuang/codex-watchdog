@@ -72,12 +72,13 @@ def test_git_attention_queues_existing_thread_without_changed_upstream_and_survi
     restarted._run_remote_owned(TARGET, "repeat")
     assert len([c for c in adapter.calls if "wake" in c]) == 1
     state = json.loads(state_path.read_text())
-    assert state["pending_instruction_id"] is None
+    assert state["pending_instruction_id"] == instruction  # Normal ticks do not reconcile history.
+    assert all("pending_instruction_id" not in call for call in adapter.calls)
     assert state["last_remote_oid"] == (HEAD if upstream else PREVIOUS)
     assert state["retained_user_choice"] is True
 
 
-def test_uncertain_attention_wake_is_not_resent_or_replaced_by_a_new_commit(tmp_path):
+def test_uncertain_attention_wake_is_not_resent_and_new_commit_is_independent(tmp_path):
     adapter = GitBlocker()
     adapter.receipt_state = "uncertain"
     instance = service(tmp_path, adapter)
@@ -87,8 +88,9 @@ def test_uncertain_attention_wake_is_not_resent_or_replaced_by_a_new_commit(tmp_
     adapter.git.update(upstream_oid=PREVIOUS, topology="remote_changed", blockers=[])
     restarted = service(tmp_path, adapter)
     restarted._run_remote_owned(TARGET, "new-commit")
-    assert len([c for c in adapter.calls if "wake" in c]) == 1
-    assert json.loads(restarted.state_path(TARGET.workspace_id).read_text())["pending_instruction_id"] == instruction
+    wakes = [c["wake"]["instruction_id"] for c in adapter.calls if "wake" in c]
+    assert len(wakes) == 2 and wakes[0] == instruction and wakes[1].startswith("git:")
+    assert json.loads(restarted.state_path(TARGET.workspace_id).read_text())["pending_instruction_id"] == wakes[1]
 
 
 def test_commit_wake_covers_the_same_git_attention_without_a_second_prompt(tmp_path):

@@ -66,8 +66,11 @@ required.
   generic OneBot 11 over an authenticated forward WebSocket. The external backend
   owns platform-specific login and protocol maintenance. **NapCat is the tested
   QQ reference backend; WatchDog does not bundle NapCat or a QQ runtime.**
-- **One execution owner per conversation.** Ambiguous ownership, destination, or
-  delivery blocks action rather than guessing.
+- **One execution owner per conversation.** Current owner, destination and
+  authorization checks defer only the action they cannot safely establish.
+- **Best-effort, at-most-once delivery.** WatchDog records an effect before its
+  one permitted attempt. Failed or uncertain delivery is not retried automatically;
+  the evidence remains, and later distinct work can proceed.
 - **Keep coordination lightweight.** Reuse native sessions, files, existing
   tools, and mature protocol adapters. Team roles and review rules belong in the
   project's `AGENTS.md`.

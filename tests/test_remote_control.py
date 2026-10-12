@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -45,6 +46,155 @@ def helper(tmp_path, monkeypatch):
     target = RemoteSshTarget("ssh-remote+example.invalid", REPO, "a" * 32, (THREAD,))
     store = ns["ControlStore"](codex, THREAD, REPO)
     return adapter, target, store, clock, writer
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="native same-user kernel proof requires POSIX")
+@pytest.mark.parametrize("pid,kind", [(None, "absent"), (777, "vscode")])
+def test_foreign_writer_observation_is_exact_current_read_only(helper, pid, kind):
+    adapter, target, store, clock, writer = helper
+    path = store.codex_home / "thread-writer-locks" / (THREAD + ".lock")
+    path.parent.mkdir()
+    path.write_bytes(b"native lock fixture")
+    writer[0] = pid
+    result = adapter.probe(target, control=dict(action="writer_observation", thread_id=THREAD))
+    assert result["status"] == "ok"
+    assert result["thread_id"] == THREAD and result["repo_path"] == REPO
+    assert result["writer_kind"] == kind and result["boot_id"] == "boot"
+    assert result["uid"] == os.getuid() and result["writer_lock_inode"] == path.stat().st_ino
+    assert result["observed_at"] > 0 and not store.path.exists()
+    assert path.read_bytes() == b"native lock fixture"
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="native same-user kernel proof requires POSIX")
+@pytest.mark.parametrize("missing,pid", [(True, None), (False, 888)])
+def test_foreign_writer_observation_never_calls_missing_or_unknown_absent(helper, missing, pid):
+    adapter, target, store, clock, writer = helper
+    if not missing:
+        path = store.codex_home / "thread-writer-locks" / (THREAD + ".lock")
+        path.parent.mkdir()
+        path.write_bytes(b"native lock fixture")
+    writer[0] = pid
+    result = adapter.probe(target, control=dict(action="writer_observation", thread_id=THREAD))
+    assert result["status"] == "unavailable" and result["reason"] == "control_native_writer_unverified"
+    assert not store.path.exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="native same-user kernel proof requires POSIX")
+def test_foreign_native_proof_preserves_accepted_host_local_lock_alias(helper, tmp_path, monkeypatch):
+    adapter, target, store, clock, writer = helper
+    base = tmp_path / "native-user-runtime"
+    base.mkdir(mode=0o700)
+    native = base / "codex-native-runtime"
+    native.mkdir(mode=0o700)
+    locks = native / "thread-writer-locks"
+    locks.mkdir(mode=0o700)
+    path = locks / (THREAD + ".lock")
+    path.write_bytes(b"existing host-local native lock")
+    logical = store.codex_home / "thread-writer-locks"
+    logical.symlink_to(locks, target_is_directory=True)
+    adapter.namespace["control_native_runtime_root"] = lambda: native
+    writer[0] = None
+    result = adapter.probe(target, control=dict(action="writer_observation", thread_id=THREAD))
+    assert result["status"] == "ok" and result["writer_kind"] == "absent"
+    assert result["writer_lock_path"] == str(path) and result["writer_lock_inode"] == path.stat().st_ino
+    assert logical.is_symlink() and path.read_bytes() == b"existing host-local native lock"
+    # An arbitrary replacement alias is not the supported native boundary.
+    adapter.namespace["control_native_runtime_root"] = lambda: base / "unrelated"
+    refused = adapter.probe(target, control=dict(action="writer_observation", thread_id=THREAD))
+    assert refused["status"] == "unavailable" and not store.path.exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="native same-user kernel proof requires POSIX")
+@pytest.mark.parametrize("alias", [False, True])
+def test_foreign_missing_lock_is_explicit_read_only_absence_under_private_parent(helper, tmp_path, alias):
+    adapter, target, store, _, _ = helper
+    logical = store.codex_home / "thread-writer-locks"
+    if alias:
+        base = tmp_path / "native-user-runtime"
+        base.mkdir(mode=0o700)
+        native = base / "codex-native-runtime"
+        native.mkdir(mode=0o700)
+        parent = native / "thread-writer-locks"
+        parent.mkdir(mode=0o700)
+        logical.symlink_to(parent, target_is_directory=True)
+        adapter.namespace["control_native_runtime_root"] = lambda: native
+    else:
+        parent = logical
+        parent.mkdir(mode=0o700)
+    lock = parent / (THREAD + ".lock")
+    identity = parent.stat()
+    def unexpected_kernel_read(*args):
+        pytest.fail("missing leaf must never be opened or created to probe a kernel owner")
+    adapter.namespace["control_kernel_owner"] = unexpected_kernel_read
+    result = adapter.probe(target, control=dict(action="writer_observation", thread_id=THREAD))
+    assert result["status"] == "ok" and result["writer_kind"] == "absent"
+    assert result["writer_lock_exists"] is False and result["writer_lock_inode"] is None
+    assert result["writer_lock_path"] == str(lock)
+    assert result["writer_lock_parent_path"] == str(parent)
+    assert result["writer_lock_parent_inode"] == identity.st_ino
+    assert result["uid"] == os.getuid() and result["boot_id"] == "boot"
+    assert not lock.exists() and not store.path.exists() and list(parent.iterdir()) == []
+    assert parent.stat().st_mtime_ns == identity.st_mtime_ns
+    assert logical.is_symlink() is alias
+    # Other callers still require a real existing lock by default.
+    with pytest.raises(ControlError, match="native_writer_unverified"):
+        adapter.namespace["control_native_writer_lock"](store.codex_home, THREAD)
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="native same-user kernel proof requires POSIX")
+@pytest.mark.parametrize("fault", ["public_parent", "leaf_symlink", "leaf_permission", "wrong_alias"])
+def test_foreign_missing_lock_never_treats_invalid_boundary_as_absence(helper, tmp_path, monkeypatch, fault):
+    adapter, target, store, _, _ = helper
+    parent = store.codex_home / "thread-writer-locks"
+    parent.mkdir(mode=0o700)
+    lock = parent / (THREAD + ".lock")
+    if fault == "public_parent":
+        parent.chmod(0o755)
+    elif fault == "leaf_symlink":
+        lock.symlink_to(tmp_path / "missing-target")
+    elif fault == "wrong_alias":
+        other = tmp_path / "untrusted-thread-writer-locks"
+        parent.rename(other)
+        parent.symlink_to(other, target_is_directory=True)
+    else:
+        original = Path.lstat
+        def denied(path, *args, **kwargs):
+            if path == lock:
+                raise PermissionError("synthetic inaccessible leaf")
+            return original(path, *args, **kwargs)
+        monkeypatch.setattr(Path, "lstat", denied)
+    result = adapter.probe(target, control=dict(action="writer_observation", thread_id=THREAD))
+    assert result["status"] == "unavailable" and "writer_kind" not in result
+    assert not store.path.exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="native same-user kernel proof requires POSIX")
+@pytest.mark.parametrize("race", ["leaf_appears", "parent_replaced", "parent_mode_changed"])
+def test_foreign_missing_lock_requires_two_absent_samples_of_same_private_parent(helper, race):
+    adapter, target, store, _, _ = helper
+    parent = store.codex_home / "thread-writer-locks"
+    parent.mkdir(mode=0o700)
+    lock = parent / (THREAD + ".lock")
+    resolver = adapter.namespace["control_native_writer_lock"]
+    calls = []
+    def racing_resolver(*args, **kwargs):
+        calls.append(True)
+        if len(calls) == 2:
+            if race == "leaf_appears":
+                lock.write_bytes(b"new native writer lock")
+            elif race == "parent_replaced":
+                parent.rename(parent.with_name("old-native-locks"))
+                parent.mkdir(mode=0o700)
+            else:
+                parent.chmod(0o755)
+        return resolver(*args, **kwargs)
+    adapter.namespace["control_native_writer_lock"] = racing_resolver
+    result = adapter.probe(target, control=dict(action="writer_observation", thread_id=THREAD))
+    assert len(calls) == 2
+    assert result["status"] == "unavailable" and result["reason"] == "control_native_writer_unverified"
+    assert not store.path.exists()
+    if race == "leaf_appears":
+        assert lock.read_bytes() == b"new native writer lock"
 
 
 class Notifier:
@@ -98,6 +248,32 @@ def test_desktop_service_auto_observes_and_detaches_without_manual_binding(helpe
     assert store.claim_remote("remote", "host", "absent")["epoch"] == 2
 
 
+@pytest.mark.parametrize("historical", [b"{", b"null", b"x" * 131073],
+                         ids=["malformed", "null", "oversized"])
+def test_acquire_observes_current_git_without_reading_historical_pending_wake(helper, tmp_path, historical):
+    adapter, target, store, clock, writer = helper
+    client = RemoteControlClient(adapter, tmp_path, instance="desktop", locality="desktop-host")
+    token = client.acquire(target, {})["control"]["token"]
+    with store.guard(token) as value:
+        value["remote_state"] = dict(session_id=THREAD, repo_path=REPO,
+            pending_instruction_id="git:historical", future_choice="retain")
+        control_atomic_json(store.path, value)
+    path = adapter.namespace["wake_record_path"]("git:historical")
+    path.write_bytes(historical)
+    original_state = store.read()["remote_state"]
+    result = client.acquire(target, {})
+    assert result["status"] == "ok" and result["control"]["token"] == token
+    assert result["git"]["head_oid"] == "a" * 40 and "wake" not in result
+    assert path.read_bytes() == historical and store.read()["remote_state"] == original_state
+    # Explicit forensic requests retain their distinct API and conservative
+    # error/result semantics; only implicit routine acquisition is removed.
+    calls = []
+    adapter.namespace["observe_pending_wake"] = lambda *args: calls.append(args) or dict(state="uncertain")
+    explicit = client.probe(target, token, pending_instruction_id="git:historical")
+    assert explicit["wake"]["state"] == "uncertain"
+    assert calls == [("git:historical", THREAD, REPO)]
+
+
 def test_two_desktops_share_canonical_notification_receipt_across_aliases(helper, tmp_path):
     adapter, target, store, clock, writer = helper
     adapter.namespace["rollout_completion"] = lambda _: dict(
@@ -145,7 +321,7 @@ def test_remote_crash_local_fallback_and_stale_save_are_fenced(helper, tmp_path)
     assert store.path.read_bytes() == before
 
 
-def test_uncertain_notification_blocks_takeover_instead_of_duplicate(helper, tmp_path):
+def test_uncertain_notification_preserves_dedup_without_blocking_new_owner(helper, tmp_path):
     adapter, target, store, clock, writer = helper
     client = RemoteControlClient(adapter, tmp_path, instance="desktop", locality="desktop-host")
     token = client.acquire(target, {})["control"]["token"]
@@ -153,14 +329,14 @@ def test_uncertain_notification_blocks_takeover_instead_of_duplicate(helper, tmp
     assert prepared["receipt"]["duplicate"] is False
     clock[0] += 1000
     writer[0] = None
-    with pytest.raises(ControlError, match="external_effect_unresolved"):
-        store.claim_remote("remote", "host", "absent")
-    duplicate = client.request(target, "notification_prepare", token=token, event_id="event", fingerprint="sha")
+    replacement = store.claim_remote("remote", "host", "absent")
+    assert replacement["epoch"] == 2
+    duplicate = client.request(target, "notification_prepare", token=replacement, event_id="event", fingerprint="sha")
     assert duplicate["receipt"]["duplicate"] is True
     assert duplicate["receipt"]["state"] == "uncertain"
     client.request(target, "notification_finish", token=token, event_id="event",
                    operation_id=prepared["receipt"]["operation_id"], result={"status": "sent"})
-    assert store.claim_remote("remote", "host", "absent")["epoch"] == 2
+    assert store.read()["owner"]["instance"] == "remote"
 
 
 def test_prior_released_binding_runtime_is_reused_from_saved_profile(helper, tmp_path):
@@ -214,7 +390,8 @@ def test_remote_update_uses_one_journal_across_desktop_and_remote_epoch(helper, 
         instruction_id=state["pending_instruction_id"], prompt="changed content",
     ))
     # Changed content is an explicit collision and never a second courier call.
-    assert result["wake"]["reason"] == "remote_wake_id_collision"
+    assert result["wake"]["state"] == "rejected"
+    assert result["wake"]["reason"] == "wake_attempt_id_collision"
     assert len(calls) == 1
 
 
@@ -332,7 +509,7 @@ def test_slack_mapping_survives_upgrade_notification_and_owner_handoff(helper, t
 
 
 @pytest.mark.parametrize("boundary", ["prepare_reply_lost", "finish_before_commit", "finish_reply_lost"])
-def test_sender_restart_reconciles_exact_rpc_attempt_without_resending(helper, tmp_path, monkeypatch, boundary):
+def test_sender_restart_retains_exact_rpc_attempt_without_resending(helper, tmp_path, monkeypatch, boundary):
     from codex_watchdog.notification_attempts import remote_attempt
     from codex_watchdog.notifications import NotificationEvent
     adapter, target, store, clock, writer = helper
@@ -351,8 +528,12 @@ def test_sender_restart_reconciles_exact_rpc_attempt_without_resending(helper, t
             raise ControlError("control_transport_unavailable")
         return result
     monkeypatch.setattr(adapter, "probe", disconnect)
-    with pytest.raises(ControlError, match="transport_unavailable"):
-        client.notify(target, token, event, notifier)
+    if boundary == "prepare_reply_lost":
+        with pytest.raises(ControlError, match="transport_unavailable"):
+            client.notify(target, token, event, notifier)
+    else:
+        result = client.notify(target, token, event, notifier)
+        assert result["status"] == "sent" and "receipt_commit_error_sha256" in result
     attempted = len(notifier.events)
     assert attempted == (0 if boundary == "prepare_reply_lost" else 1)
     intent = remote_attempt(tmp_path, target, token["thread_id"]).read()
@@ -363,7 +544,8 @@ def test_sender_restart_reconciles_exact_rpc_attempt_without_resending(helper, t
     replacement = restarted.acquire(target, {})["control"]["token"]
     assert replacement["epoch"] == 2 and store.read()["external_effect"] is None
     receipt = json.loads(store.effect_path("notification", event.event_fingerprint()).read_text())
-    assert receipt["state"] == "completed" and receipt["operation_id"] == original_operation
+    assert receipt["state"] == ("completed" if boundary == "finish_reply_lost" else "uncertain")
+    assert receipt["operation_id"] == original_operation
     assert restarted.notify(target, replacement, event, notifier)["duplicate"]
     assert len(notifier.events) == attempted
     next_event = NotificationEvent("fixture", "stopped", "two", "Fixture", "Fixture")
@@ -403,8 +585,7 @@ def test_pending_old_view_does_not_freeze_another_thread_in_same_window(helper, 
             raise ControlError("control_transport_unavailable")
         return original(*args, **kwargs)
     monkeypatch.setattr(adapter, "probe", fail_finish)
-    with pytest.raises(ControlError):
-        client.notify(target, token, first, Notifier(tmp_path))
+    assert "receipt_commit_error_sha256" in client.notify(target, token, first, Notifier(tmp_path))
     pending = remote_attempt(tmp_path, target, THREAD).read()
     assert pending["phase"] == "terminal"
     monkeypatch.setattr(adapter, "probe", original)

@@ -77,17 +77,24 @@ def test_rebind_preserves_pending_git_and_never_resends_old_delivery(tmp_path, m
         "thread_id": THREAD_A, "source": "remote_git", "prompt_sha256": sha256_text(REMOTE_UPDATE_PROMPT),
         "state": "uncertain", "future_setting": "retain"})
     receipt_bytes = record.read_bytes()
+    runner_calls = []
     def forbidden_runner(*args, **kwargs):
+        runner_calls.append(True)
         raise AssertionError("An old uncertain delivery must never be resent")
     service.queue_dispatcher = QueueWakeDispatcher(service.runtime, codex_home=service.codex_home,
                                                    codex_executable="fixture-codex", runner=forbidden_runner)
     service.git_adapter = FakeAdapter({str(new.repo_root): [observation(new.repo_root, upstream=OID_B, topology="remote_ahead")]})
+    detected_at = "2026-09-01T00:00:30Z"
+    monkeypatch.setattr("codex_watchdog.mvp_service.utc_now", lambda: detected_at)
     result = service.run_once().workspaces[0]
     assert result.status == "completed" and result.stop_count == 1
     assert result.wake["status"] == "exception"
     updated = json.loads(path.read_text())
     assert updated["pending_remote_oid"] == OID_B
-    assert updated["pending_remote_detected_at"] == state["pending_remote_detected_at"]
+    # Current observation advances normally; the old one-attempt receipt is
+    # preserved separately and cannot authorize another native delivery.
+    assert updated["pending_remote_detected_at"] == detected_at
+    assert runner_calls == []
     assert record.read_bytes() == receipt_bytes
     assert updated["session_id"] == THREAD_B
 

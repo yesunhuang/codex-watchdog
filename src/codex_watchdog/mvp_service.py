@@ -541,13 +541,9 @@ class MvpWatchdogService:
         state = initial_state if initial_state is not None else self._read_remote_state(state_path, target)
         state["presence_tracking"] = True
         state["last_seen_at"] = utc_now()
-        pending_instruction = state.get("pending_instruction_id")
-        probe = initial_probe if initial_probe is not None else self._remote_probe(
-            target,
-            pending_instruction_id=(
-                pending_instruction if isinstance(pending_instruction, str) else None
-            ),
-        )
+        # Historical delivery reconciliation is optional forensic work. Normal
+        # observation must not depend on its transcript, queue UUID or outcome.
+        probe = initial_probe if initial_probe is not None else self._remote_probe(target)
         notifications: List[Dict[str, Any]] = []
         if probe.get("status") != "ok":
             reason = str(probe.get("reason", "remote_adapter_unavailable"))
@@ -584,6 +580,7 @@ class MvpWatchdogService:
             state.update(
                 last_completion_turn=None,
                 last_remote_oid=None,
+                last_attempted_remote_oid=None,
                 pending_remote_oid=None,
                 pending_instruction_id=None,
                 last_git_attention=None,
@@ -663,9 +660,10 @@ class MvpWatchdogService:
                     )
                 )
             )
-        if attention_id and str(state.get("pending_instruction_id", "")).startswith("git:"):
-            # The existing Git prompt already asks Codex to inspect this state.
-            state["last_git_attention"] = attention_id
+        # Upgrade without replaying an already attempted legacy pending ID.
+        attempted = state.get("last_attempted_remote_oid",
+                              state.get("pending_remote_oid") or state.get("last_remote_oid"))
+        state["last_attempted_remote_oid"] = attempted
         if wake is not None and wake.get("state") in _COMPLETED_WAKE_STATES:
             if state.get("pending_remote_oid") is not None:
                 state["last_remote_oid"] = state["pending_remote_oid"]
@@ -678,14 +676,14 @@ class MvpWatchdogService:
             if not str(state.get("pending_instruction_id", "")).startswith("git-attention:"):
                 state["pending_remote_oid"] = None
                 state["pending_instruction_id"] = None
-        elif isinstance(remote_oid, str) and state.get("pending_instruction_id") is None:
+        elif isinstance(remote_oid, str):
             if (
-                state.get("last_remote_oid") is None
+                attempted is None
                 and git.get("topology")
                 in ("remote_ahead", "remote_changed", "diverged")
             ) or (
-                state.get("last_remote_oid") is not None
-                and remote_oid != state.get("last_remote_oid")
+                attempted is not None
+                and remote_oid != attempted
             ):
                 instruction_id = (
                     f"git:{sha256_text(workspace_id)[:16]}:{remote_oid.lower()}"
@@ -702,15 +700,15 @@ class MvpWatchdogService:
                     if isinstance(probe.get("wake"), dict)
                     else {"state": "uncertain"}
                 )
+                state["last_attempted_remote_oid"] = remote_oid
                 state["pending_remote_oid"] = remote_oid
                 state["pending_instruction_id"] = instruction_id
                 if attention_id:
                     state["last_git_attention"] = attention_id
-        elif isinstance(remote_oid, str) and state.get("last_remote_oid") is None:
-            state["last_remote_oid"] = remote_oid
+            elif attempted is None and state.get("last_remote_oid") is None:
+                state["last_remote_oid"] = remote_oid
 
-        if (attention_id and state.get("pending_instruction_id") is None
-                and state.get("last_git_attention") != attention_id):
+        if attention_id and state.get("last_git_attention") != attention_id:
             # A valid upstream hash is a change trigger, not a prerequisite
             # for waking the exact existing thread to handle a Git blocker.
             # The stable ID also lets the courier reconcile a crash after send.
@@ -1216,36 +1214,23 @@ class MvpWatchdogService:
             # the queued turn, where task context is available.
             remote_trigger: Optional[str] = None
             remote_oid = current.upstream_oid
+            attempted = state.get("last_attempted_remote_oid",
+                                  state.get("pending_remote_oid") or state.get("last_remote_oid"))
             if remote_oid is not None:
-                pending_oid = state["pending_remote_oid"]
-                last_remote_oid = state["last_remote_oid"]
-                changed = False
                 if remote_oid == current.head_oid:
-                    if pending_oid is not None or last_remote_oid != remote_oid:
-                        state["last_remote_oid"] = remote_oid
-                        state["pending_remote_oid"] = None
-                        state["pending_remote_detected_at"] = None
-                        changed = True
-                elif pending_oid is None:
-                    if last_remote_oid is None and current.topology in (
-                        "remote_ahead",
-                        "remote_changed",
-                        "diverged",
-                    ):
-                        state["pending_remote_oid"] = remote_oid
-                        state["pending_remote_detected_at"] = utc_now()
-                        changed = True
-                    elif last_remote_oid is None:
-                        state["last_remote_oid"] = remote_oid
-                        changed = True
-                    elif remote_oid != last_remote_oid:
-                        state["pending_remote_oid"] = remote_oid
-                        state["pending_remote_detected_at"] = utc_now()
-                        changed = True
-                if changed:
-                    self._write_state(state_path, state)
-                if isinstance(state["pending_remote_oid"], str):
-                    remote_trigger = state["pending_remote_oid"]
+                    state["last_remote_oid"] = remote_oid
+                    state["pending_remote_oid"] = None
+                    state["pending_remote_detected_at"] = None
+                elif (attempted is not None and remote_oid != attempted
+                      or attempted is None and current.topology in
+                      ("remote_ahead", "remote_changed", "diverged")):
+                    state["pending_remote_oid"] = remote_oid
+                    state["pending_remote_detected_at"] = utc_now()
+                    remote_trigger = remote_oid
+                elif state["last_remote_oid"] is None and attempted is None:
+                    state["last_remote_oid"] = remote_oid
+                state["last_attempted_remote_oid"] = attempted
+                self._write_state(state_path, state)
 
             wake: Optional[Dict[str, Any]] = None
             resume_path = self.runtime / "resume_prompt.md"
@@ -1259,6 +1244,7 @@ class MvpWatchdogService:
                 allow_resume=not resume_is_ambiguous,
             )
             if wake is not None and wake.get("kind") == "remote_update":
+                state["last_attempted_remote_oid"] = remote_trigger
                 if wake.get("status") in _COMPLETED_WAKE_STATES:
                     state["last_remote_oid"] = remote_trigger
                     state["pending_remote_oid"] = None

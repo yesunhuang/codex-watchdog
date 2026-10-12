@@ -16,7 +16,9 @@ import uuid
 from .models import sha256_text, utc_now, validate_instruction_id, validate_prompt
 from .linux_binding import LinuxBindingError, sender_guard
 from .control_context import effect_guard
-from .control_state import ControlBusy, ControlError
+from .control_state import (
+    ControlBusy, ControlError, control_wake_attempt_lock, control_wake_attempt_claim,
+)
 from .platform_adapters import detect_platform_adapter
 from .process_environment import codex_process_environment
 from .storage import InstructionCollisionError, InstructionStore, StoreBusyError
@@ -186,6 +188,8 @@ class QueueWakeDispatcher:
         timeout_seconds: float = 30.0,
     ) -> QueueReceipt:
         thread_id = _canonical_uuid(thread_id, "thread id")
+        instruction_id = validate_instruction_id(instruction_id)
+        prompt = validate_prompt(prompt)
         try:
             with ExitStack() as scope:
                 # A brief owner observation may hold the same fence. Retry only
@@ -203,6 +207,14 @@ class QueueWakeDispatcher:
                         sleep(min(0.05, remaining))
                         if monotonic() >= deadline:
                             raise
+                from .control_state import control_git_retirement_lock, control_git_retirement_read
+                scope.enter_context(control_git_retirement_lock(self.codex_home, instruction_id))
+                retirement = control_git_retirement_read(
+                    self.codex_home, instruction_id, thread_id, prompt_sha256=sha256_text(prompt))
+                if retirement is not None:
+                    return QueueReceipt(instruction_id, thread_id, "rejected", "",
+                                        "git_wake_retired_no_replay", 1)
+                scope.enter_context(control_wake_attempt_lock(self.codex_home, instruction_id))
                 return self._guarded_dispatch(thread_id, instruction_id, prompt, source, timeout_seconds)
         except ControlError as exc:
             return QueueReceipt(instruction_id, thread_id, "rejected", "", str(exc), 1)
@@ -269,7 +281,14 @@ class QueueWakeDispatcher:
                 if existing_state == "accepted":
                     existing_state = "enqueued"
                 existing_record = existing
+                # Adopt compatible pre-upgrade receipts into the shared ID
+                # reservation without changing their delivery evidence.
+                control_wake_attempt_claim(self.codex_home, instruction_id, thread_id, digest)
             else:
+                attempt = control_wake_attempt_claim(self.codex_home, instruction_id, thread_id, digest)
+                if attempt["duplicate"]:
+                    return QueueReceipt(instruction_id, thread_id, "uncertain", "",
+                                        "wake_attempt_already_claimed", 1, deduplicated=True)
                 record = {
                     "schema_version": 2,
                     "instruction_id": instruction_id,
@@ -611,7 +630,15 @@ class QueueWakeDispatcher:
                         return None  # An offset inside an event is not a delivery boundary.
                 handle.seek(baseline)
                 remaining = snapshot.st_size - baseline
+                # Passive confirmation is optional; historical growth cannot
+                # monopolize a normal queue/continuation tick.
+                if remaining + bool(baseline) > 2 * 1024 * 1024:
+                    return None
+                records = 0
                 while remaining:
+                    records += 1
+                    if records > 512:
+                        return None
                     # Stream complete events in one fixed snapshot. A long-lived
                     # receipt must not materialize hundreds of MB of native history.
                     line = handle.readline(remaining)
@@ -668,7 +695,7 @@ class QueueWakeDispatcher:
                 if ((current.st_dev, current.st_ino) != (snapshot.st_dev, snapshot.st_ino)
                         or os.fstat(handle.fileno()).st_size < snapshot.st_size):
                     return None
-        except (OSError, ValueError, UnicodeError):
+        except (OSError, ValueError, UnicodeError, RecursionError):
             return None
         if len(proven_turns) != 1 or message_turns & conflicting_turns:
             return None

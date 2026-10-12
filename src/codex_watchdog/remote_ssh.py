@@ -458,6 +458,15 @@ def rollout_started(record):
 
 
 def observe_wake(record):
+    retirement = control_git_retirement_read(remote_codex_home(), record.get("instruction_id"),
+                                            record.get("thread_id"), prompt_sha256=record.get("prompt_sha256"))
+    if retirement is not None:
+        # Retirement is an explicit disposition, never admission/completion.
+        # Preserve the original uncertain courier receipt byte for byte.
+        return dict(record, state="retired", reason="git_wake_retired_no_replay",
+                    retirement=retirement)
+    if record.get("state") == "retired":
+        raise ControlError("git_retirement_unbacked_state")
     thread = canonical_uuid(record.get("thread_id"))
     if thread is not None and (control_root(remote_codex_home()) / thread / "owner.json").exists():
         if _CONTROL_ACTIVE is None or _CONTROL_ACTIVE[0].thread_id != thread:
@@ -491,7 +500,60 @@ def observe_wake(record):
     return record
 
 
+def observe_pending_wake(instruction_id, session, repo):
+    retirement = control_git_retirement_read(remote_codex_home(), instruction_id, session, repo)
+    if retirement is not None:
+        return dict(state="retired", instruction_id=instruction_id, thread_id=session,
+                    prompt_sha256=retirement["prompt_sha256"], retirement=retirement,
+                    reason="git_wake_retired_no_replay")
+    path = wake_record_path(instruction_id)
+    if not path.is_file():
+        return None
+    record = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(record, dict) or record.get("thread_id") != session:
+        raise ControlError("control_wake_thread_mismatch")
+    return observe_wake(record)
+
+
 def dispatch_wake(request, session):
+    try:
+        return _dispatch_claimed_wake(request, session)
+    except ControlError as exc:
+        # Invalid/colliding evidence drops this logical effect. The probe's
+        # independent Git/completion observations remain usable.
+        return dict(state="rejected", instruction_id=request.get("instruction_id"),
+                    thread_id=session, reason=str(exc))
+
+
+def _dispatch_claimed_wake(request, session):
+    # Controller guard precedes this shared lock. Retirement follows the same
+    # order and never acquires a controller lock while holding the ID lock.
+    with control_git_retirement_lock(remote_codex_home(), request.get("instruction_id")):
+        retirement = control_git_retirement_read(remote_codex_home(), request.get("instruction_id"),
+                                                session, request.get("repo_path"), sha(request["prompt"]))
+        if retirement is not None:
+            return dict(state="retired", instruction_id=request["instruction_id"], thread_id=session,
+                        prompt_sha256=sha(request["prompt"]), reason="git_wake_retired_no_replay",
+                        retirement=retirement)
+        instruction_id = request.get("instruction_id")
+        digest = sha(request["prompt"])
+        with control_wake_attempt_lock(remote_codex_home(), instruction_id):
+            prior = control_wake_attempt_read(remote_codex_home(), instruction_id, session, digest)
+            path = wake_record_path(instruction_id)
+            if path.is_file():
+                # Adopt existing local receipt without changing its delivery
+                # truth or giving a new node another external attempt.
+                control_wake_attempt_claim(remote_codex_home(), instruction_id, session, digest,
+                                           origin="legacy")
+                return _dispatch_unretired_wake(request, session)
+            if prior is not None:
+                return dict(state="suppressed", instruction_id=instruction_id, thread_id=session,
+                            prompt_sha256=digest, reason="wake_attempt_already_claimed")
+            control_wake_attempt_claim(remote_codex_home(), instruction_id, session, digest)
+            return _dispatch_unretired_wake(request, session)
+
+
+def _dispatch_unretired_wake(request, session):
     if (control_root(remote_codex_home()) / session / "owner.json").exists():
         if _CONTROL_ACTIVE is None or _CONTROL_ACTIVE[0].thread_id != session:
             return {"status": "rejected", "state": "rejected", "reason": "control_owner_capability_required"}
@@ -633,12 +695,12 @@ def run(request):
     }
     pending_id = request.get("pending_instruction_id")
     if isinstance(pending_id, str):
-        path = wake_record_path(pending_id)
-        if path.is_file():
-            try:
-                result["wake"] = observe_wake(json.loads(path.read_text(encoding="utf-8")))
-            except (OSError, json.JSONDecodeError):
-                result["wake"] = {"state": "uncertain", "reason": "remote_wake_record_malformed"}
+        try:
+            observed = observe_pending_wake(pending_id, session, repo)
+            if observed is not None:
+                result["wake"] = observed
+        except (OSError, json.JSONDecodeError):
+            result["wake"] = {"state": "uncertain", "reason": "remote_wake_record_malformed"}
     if request.get("action") == "wake":
         result["wake"] = dispatch_wake(request, session)
     emit(result)

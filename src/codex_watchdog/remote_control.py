@@ -109,6 +109,34 @@ def run_control(request):
         if thread is None or not control_exact_thread(repo, thread):
             raise ControlError("control_exact_thread_unavailable")
     store = ControlStore(remote_codex_home(), thread, repo)
+    if action == "writer_observation":
+        # Read-only native transition evidence, never a guessed foreign PID,
+        # saved observer flag, new route, or ownership grant.
+        def snapshot():
+            lock = control_native_writer_lock(store.codex_home, thread, allow_missing=True)
+            parent = lock.parent.stat()
+            try:
+                leaf = lock.lstat()
+            except FileNotFoundError:
+                leaf = None
+            return lock, parent, leaf
+
+        lock, parent, before = snapshot()
+        kind = "absent" if before is None else control_writer_kind(store)
+        next_lock, next_parent, after = snapshot()
+        parent_identity = lambda item: (item.st_dev, item.st_ino, item.st_uid, item.st_mode)
+        if (kind == "unknown" or next_lock != lock
+                or parent_identity(parent) != parent_identity(next_parent)
+                or (before is None) != (after is None)
+                or (before is not None and parent_identity(before) != parent_identity(after))):
+            raise ControlError("control_native_writer_unverified")
+        return {"status": "ok", "node": control_node_name(), "uid": os.getuid(),
+                "thread_id": thread, "repo_path": store.repo_path,
+                "boot_id": store.boot_id, "writer_kind": kind,
+                "observed_at": time.time(), "writer_lock_exists": after is not None,
+                "writer_lock_inode": after.st_ino if after is not None else None,
+                "writer_lock_path": str(lock), "writer_lock_parent_inode": next_parent.st_ino,
+                "writer_lock_parent_path": str(lock.parent)}
     if action == "notification_context":
         return {"status": "ok", "session_id": thread}
     if action == "relay":
@@ -204,15 +232,10 @@ def run_control(request):
         _CONTROL_ACTIVE = (store, token)
         try:
             pending = request.get("pending_instruction_id")
-            if action == "acquire" and isinstance(value.get("remote_state"), dict):
-                pending = value["remote_state"].get("pending_instruction_id")
             if isinstance(pending, str):
-                path = wake_record_path(pending)
-                if path.is_file():
-                    record = json.loads(path.read_text(encoding="utf-8"))
-                    if record.get("thread_id") != thread:
-                        raise ControlError("control_wake_thread_mismatch")
-                    result["wake"] = observe_wake(record)
+                observed = observe_pending_wake(pending, thread, repo)
+                if observed is not None:
+                    result["wake"] = observed
             if request.get("action") == "wake":
                 result["wake"] = dispatch_wake(request, thread)
         finally:
@@ -241,7 +264,6 @@ class RemoteControlClient:
         return result
 
     def acquire(self, target, state, ttl=900, relay_mappings=()):
-        self.reconcile_notification(target)
         return self.request(target, "acquire", authority=target.authority, initial_state=state, ttl=ttl,
                             relay_mappings=relay_mappings)
 
@@ -249,7 +271,6 @@ class RemoteControlClient:
         return self.request(target, "save", token=token, state=state)
 
     def probe(self, target, token, **options):
-        self.reconcile_notification(target, token["thread_id"])
         result = self.adapter.probe(target, control=dict(action="probe", token=token,
                                                          thread_id=token["thread_id"]), **options)
         if result.get("status") != "ok":
@@ -287,6 +308,14 @@ class RemoteControlClient:
             attempt.reconcile(lambda value, result, mappings:
                               self._reconcile_attempt(target, value, result, mappings))
 
+    def _best_effort_reconcile(self, target, thread_id=None):
+        try:
+            self.reconcile_notification(target, thread_id)
+        except Exception:
+            # Historical forensic settlement never authorizes a new effect,
+            # and is not a prerequisite for a distinct observation/command.
+            pass
+
 
 def notify_local_control(store, token, event, notifier):
     """Report owner health even if the thread database is unavailable.
@@ -295,10 +324,12 @@ def notify_local_control(store, token, event, notifier):
     this grants no thread discovery, writer, queue or replacement authority.
     """
     runtime = getattr(notifier, "runtime", None) or store.read().get("runtime_path") or store.directory / "runtime"
+    attempt = local_attempt(runtime, store)
     return _notify_with_receipt(
-        event, notifier, local_attempt(runtime, store), token,
+        event, notifier, attempt, token,
         lambda fingerprint, operation, sender: store.prepare_notification(
-            token, fingerprint, fingerprint, operation, sender),
+            token, fingerprint, fingerprint, operation, sender,
+            attempt.effect_path(fingerprint).with_suffix(".lock"), str(attempt.lock_path)),
         lambda fingerprint, operation, result, mappings: store.finish_notification(
             token, fingerprint, operation, result, mappings),
         lambda value, result, mappings: store.reconcile_notification(value["token"], value["fingerprint"],
@@ -318,49 +349,62 @@ def reconcile_local_notifications(store, runtime):
 
 def _notify_with_receipt(event, notifier, attempt, token, prepare, finish, reconcile):
     with attempt.lease():
-        attempt.reconcile(reconcile)
+        # Historical settlement is explicit optional forensics, never a
+        # synchronous provider/RPC prerequisite for the next distinct effect.
         fingerprint = event.event_fingerprint()
-        mapping_store = getattr(notifier, "relay_thread_store", getattr(notifier, "slack_thread_store", None))
-        stores = getattr(mapping_store, "stores", (mapping_store,)) if mapping_store is not None else ()
-        sources = []
-        for store in stores:
-            journal = getattr(store, "journal", None)
-            if journal is not None:
-                sources.append(dict(provider=store.provider, namespace=journal.namespace,
-                                    scope=getattr(store, "scope", None)))
-        intent = attempt.start(token, fingerprint, sources)
-        prepared = prepare(fingerprint, intent["operation_id"], intent["sender"])
-        if prepared["duplicate"]:
-            attempt.finalized(intent)  # This invocation never started a send.
-            result = prepared.get("result")
-            if isinstance(result, dict):
-                status = result.get("status")
-                if status in ("sent", "sent_fallback", "audit_only", "suppressed"):
-                    status = "suppressed"
-                return dict(result, status=status, duplicate=True)
-            raise ControlError("control_notification_outcome_uncertain")
-        error = None
+        with attempt.effect_lease(fingerprint):
+            return _notify_effect(event, notifier, attempt, token, prepare, finish, fingerprint)
+
+
+def _notify_effect(event, notifier, attempt, token, prepare, finish, fingerprint):
+    mapping_store = getattr(notifier, "relay_thread_store", getattr(notifier, "slack_thread_store", None))
+    stores = getattr(mapping_store, "stores", (mapping_store,)) if mapping_store is not None else ()
+    sources = []
+    for store in stores:
+        journal = getattr(store, "journal", None)
+        if journal is not None:
+            sources.append(dict(provider=store.provider, namespace=journal.namespace,
+                                scope=getattr(store, "scope", None)))
+    intent = attempt.start(token, fingerprint, sources)
+    if intent.get("duplicate"):
+        return dict(status="suppressed", terminal=True, event_fingerprint=fingerprint,
+                    duplicate=True, reason="notification_attempt_already_claimed")
+    prepared = prepare(fingerprint, intent["operation_id"], intent["sender"])
+    if prepared["duplicate"]:
+        attempt.finalized(intent)  # This invocation never started a send.
+        result = prepared.get("result")
+        if isinstance(result, dict):
+            status = result.get("status")
+            if status in ("sent", "sent_fallback", "audit_only", "suppressed"):
+                status = "suppressed"
+            return dict(result, status=status, duplicate=True)
+        raise ControlError("control_notification_outcome_uncertain")
+    error = None
+    try:
+        result = dict(notifier.notify(event).to_dict(), terminal=True)
+    except BaseException as exc:
+        # The send phase has ended, even if its exact provider outcome is
+        # unknown. Persist uncertainty and never re-invoke this fingerprint.
+        error = exc
+        result = dict(status="uncertain", terminal=True, reason="notification_sender_ended",
+                      event_fingerprint=fingerprint, duplicate=False,
+                      error_sha256=hashlib.sha256(type(exc).__name__.encode()).hexdigest())
+    intent = attempt.terminal(intent, result, ())
+    mappings = []
+    # A provider's mapping read failure must not hide the healthy providers'
+    # immutable routes. Their existing journals remain authoritative.
+    for store in stores:
         try:
-            result = dict(notifier.notify(event).to_dict(), terminal=True)
-        except BaseException as exc:
-            # The send phase has ended, even if its exact provider outcome is
-            # unknown. Persist uncertainty and never re-invoke this fingerprint.
-            error = exc
-            result = dict(status="uncertain", terminal=True, reason="notification_sender_ended",
-                          event_fingerprint=fingerprint, duplicate=False,
-                          error_sha256=hashlib.sha256(type(exc).__name__.encode()).hexdigest())
-        intent = attempt.terminal(intent, result, ())
-        mappings = []
-        # A provider's mapping read failure must not hide the healthy providers'
-        # immutable routes. Their existing journals remain authoritative.
-        for store in stores:
-            try:
-                mappings.extend(store.notification_mappings(fingerprint))
-            except Exception as exc:
-                result["mapping_error_sha256"] = hashlib.sha256(type(exc).__name__.encode()).hexdigest()
-        intent = attempt.terminal(intent, result, mappings)
+            mappings.extend(store.notification_mappings(fingerprint))
+        except Exception as exc:
+            result["mapping_error_sha256"] = hashlib.sha256(type(exc).__name__.encode()).hexdigest()
+    intent = attempt.terminal(intent, result, mappings)
+    try:
         finish(fingerprint, prepared["operation_id"], result, mappings)
+    except Exception as exc:
+        result["receipt_commit_error_sha256"] = hashlib.sha256(type(exc).__name__.encode()).hexdigest()
+    else:
         attempt.finalized(intent)
-        if error is not None and not isinstance(error, Exception):
-            raise error
-        return result
+    if error is not None and not isinstance(error, Exception):
+        raise error
+    return result

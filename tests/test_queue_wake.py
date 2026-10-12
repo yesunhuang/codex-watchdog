@@ -819,10 +819,11 @@ def test_new_turn_conflicting_native_start_thread_fails_closed(queued_rollout):
     assert dispatcher.observe_delivery(instruction).status == "consumed_or_started"
 
 
-def test_rollout_scan_streams_only_complete_postbaseline_events(queued_rollout, monkeypatch):
+@pytest.mark.parametrize("events", [200, 2000])
+def test_rollout_scan_streams_only_complete_postbaseline_events(queued_rollout, monkeypatch, events):
     history = [{"type": "irrelevant", "padding": "history" * 1000}] * 20
     dispatcher, _, rollout, path, wrapped, instruction = queued_rollout(history=history)
-    append_wake_events(rollout, *[{"type": "irrelevant", "padding": "later" * 100}] * 2000,
+    append_wake_events(rollout, *[{"type": "irrelevant", "padding": "later" * 100}] * events,
                        wake_event("task_started"), wake_user(wrapped))
     baseline = json.loads(path.read_text())["rollout_baseline_offset"]
     original = Path.open
@@ -853,9 +854,10 @@ def test_rollout_scan_streams_only_complete_postbaseline_events(queued_rollout, 
         handle = original(path, mode, *args, **kwargs)
         return StreamOnly(handle) if path == rollout and mode == "rb" else handle
     monkeypatch.setattr(Path, "open", tracked_open)
-    assert dispatcher.observe_delivery(instruction).status == "started"
+    expected = "started" if events < 512 else "consumed_or_started"
+    assert dispatcher.observe_delivery(instruction).status == expected
     assert reads == [1] and seeks == [baseline - 1, baseline]
-    assert len(lines) == 2002 and max(lines) < 2000
+    assert len(lines) == min(events + 2, 512) and max(lines) < 2000
 
 
 @pytest.mark.parametrize("change", ["truncate", "replace"])

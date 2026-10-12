@@ -5,6 +5,9 @@ must enforce the same fence even when no packaged Linux WatchDog is installed.
 Keeping one implementation also avoids a second, subtly different protocol.
 """
 
+from .git_wake_retirement_protocol import GIT_WAKE_RETIREMENT_SOURCE
+
+
 CONTROL_SOURCE = r'''
 import contextlib
 import errno
@@ -84,7 +87,7 @@ def control_read_json(path):
         if not isinstance(value, dict) or value.get("schema_version") != 1:
             raise ValueError()
         return value
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, RecursionError):
         raise ControlError("control_record_unreadable")
 
 
@@ -135,6 +138,55 @@ def control_native_repo(codex_home, thread):
     except (OSError, sqlite3.Error):
         pass
     raise ControlError("control_exact_thread_unavailable")
+
+
+def control_native_runtime_root():
+    return Path("/run/user") / str(os.getuid()) / "codex-native-runtime"
+
+
+def control_native_writer_lock(codex_home, thread, allow_missing=False):
+    """Read the existing native lock, including the supported host-local alias.
+
+    This resolves no new route and never changes the native alias or lock.
+    Native lock inodes are host-local identities, not cross-node equalities.
+    """
+    try:
+        valid_thread = str(uuid.UUID(thread)) == thread
+    except (ValueError, TypeError, AttributeError):
+        valid_thread = False
+    if not hasattr(os, "getuid") or not valid_thread:
+        raise ControlError("control_native_writer_unverified")
+    uid = os.getuid()
+    logical = Path(codex_home).resolve() / "thread-writer-locks"
+    parent = logical.resolve()
+    if logical.is_symlink():
+        native = control_native_runtime_root()
+        if logical.lstat().st_uid != uid or parent != native / "thread-writer-locks":
+            raise ControlError("control_native_writer_unverified")
+        for directory in (native.parent, native, parent):
+            info = directory.stat()
+            if (directory.is_symlink() or directory.resolve() != directory
+                    or not stat.S_ISDIR(info.st_mode) or info.st_uid != uid
+                    or stat.S_IMODE(info.st_mode) != 0o700):
+                raise ControlError("control_native_writer_unverified")
+    elif parent != logical:
+        raise ControlError("control_native_writer_unverified")
+    if not parent.is_dir() or parent.stat().st_uid != uid:
+        raise ControlError("control_native_writer_unverified")
+    lock = parent / (thread + ".lock")
+    try:
+        info = lock.lstat()
+    except FileNotFoundError:
+        # Absence is evidence only beneath an existing private native parent.
+        # The read-only caller must sample this boundary again before using it.
+        if allow_missing and stat.S_IMODE(parent.stat().st_mode) == 0o700:
+            return lock
+        raise ControlError("control_native_writer_unverified")
+    if lock.resolve() != lock or stat.S_ISLNK(info.st_mode):
+        raise ControlError("control_native_writer_unverified")
+    if info.st_uid != uid or info.st_nlink != 1 or not stat.S_ISREG(info.st_mode):
+        raise ControlError("control_native_writer_unverified")
+    return lock
 
 
 def control_kernel_owner(lock):
@@ -294,9 +346,9 @@ class ControlStore:
     def _check(self, value, token):
         if not isinstance(token, dict) or value["owner"] is None or token != self._token(value):
             raise ControlError("control_stale_epoch")
-        # An issued external action cannot be revoked merely by a timeout. Its
-        # durable barrier survives disconnects/restarts until an exact receipt.
-        if not self._live(value["owner"]) and value["external_effect"] is None:
+        # Historic uncertainty reserves its effect, never an expired capability.
+        # A currently executing effect retains this guard's kernel lock.
+        if not self._live(value["owner"]):
             raise ControlError("control_lease_expired")
 
     def _grant(self, value, identity, role):
@@ -309,17 +361,76 @@ class ControlStore:
         control_atomic_json(self.path, value)
         return self._token(value)
 
-    def _recover_completed_external(self, value):
+    def _recover_completed_external(self, value, sender_target_lease=None):
+        """Preserve crash-left one-shot evidence without a thread-wide deadlock.
+
+        The caller holds the live controller lock. An old pointer is not proof
+        of an in-flight sender; each prepared effect remains permanently
+        ineligible for another attempt, even when its outcome is unknown.
+        """
         barrier = value["external_effect"]
-        if isinstance(barrier, dict) and isinstance(barrier.get("event_id"), str):
-            path = self.effect_path("notification", barrier["event_id"])
+        if not isinstance(barrier, dict):
+            return
+        sender_lock = barrier.get("sender_lock_path")
+        legacy_lock = False
+        if sender_lock is None and isinstance(barrier.get("sender"), str):
+            target = dict(control_directory=str(self.directory.resolve()),
+                          thread_id=self.thread_id, repo_path=self.repo_path)
+            key = hashlib.sha256(json.dumps(target, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            runtime = Path(value.get("runtime_path") or self.directory / "runtime").resolve()
+            pointer = runtime / "notifications" / "control-attempts" / (key + ".json")
+            expected = hashlib.sha256((socket.gethostname() + "\0" + str(pointer)).encode()).hexdigest()
+            if barrier["sender"] == expected:
+                sender_lock = str(pointer.with_suffix(".lock"))
+                legacy_lock = True
+        observable = False
+        if isinstance(sender_lock, str):
+            lock = Path(sender_lock)
+            if (lock.is_absolute() and not lock.is_symlink() and lock.resolve() == lock
+                    and lock.is_file() and lock.suffix == ".lock"
+                    and lock.parent.name == "control-attempts" and lock.parent.parent.name == "notifications"
+                    and (not hasattr(os, "getuid") or lock.stat().st_uid == os.getuid())):
+                observable = True
+                # Only a kernel-held current operation lease is a live-send
+                # fence. Missing historical metadata is not an activation gate.
+                # A new local sender already holds the legacy target lease;
+                # that acquisition excluded the old sender before prepare.
+                if not (legacy_lock and sender_target_lease == str(lock)):
+                    with control_file_lock(lock):
+                        pass
+        event_id = barrier.get("event_id")
+        if isinstance(event_id, str):
+            path = self.effect_path("notification", event_id)
+            completed = False
             if path.exists():
-                receipt = control_read_json(path)
-                if (receipt.get("operation_id") == barrier["id"]
-                        and receipt.get("epoch") == value["epoch"]
-                        and receipt.get("state") == "completed"):
-                    value["external_effect"] = None
-                    control_atomic_json(self.path, value)
+                try:
+                    old = control_read_json(path)
+                    completed = (old.get("state") == "completed" and old.get("operation_id") == barrier["id"]
+                                 and old.get("epoch") == barrier["epoch"]
+                                 and old.get("instance") == barrier["instance"])
+                except ControlError:
+                    pass  # Unreadable old evidence is not an activation prerequisite.
+            if (not observable and not completed and value["owner"].get("role") == "local"
+                    and self._live(value["owner"])):
+                # A remote sender's kernel lease is unavailable here. Keep the
+                # *current owner capability* fenced during takeover; independent
+                # work by that owner remains eligible. A new grant omits this.
+                value["owner"]["sender_lease_unobservable"] = True
+            if not path.exists():
+                receipt = dict(schema_version=1, state="uncertain",
+                               fingerprint=barrier.get("fingerprint", event_id),
+                               epoch=barrier["epoch"], instance=barrier["instance"],
+                               operation_id=barrier["id"], legacy_external_effect=dict(barrier))
+                if barrier.get("sender") is not None:
+                    receipt["sender"] = barrier["sender"]
+                control_atomic_json(path, receipt)
+        else:
+            path = self.effect_path("external", barrier["id"])
+            if not path.exists():
+                control_atomic_json(path, dict(schema_version=1, state="uncertain",
+                                    legacy_external_effect=dict(barrier)))
+        value["external_effect"] = None
+        control_atomic_json(self.path, value)
 
     def attach(self, instance, locality, writer, ttl=900):
         identity = self._identity(instance, locality, ttl)
@@ -387,6 +498,8 @@ class ControlStore:
                     return None
                 owner = value["owner"]
                 if self._live(owner) and owner["role"] != "local":
+                    return None
+                if self._live(owner) and owner.get("sender_lease_unobservable") is True:
                     return None
                 identity["host_observer"] = True
                 if writer == "vscode":
@@ -479,8 +592,12 @@ class ControlStore:
         if not self._valid_identity(operation_id):
             raise ControlError("control_operation_id_invalid")
         with self.guard(token) as value:
-            if value["external_effect"] is not None:
-                raise ControlError("control_external_effect_unresolved")
+            self._recover_completed_external(value)
+            path = self.effect_path("external", operation_id)
+            if path.exists():
+                raise ControlError("control_external_effect_duplicate")
+            control_atomic_json(path, dict(schema_version=1, state="uncertain", operation_id=operation_id,
+                                epoch=token["epoch"], instance=token["instance"]))
             value["external_effect"] = dict(id=operation_id, epoch=token["epoch"],
                                             instance=token["instance"], started=self.clock())
             control_atomic_json(self.path, value)
@@ -489,24 +606,26 @@ class ControlStore:
         key = hashlib.sha256((kind + "\0" + event_id).encode("utf-8")).hexdigest()
         return self.directory / "effects" / (key + ".json")
 
-    def prepare_notification(self, token, event_id, fingerprint, operation_id=None, sender=None):
+    def prepare_notification(self, token, event_id, fingerprint, operation_id=None, sender=None,
+                             sender_lock_path=None, sender_target_lease=None):
         if (operation_id is not None and not self._valid_identity(operation_id)
                 or sender is not None and re.fullmatch(r"[0-9a-f]{64}", str(sender)) is None):
             raise ControlError("control_notification_sender_invalid")
         path = self.effect_path("notification", event_id)
         with self.guard(token) as value:
+            self._recover_completed_external(value, sender_target_lease)
             if path.exists():
                 receipt = control_read_json(path)
                 if receipt.get("fingerprint") != fingerprint:
                     raise ControlError("control_effect_id_collision")
                 return dict(receipt, duplicate=True)
-            if value["external_effect"] is not None:
-                raise ControlError("control_external_effect_unresolved")
             operation = operation_id or str(uuid.uuid4())
             value["external_effect"] = dict(id=operation, event_id=event_id, epoch=token["epoch"],
                                             instance=token["instance"], started=self.clock())
             if sender is not None:
                 value["external_effect"].update(sender=sender, fingerprint=fingerprint)
+            if sender_lock_path is not None:
+                value["external_effect"]["sender_lock_path"] = str(Path(sender_lock_path).resolve())
             control_atomic_json(self.path, value)
             receipt = dict(schema_version=1, state="uncertain", fingerprint=fingerprint,
                            epoch=token["epoch"], instance=token["instance"], operation_id=operation)
@@ -614,9 +733,14 @@ class ControlStore:
 
     def finish_notification(self, token, event_id, operation_id, result, relay_mappings=()):
         path = self.effect_path("notification", event_id)
-        with self.guard(token, external_id=operation_id) as value:
+        with control_file_lock(self.lock_path):
+            value = self.read()
             receipt = control_read_json(path)
-            if receipt.get("operation_id") != operation_id:
+            if (not isinstance(token, dict) or token.get("thread_id") != self.thread_id
+                    or token.get("repo_path") != self.repo_path
+                    or receipt.get("operation_id") != operation_id
+                    or receipt.get("epoch") != token.get("epoch")
+                    or receipt.get("instance") != token.get("instance")):
                 raise ControlError("control_external_effect_mismatch")
             self.merge_relay_mappings(value, relay_mappings, event_id)
             # Retain routing before clearing the external-send barrier. A crash
@@ -624,7 +748,9 @@ class ControlStore:
             control_atomic_json(self.path, value)
             receipt.update(state="completed", result=result)
             control_atomic_json(path, receipt)
-            value["external_effect"] = None
+            barrier = value["external_effect"]
+            if isinstance(barrier, dict) and barrier.get("id") == operation_id:
+                value["external_effect"] = None
             control_atomic_json(self.path, value)
             return receipt
 
@@ -655,14 +781,16 @@ class ControlStore:
                         or receipt.get("sender") != sender):
                     raise ControlError("control_notification_sender_mismatch")
                 if receipt.get("state") == "completed":
-                    self._recover_completed_external(value)
+                    barrier = value["external_effect"]
+                    if isinstance(barrier, dict) and barrier.get("id") == operation_id:
+                        value["external_effect"] = None
+                        control_atomic_json(self.path, value)
                     return receipt
             barrier = value["external_effect"]
             if receipt is None and (barrier is None or barrier.get("id") != operation_id):
                 # Prepare did not reserve this operation: no send could start.
                 return dict(state="not_prepared")
-            self._check(value, token)
-            if (not isinstance(barrier, dict) or barrier.get("id") != operation_id
+            if receipt is None and (not isinstance(barrier, dict) or barrier.get("id") != operation_id
                     or barrier.get("event_id") != event_id or barrier.get("sender") != sender
                     or barrier.get("fingerprint") != fingerprint):
                 raise ControlError("control_notification_sender_mismatch")
@@ -675,7 +803,8 @@ class ControlStore:
             control_atomic_json(self.path, value)
             receipt.update(state="completed", result=dict(result, terminal=True))
             control_atomic_json(path, receipt)
-            value["external_effect"] = None
+            if isinstance(barrier, dict) and barrier.get("id") == operation_id:
+                value["external_effect"] = None
             control_atomic_json(self.path, value)
             return receipt
 
@@ -704,4 +833,7 @@ class ControlStore:
         return dict(receipt, duplicate=False)
 '''
 
+CONTROL_SOURCE += GIT_WAKE_RETIREMENT_SOURCE
+from .wake_attempt_protocol import WAKE_ATTEMPT_SOURCE
+CONTROL_SOURCE += WAKE_ATTEMPT_SOURCE
 exec(compile(CONTROL_SOURCE, "<watchdog-control-state>", "exec"))

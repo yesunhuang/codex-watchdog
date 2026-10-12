@@ -1,14 +1,16 @@
 """Keep one Git/completion observer when Linux nodes share a Codex home.
 
 This selects observation, not a new Codex session. A verified native writer
-can take over from a parked observer. Active or uncertain work stays fenced;
-shared history alone never selects a different node.
+can take over from a parked observer. Live operations stay fenced by the shared
+lock; historical delivery uncertainty reserves its ID without blocking handoff.
 """
 from contextlib import contextmanager
 import errno
+import math
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import threading
+import time
 import weakref
 
 from . import control_state as cs
@@ -100,8 +102,61 @@ class NodeObservation:
         self.lock_path = self.path.with_suffix(".lock")
         self.reason = None
         self._admitted = False
-        self._parked_snapshot = None
         self.relay_handoff_safe = None
+        self.foreign_writer_check = None
+
+    def _foreign_writer_safe(self, value):
+        # Neither saved writer flag proves current absence. Resolve the
+        # foreign-writer ambiguity only through an authenticated native probe,
+        # supplied by the caller; unavailable routes never prove absence.
+        if not callable(self.foreign_writer_check):
+            self.reason = "control_node_foreign_writer_unverified"
+            return False
+        expected = dict(node=value["node"], thread_id=self.store.thread_id,
+                        repo_path=self.store.repo_path, boot_id=value["boot_id"],
+                        relay_epoch=value.get("relay_epoch"),
+                        relay_owner=dict(value.get("relay_owner") or {}))
+        try:
+            proof = self.foreign_writer_check(expected)
+            # The authenticated native server validates its own lock boundary.
+            # Host-local aliases have different paths/inodes on each node;
+            # resolving or statting that foreign receipt here would be wrong.
+            raw_path = proof.get("writer_lock_path") if isinstance(proof, dict) else None
+            lock = PurePosixPath(raw_path) if isinstance(raw_path, str) else None
+            lock_safe = (lock is not None and lock.is_absolute() and str(lock) == raw_path
+                         and not raw_path.startswith("//") and "\0" not in raw_path
+                         and ".." not in lock.parts and lock.parent.name == "thread-writer-locks"
+                         and lock.name == self.store.thread_id + ".lock")
+            exists = proof.get("writer_lock_exists", True) if isinstance(proof, dict) else None
+            if exists is False:
+                identity_safe = ("writer_lock_inode" in proof and proof["writer_lock_inode"] is None
+                                 and proof.get("writer_kind") == "absent"
+                                 and type(proof.get("writer_lock_parent_inode")) is int
+                                 and proof["writer_lock_parent_inode"] > 0
+                                 and lock_safe and proof.get("writer_lock_parent_path") == str(lock.parent))
+            else:
+                identity_safe = (exists is True and type(proof.get("writer_lock_inode")) is int
+                                 and proof["writer_lock_inode"] > 0)
+        except Exception:
+            proof = None
+        if (not isinstance(proof, dict) or proof.get("status") != "ok"
+                or any(proof.get(key) != expected[key] for key in ("node", "thread_id", "repo_path"))
+                or not isinstance(proof.get("boot_id"), str) or not proof["boot_id"]
+                or not lock_safe or type(proof.get("uid")) is not int
+                or proof["uid"] != os.getuid()
+                or not identity_safe
+                or type(proof.get("observed_at")) not in (int, float)
+                or not math.isfinite(proof["observed_at"])
+                or not 0 <= time.time() - proof["observed_at"] <= 30):
+            self.reason = "control_node_foreign_writer_unverified"
+            return False
+        if proof.get("writer_kind") in ("vscode", "remote"):
+            self.reason = "control_node_observation_other_work_pending"
+            return False
+        if proof.get("writer_kind") != "absent":
+            self.reason = "control_node_foreign_writer_unverified"
+            return False
+        return True
 
     def _read(self):
         if not self.path.exists():
@@ -161,12 +216,12 @@ class NodeObservation:
     def validate_snapshot(self):
         if not self._admitted:
             raise cs.ControlBusy("control_node_observation_required")
-        if self._parked_snapshot is not None:
-            path = Path(self._parked_snapshot[0])
-            info = path.stat()
-            current = [str(path), info.st_ino, info.st_size, info.st_mtime_ns]
-            if current != self._parked_snapshot:
-                raise cs.ControlBusy("control_node_observation_history_changed")
+        # Recheck current native safety, never a historical transcript stamp.
+        with self.store.guard(self.token) as local:
+            if not self._native_writer(local):
+                from .linux_owner import pending_count
+                if pending_count(self.store.codex_home, self.store.thread_id):
+                    raise cs.ControlBusy("control_node_observation_foreign_queue")
 
     @contextmanager
     def guard(self, *, rollout_stamp, foreign_queue=False):
@@ -183,8 +238,16 @@ class NodeObservation:
                             self.reason = "control_node_observation_needs_native_writer"
                     elif not writer_live:
                         self.reason = "control_node_observed_elsewhere"
-                    elif value["writer_live"] or value["wake_pending"]:
-                        self.reason = "control_node_observation_other_work_pending"
+                    elif not self._foreign_writer_safe(value):
+                        pass
+                    else:
+                        from .linux_owner import pending_count
+                        from .linux_binding import LinuxBindingError
+                        try:
+                            if pending_count(self.store.codex_home, self.store.thread_id):
+                                self.reason = "control_node_observation_foreign_queue"
+                        except LinuxBindingError:
+                            self.reason = "control_node_observation_foreign_queue_unverified"
                     if self.reason is None:
                         value = dict(value or {}, schema_version=1, node=self.node,
                                      thread_id=self.store.thread_id, repo_path=self.store.repo_path,
@@ -195,16 +258,10 @@ class NodeObservation:
                 if self.reason is None:
                     value = dict(value)
                     stamp = list(rollout_stamp) if rollout_stamp is not None else None
-                    if writer_live:
-                        value["rollout_stamp"] = None
-                    elif value["writer_live"] or value.get("rollout_stamp") is None:
-                        value["rollout_stamp"] = stamp
-                    value.update(boot_id=self.store.boot_id, writer_live=writer_live)
-                    if not writer_live:
-                        if stamp is None or value.get("rollout_stamp") != stamp:
-                            self.reason = "control_node_observation_history_changed"
-                        elif foreign_queue:
-                            self.reason = "control_node_observation_foreign_queue"
+                    value.update(boot_id=self.store.boot_id, writer_live=writer_live,
+                                 rollout_stamp=None if writer_live else stamp)
+                    if not writer_live and foreign_queue:
+                        self.reason = "control_node_observation_foreign_queue"
                     expected = self._relay_owner()
                     changed = value.get("relay_epoch") is None or any(
                         value.get("relay_owner", {}).get(key) != item
@@ -212,12 +269,16 @@ class NodeObservation:
                     same_executor = (saved is not None and saved["node"] == self.node
                                      and saved["boot_id"] == self.store.boot_id)
                     # A same-node/boot controller restart needs a new fence to
-                    # reconcile its existing effects. It does not hand work to
-                    # another executor; pending work still blocks that transfer.
+                    # observe its existing effects. Actual queue or live-send
+                    # evidence still fences transfer; old pending flags do not.
                     if (self.reason is None and changed and not same_executor and callable(self.relay_handoff_safe)
                             and not self.relay_handoff_safe()):
                         self.reason = "control_node_relay_pending"
                     if self.reason is None:
+                        # At most two exact pending IDs are adopted. This runs
+                        # under the shared observation and current owner locks,
+                        # before a new selected epoch can admit any work.
+                        cs.control_adopt_legacy_wake(self.store, saved)
                         if changed:
                             value.update(relay_epoch=value.get("relay_epoch", 0) + 1,
                                          relay_owner=dict(value.get("relay_owner") or {}, **expected))
@@ -227,18 +288,16 @@ class NodeObservation:
                 yield False
                 return
             self._admitted = True
-            self._parked_snapshot = None if writer_live else value["rollout_stamp"]
             try:
                 yield True
             finally:
                 self._admitted = False
-                self._parked_snapshot = None
-                # Retain a just-enqueued or uncertain wake until its original
-                # courier receipt is reconciled. An absent writer alone does
-                # not make this interval safe for another node to take over.
+                # This legacy field remains outcome evidence, not a handoff
+                # gate. One-attempt claims independently prevent replay.
                 with self.store.guard(self.token) as local:
                     state = local.get("remote_state") or {}
                     pending = isinstance(state.get("pending_instruction_id"), str)
-                    if value["wake_pending"] != pending:
-                        value["wake_pending"] = pending
+                    writer_live = self._native_writer(local)
+                    if value["wake_pending"] != pending or value["writer_live"] != writer_live:
+                        value.update(wake_pending=pending, writer_live=writer_live)
                         cs.control_atomic_json(self.path, value)

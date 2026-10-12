@@ -141,12 +141,50 @@ def _merge_dual(copies):
     return result
 
 
+def _refuse_fallback_relocation(directory):
+    """Do not silently omit newer one-shot claims from this older importer."""
+    database = directory / "fallback-deliveries.sqlite3"
+    try:
+        companions = (database.with_name(database.name + "-wal"),
+                      database.with_name(database.name + "-shm"))
+        for path in (database,) + companions:
+            _safe(path)
+        if not database.exists():
+            if any(path.exists() for path in companions):
+                raise ValueError()
+            return
+        if not database.is_file():
+            raise ValueError()
+        with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+            db.execute("PRAGMA query_only=ON")
+            db.execute("BEGIN")
+            if db.execute("PRAGMA user_version").fetchone()[0] != 1:
+                raise ValueError()
+            fields = db.execute("PRAGMA table_info(receipts)").fetchall()
+            known = {row[1]: row for row in fields}
+            names = ("fingerprint", "provider", "target_sha256", "payload_sha256", "state")
+            if (not set(names) <= known.keys()
+                    or [row[1] for row in sorted(fields, key=lambda row: row[5]) if row[5]] != ["fingerprint", "provider"]
+                    or any(known[name][2].upper() != "TEXT" or known[name][3] != 1 for name in names)
+                    or [row[2] for row in db.execute("PRAGMA index_info(sqlite_autoindex_receipts_1)")]
+                    != ["fingerprint", "provider"]):
+                raise ValueError()
+            # First-key seek only. Do not scan or reinterpret historic claims.
+            claimed = db.execute("SELECT 1 FROM receipts INDEXED BY sqlite_autoindex_receipts_1 "
+                                 "WHERE fingerprint>=? LIMIT 1", ("",)).fetchone()
+    except (RelayNotificationMigrationError, sqlite3.Error, OSError, ValueError):
+        raise RelayNotificationMigrationError("relay_notification_fallback_source_invalid") from None
+    if claimed is not None:
+        raise RelayNotificationMigrationError("relay_notification_fallback_relocation_unsupported")
+
+
 def plan_notification_migration(source_runtimes):
     """Read-only plan; payload stays private, summary contains hashes/counts."""
     sources, history, copies, marker_fields = [], {}, [], {}
     for runtime in sorted({_runtime(path) for path in source_runtimes}, key=str):
         directory = runtime / "notifications"
         _safe(directory)
+        _refuse_fallback_relocation(directory)
         state = _json(directory / "last-events.json")
         marker = _json(directory / "dual-deliveries.json")
         if state is not None:

@@ -20,6 +20,8 @@ THREAD = "11111111-2222-4333-8444-555555555555"
 @pytest.fixture
 def nodes(tmp_path, monkeypatch):
     monkeypatch.setattr(cs.sys, "platform", "linux")
+    if not hasattr(os, "getuid"):
+        monkeypatch.setattr(os, "getuid", lambda: 0, raising=False)
     host = ["login-a.example"]
     monkeypatch.setattr(cs.socket, "gethostname", lambda: host[0])
     home = tmp_path / "codex"

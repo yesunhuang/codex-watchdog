@@ -19,9 +19,8 @@ from .mvp_service import MvpWatchdogService
 from .remote_ssh import RemoteSshTarget, _REMOTE_SCRIPT
 from .storage import FileLock, StoreBusyError, InstructionStore
 from .workspace_registry import TrackedWorkspace, WorkspaceRegistry
-from .node_observation import NodeObservation
+from .node_observation import NodeObservation, observation_lock
 from .relay_authority import SessionRelayAuthority, bind_service_authority
-from .remote_control import RemoteControlClient, reconcile_local_notifications
 
 
 def bind_for_operator(binding, workspace, lease_seconds):
@@ -200,11 +199,7 @@ class LinuxAutoWatchdog:
 
     def _cycle(self, item):
         service, target, token = item["service"], item["target"], item["token"]
-        saved = item["store"].read().get("remote_state")
-        pending = saved.get("pending_instruction_id") if isinstance(saved, dict) else None
-        probe = service.remote_control.probe(
-            target, token, pending_instruction_id=pending if isinstance(pending, str) else None,
-        )
+        probe = service.remote_control.probe(target, token)
         if probe.get("status") != "ok":
             raise ControlError(probe.get("reason", "control_probe_failed"))
         if item.get("observation") is not None:
@@ -248,8 +243,8 @@ class LinuxAutoWatchdog:
             if kind in ("absent", "vscode"):
                 store.release_remote(token, kind)
         finally:
-            # Stale epochs and unresolved external effects remain fenced by
-            # ControlStore. They must not keep dead in-process resources alive.
+            # ControlStore still fences current leases and live effects. Old
+            # unknown outcomes do not retain dead in-process resources.
             item["locks"].close()
             self.controllers.pop(store.thread_id, None)
             delay = min(30.0, self.retry_delay.get(store.thread_id, 0.5) * 2)
@@ -276,18 +271,6 @@ class LinuxAutoWatchdog:
                     continue
                 store = item["store"] if item else self.store_factory(self.codex_home, thread, repo)
                 value = store.read()
-                if value.get("external_effect") is not None and isinstance(value.get("runtime_path"), str):
-                    runtime = Path(value["runtime_path"])
-                    reconcile_local_notifications(store, runtime)
-                    target = value.get("remote_target")
-                    if isinstance(target, dict):
-                        target = RemoteSshTarget(target["authority"], target["repo_path"], target["storage_key"],
-                                                 (store.thread_id,))
-                        client = (item["service"].remote_control if item and
-                                  getattr(item["service"], "remote_control", None) is not None else
-                                  RemoteControlClient(HostRemoteAdapter(self.codex_home), runtime))
-                        client.reconcile_notification(target)
-                    value = store.read()
                 if item is None:
                     if self.stopping:
                         continue
@@ -297,8 +280,6 @@ class LinuxAutoWatchdog:
                                                 reason=self.failed_resumes[thread]))
                             continue
                         self.failed_resumes.pop(thread)
-                    if value.get("external_effect") is not None:
-                        raise ControlError("control_external_effect_unresolved")
                     if (self._writer_kind(thread) != "vscode"
                             and time.monotonic() < self.retry_after.get(thread, 0)):
                         results.append(dict(thread_sha256=sha256_text(thread), state="recovering",
@@ -328,31 +309,45 @@ class LinuxAutoWatchdog:
                 if kind != "unknown":
                     owner.yield_requested = store.observe_writer(token, kind)
                 with acting_as(store, token):
-                    result = owner.step(observe=False)
-                    # Publish the exact current writer PID under the same epoch;
-                    # trusted hooks additionally verify their actual ancestry.
-                    with store.guard(token) as current:
-                        current["writer_pid"] = owner.client.process.pid if owner.client else None
-                        control_atomic_json(store.path, current)
                     observation = item.get("observation")
-                    if result["owner_state"] in ("owned", "observing", "waiting_for_attach", "parked", "released"):
-                        # Keep Git observation after releasing an idle writer.
-                        # A shared native-ownership receipt suppresses stale
-                        # nodes; sharing a transcript is never admission.
+                    release_only = owner.release_requested
+                    # Admission must precede native resume, not just Git or
+                    # notification work. A selected parked node may resume its
+                    # own queued work while holding the same shared fence.
+                    # A release never resumes or admits work. It still needs
+                    # the shared lock and owner.step's current writer/FIFO
+                    # checks, without selecting another observation epoch.
+                    if observation and release_only:
+                        admission = observation_lock(observation.lock_path)
+                    else:
                         admission = observation.guard(
                             rollout_stamp=owner.rollout_stamp,
-                            foreign_queue=(result["owner_state"] == "parked"
-                                           and pending_count(self.codex_home, thread) != 0),
                         ) if observation else nullcontext(True)
-                        with admission as admitted:
-                            if admitted and observe and result["owner_state"] != "released":
+                    with admission as admitted:
+                        if not release_only and not admitted:
+                            result = dict(owner_state="standby", thread_status=owner.thread_status)
+                        else:
+                            result = owner.step(observe=False)
+                            # Publish the exact current writer PID under the
+                            # admitted epoch before releasing the shared lock.
+                            with store.guard(token) as current:
+                                current["writer_pid"] = owner.client.process.pid if owner.client else None
+                                control_atomic_json(store.path, current)
+                            foreign_queue = (observation is not None and result["owner_state"] == "parked"
+                                             and pending_count(self.codex_home, thread) != 0)
+                            if foreign_queue:
+                                observation.reason = "control_node_observation_foreign_queue"
+                            if (not release_only and not foreign_queue and observe and result["owner_state"] in
+                                    ("owned", "observing", "waiting_for_attach", "parked")):
                                 if item.get("relay_authority") is not None:
                                     item["relay_authority"].activate()
-                                    item["relay_authority"].reconcile_completions()
                                 cycle = self._cycle(item)
                                 if cycle.status != "completed":
                                     raise ControlError("control_observation_failed")
                                 owner.report_observation_health()
+                                # Explicit bounded forensic APIs remain
+                                # available; routine work never waits for an
+                                # old receipt, transcript or sender outcome.
                 if item.get("failed"):
                     store.renew(token, ttl=120)
                     item.pop("failed", None)

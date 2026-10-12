@@ -16,7 +16,7 @@ import urllib.request
 import uuid
 
 from .models import sha256_text, utc_now
-from .notification_receipts import DualDeliveryReceipts
+from .notification_receipts import DualDeliveryReceipts, FallbackDeliveryReceipts
 from .slack_mapping import (
     SlackRelayTarget,
     SlackThreadStore,
@@ -639,16 +639,33 @@ class EnvironmentNotifier:
             try:
                 state = self._read_state()
             except Exception as exc:
+                # This last-event cache is historical suppression evidence,
+                # not an activation prerequisite. Preserve it byte-for-byte;
+                # valid independent claim journals still fence new sends.
+                if getattr(self, "relay_runtime", None) is not None:
+                    from .relay_notification_migration import previous_notification
+                    if previous_notification(self.relay_runtime, fingerprint):
+                        return NotificationResult(
+                            status="suppressed", channel=None,
+                            event_fingerprint=fingerprint, duplicate=True,
+                            attempted_channels=(),
+                            configuration_issues=self.config.configuration_issues,
+                            state_path=self.state_path, state_persisted=False,
+                            error_sha256=self._error_digest("state_read_failed", exc),
+                        )
+                delivery = self._deliver(event)
                 return NotificationResult(
                     status="state_error",
-                    channel="local_audit",
+                    channel=delivery.channel,
                     event_fingerprint=fingerprint,
                     duplicate=False,
-                    attempted_channels=(),
+                    attempted_channels=delivery.attempted_channels,
                     configuration_issues=self.config.configuration_issues,
                     state_path=self.state_path,
                     state_persisted=False,
-                    error_sha256=self._error_digest("state_read_failed", exc),
+                    error_sha256=self._combine_error_digests(tuple(value for value in (
+                        self._error_digest("state_read_failed", exc), delivery.error_sha256) if value is not None)),
+                    provider_outcomes=delivery.provider_outcomes,
                 )
 
             previous = state["last_events"].get(dedupe_key)
@@ -727,7 +744,10 @@ class EnvironmentNotifier:
         failures = []
         outcomes = None
 
-        protected = len(self.config.interactive_providers) > 1 or getattr(self, "relay_runtime", None) is not None
+        protected = (len(self.config.interactive_providers) > 1
+                     or getattr(self, "relay_runtime", None) is not None
+                     or "slack" in self.config.interactive_providers and self.config.slack_configured
+                     or "lark" in self.config.interactive_providers and self.config.lark.configured)
         if protected:
             delivery = self._deliver_both(event)
             # Preserve SMTP/desktop fallback when neither messaging provider
@@ -757,7 +777,7 @@ class EnvironmentNotifier:
             else:
                 return _DeliveryResult("sent", "slack", tuple(attempts), None)
 
-        if self.config.selected_interactive_transport == "onebot" and self.config.onebot.configured:
+        if not protected and self.config.selected_interactive_transport == "onebot" and self.config.onebot.configured:
             attempts.append("onebot")
             try:
                 self._send_onebot(event)
@@ -767,12 +787,11 @@ class EnvironmentNotifier:
                 return _DeliveryResult("sent", "onebot", tuple(attempts), None)
 
         if self.config.smtp_configured:
-            attempts.append("smtp")
-            try:
-                self._send_smtp(event)
-            except Exception as exc:
-                failures.append(self._error_digest("smtp_failed", exc))
-            else:
+            status, attempted, error = self._attempt_fallback(event, "smtp")
+            attempts.extend(attempted)
+            if error is not None:
+                failures.append(error)
+            if status == "sent":
                 status = "sent_fallback" if failures else "sent"
                 return _DeliveryResult(
                     status,
@@ -783,12 +802,11 @@ class EnvironmentNotifier:
                 )
 
         if self.config.windows_message_configured:
-            attempts.append("windows_msg")
-            try:
-                self._send_windows_message(event)
-            except Exception as exc:
-                failures.append(self._error_digest("windows_msg_failed", exc))
-            else:
+            status, attempted, error = self._attempt_fallback(event, "windows_msg")
+            attempts.extend(attempted)
+            if error is not None:
+                failures.append(error)
+            if status == "sent":
                 status = "sent_fallback" if failures else "sent"
                 return _DeliveryResult(
                     status,
@@ -809,18 +827,41 @@ class EnvironmentNotifier:
         )
 
     def _deliver_both(self, event: NotificationEvent) -> _DeliveryResult:
-        opened = False
         try:
             with DualDeliveryReceipts(getattr(self, "relay_runtime", self.runtime),
                                       atomic_writer=self.atomic_writer) as receipts:
-                opened = True
                 return self._deliver_with_receipts(event, receipts)
         except Exception:
-            if opened or "onebot" not in self.config.interactive_providers:
-                raise
-            # Slack/Feishu cannot safely send without their claim store. OneBot
-            # has its own durable journal and must still get its bounded turn.
+            # Drop only effects whose durable claim store is unavailable.
+            # OneBot has its own journal; independent fallback claims can also
+            # proceed. A receipt failure never makes Slack/Feishu retryable.
             return self._deliver_with_receipts(event, None)
+
+    def _attempt_fallback(self, event, provider):
+        if provider == "smtp":
+            target = (self.config.smtp_host, self.config.smtp_port, self.config.smtp_sender,
+                      self.config.smtp_recipients)
+            send = self._send_smtp
+        else:
+            target = (self.config.windows_message_target,)
+            send = self._send_windows_message
+        target_sha256 = sha256_text(json.dumps(target, sort_keys=True, separators=(",", ":")))
+        payload_sha256 = sha256_text(json.dumps((event.subject, event.message),
+            ensure_ascii=False, separators=(",", ":")))
+        attempted = ()
+        try:
+            with FallbackDeliveryReceipts(getattr(self, "relay_runtime", self.runtime)) as receipts:
+                previous = receipts.claim(event.event_fingerprint(), provider, target_sha256, payload_sha256)
+                if previous == "sent":
+                    return "sent", (), None
+                if previous == "uncertain":
+                    return "uncertain", (), sha256_text(provider + "_delivery_unconfirmed")
+                attempted = (provider,)
+                send(event)
+                receipts.confirm_sent(event.event_fingerprint(), provider)
+                return "sent", attempted, None
+        except Exception as error:
+            return "uncertain", attempted, self._error_digest(provider + "_failed", error)
 
     def _deliver_with_receipts(self, event, receipts):
         fingerprint = event.event_fingerprint()
@@ -926,28 +967,19 @@ class EnvironmentNotifier:
                 )
                 bound_channel = routes.destination(relay_target.thread_id)
             target_channel = bound_channel or self.config.slack_channel_id
-            try:
-                result = self.slack_api_post(
-                    self.config.slack_bot_token,
-                    "chat.postMessage",
-                    {
-                        "channel": target_channel,
-                        "text": relay_text,
-                        "unfurl_links": False,
-                        "unfurl_media": False,
-                    },
-                    self.config.timeout_seconds,
-                )
-            except Exception:
-                if bound_channel is not None:
-                    raise
-                if self.config.slack_webhook_url is None:
-                    raise
-                self._send_slack_webhook(
-                    text + "\n\n_Slack quick-reply mapping is unavailable for this "
-                    "fallback message._"
-                )
-                return
+            # An API exception may follow a successful external send. Keep its
+            # uncertain claim; never make a second Slack webhook attempt.
+            result = self.slack_api_post(
+                self.config.slack_bot_token,
+                "chat.postMessage",
+                {
+                    "channel": target_channel,
+                    "text": relay_text,
+                    "unfurl_links": False,
+                    "unfurl_media": False,
+                },
+                self.config.timeout_seconds,
+            )
             channel_id = result.get("channel")
             thread_ts = result.get("ts")
             if (

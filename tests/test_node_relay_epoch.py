@@ -11,6 +11,7 @@ import pytest
 from codex_watchdog import control_state as cs
 from codex_watchdog.node_observation import NodeObservation, observation_lock
 from test_linux_node import nodes, make_store
+from test_node_observation import foreign_absence
 
 
 STAMP = ("/fixture/rollout.jsonl", 4, 100, 200)
@@ -20,10 +21,16 @@ def _observer(home, repo, *, instance="dog", boot="boot-a"):
     store = make_store(home, repo, boot=boot)
     store.enroll_node()
     token = store.claim_remote(instance, "host", "vscode", host_observer=True)
-    return NodeObservation(store, token)
+    observation = NodeObservation(store, token)
+    observation.foreign_writer_check = lambda expected: foreign_absence(expected, home)
+    return observation
 
 
 def _admit(observation):
+    queue = observation.store.codex_home / "queue_1.sqlite"
+    if not queue.exists():
+        with sqlite3.connect(queue) as db:
+            db.execute("CREATE TABLE queued_items(id,thread_id,payload_json)")
     with observation.guard(rollout_stamp=STAMP) as admitted:
         return admitted
 
