@@ -102,6 +102,7 @@ class NodeObservation:
         self.lock_path = self.path.with_suffix(".lock")
         self.reason = None
         self._admitted = False
+        self._admitted_executor = None
         self.relay_handoff_safe = None
         self.foreign_writer_check = None
 
@@ -213,15 +214,37 @@ class NodeObservation:
         pattern = "*/watchdog-control/" + self.store.thread_id + "/owner.json"
         return list((self.store.codex_home / "watchdog-nodes").glob(pattern)) == [self.store.path]
 
-    def validate_snapshot(self):
-        if not self._admitted:
+    def validate_snapshot(self, *, active_control=None):
+        if (not self._admitted
+                or self._admitted_executor != (os.getpid(), threading.get_ident())):
             raise cs.ControlBusy("control_node_observation_required")
         # Recheck current native safety, never a historical transcript stamp.
-        with self.store.guard(self.token) as local:
-            if not self._native_writer(local):
-                from .linux_owner import pending_count
-                if pending_count(self.store.codex_home, self.store.thread_id):
-                    raise cs.ControlBusy("control_node_observation_foreign_queue")
+        if active_control is None:
+            with self.store.guard(self.token) as local:
+                self._validate_native_snapshot(local)
+            return
+        # The host helper calls us while its queue-purpose owner guard is held.
+        # Its ControlStore class comes from the embedded protocol namespace,
+        # so match the exact paths/capability rather than Python class identity.
+        # This does not make standalone owner guards reentrant.
+        if not isinstance(active_control, tuple) or len(active_control) != 2:
+            raise cs.ControlError("control_node_observation_capability_mismatch")
+        active_store, token = active_control
+        if (token != self.token or any(
+                getattr(active_store, key, None) != getattr(self.store, key)
+                for key in ("codex_home", "thread_id", "repo_path", "directory", "path", "lock_path", "boot_id"))):
+            raise cs.ControlError("control_node_observation_capability_mismatch")
+        local = self.store.read()
+        self.store._check(local, self.token)
+        if self.store.handback_pending(local):
+            raise cs.ControlError("control_handback_pending")
+        self._validate_native_snapshot(local)
+
+    def _validate_native_snapshot(self, local):
+        if not self._native_writer(local):
+            from .linux_owner import pending_count
+            if pending_count(self.store.codex_home, self.store.thread_id):
+                raise cs.ControlBusy("control_node_observation_foreign_queue")
 
     @contextmanager
     def guard(self, *, rollout_stamp, foreign_queue=False):
@@ -288,10 +311,12 @@ class NodeObservation:
                 yield False
                 return
             self._admitted = True
+            self._admitted_executor = (os.getpid(), threading.get_ident())
             try:
                 yield True
             finally:
                 self._admitted = False
+                self._admitted_executor = None
                 # This legacy field remains outcome evidence, not a handoff
                 # gate. One-attempt claims independently prevent replay.
                 with self.store.guard(self.token) as local:

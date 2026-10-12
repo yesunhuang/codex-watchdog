@@ -63,7 +63,10 @@ class HostRemoteAdapter:
                 and str(request.get("instruction_id", "")).startswith(("git:", "git-attention:"))):
             # The read-only Git probe may have taken time. Recheck immediately
             # before the courier, not only before starting that network read.
-            self.git_admission_check()
+            # run_control already holds this exact owner lock. Share only its
+            # lexical capability; the observation check still rereads native
+            # writer/FIFO and the current epoch immediately before dispatch.
+            self.git_admission_check(active_control=self.namespace.get("_CONTROL_ACTIVE"))
         return self._dispatch_wake(request, session)
 
     def probe(self, target, *, control=None, pending_instruction_id=None, wake=None):

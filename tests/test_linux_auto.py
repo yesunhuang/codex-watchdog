@@ -498,7 +498,8 @@ def test_host_git_courier_rechecks_admission_but_preserves_slack_relay(tmp_path)
     dispatched = []
     adapter._dispatch_wake = lambda request, session: dispatched.append(request["instruction_id"])
 
-    def changed():
+    def changed(**kwargs):
+        assert kwargs == {"active_control": None}
         raise ControlBusy("control_node_observation_history_changed")
 
     adapter.git_admission_check = changed

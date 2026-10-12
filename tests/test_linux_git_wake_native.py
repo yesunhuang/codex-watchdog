@@ -116,12 +116,30 @@ def test_parked_git_blocker_reaches_same_thread_once_with_native_processes(tmp_p
         assert saved["last_git_attention"].startswith("git-attention:")
         assert saved["pending_remote_oid"] is None
         assert saved["pending_instruction_id"] == saved["last_git_attention"]
+        # The durable one-attempt claim, rather than historical completion
+        # polling, prevents a second courier. Preserve its truthful evidence
+        # while the same owner resumes and the native queue consumes the item.
+        claim_path = cs.control_wake_attempt_path(home, saved["last_git_attention"])
+        claim_before = claim_path.read_bytes()
+        claim = cs.control_wake_attempt_read(home, saved["last_git_attention"], THREAD)
+        assert claim["state"] == "claimed"
         assert dog.step()[-1]["state"] == "owned"
-        assert item["store"].read()["remote_state"]["pending_instruction_id"] is None
+        assert item["store"].read()["remote_state"]["pending_instruction_id"] == saved["last_git_attention"]
         assert dog.step()[-1]["state"] == "owned"
+        assert claim_path.read_bytes() == claim_before
+        with sqlite3.connect(home / "queue_1.sqlite") as db:
+            assert db.execute("SELECT count(*) FROM queued_items WHERE thread_id=?", (THREAD,)).fetchone()[0] == 0
         calls = [json.loads(line) for line in (home / "calls.jsonl").read_text().splitlines()]
         assert len(calls) == 1 and calls[0]["thread"] == THREAD
         assert "Git attention" in calls[0]["message"]
+        records = [json.loads(line) for line in rollout.read_text().splitlines()]
+        events = [record["payload"] for record in records if record.get("type") == "event_msg"]
+        messages = [event for event in events if event.get("type") == "item_completed"
+                    and event.get("item", {}).get("type") == "UserMessage"]
+        starts = [event for event in events if event.get("type") == "task_started"]
+        assert len(messages) == len(starts) == 1
+        assert messages[0]["item"]["content"] == [{"text": calls[0]["message"]}]
+        assert messages[0]["turn_id"] == starts[0]["turn_id"]
     finally:
         release.touch()
         parent.wait(timeout=10)
