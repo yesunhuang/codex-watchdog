@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 from contextlib import closing
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+import re
 import sqlite3
 import stat
 import time
@@ -27,6 +28,34 @@ def _regular(path: Path):
     if not stat.S_ISREG(value.st_mode) or path.resolve(strict=True) != path:
         raise ValueError("native_rollout_aliased_or_nonregular_file")
     return value
+
+
+def _native_path(raw: str) -> Path:
+    """Accept standard Windows extended anchors, preserving physical identity.
+
+    Normalize only the spelling, before the existing containment/alias checks.
+    Device namespaces and traversal never gain a resolution fallback.
+    """
+    path = Path(raw)
+    if not isinstance(path, PureWindowsPath):
+        return path
+    if ".." in path.parts or path.drive.startswith("\\\\.\\"):
+        raise ValueError("native_rollout_unsafe_windows_path")
+    if not path.drive.startswith("\\\\?\\"):
+        return path
+    spelling = str(path)
+    if spelling[:8].lower() == "\\\\?\\unc\\":
+        path = Path("\\\\?\\UNC\\" + spelling[8:])
+    drive = re.fullmatch(r"\\\\\?\\([A-Za-z]:)", path.drive)
+    unc = re.fullmatch(r'\\\\\?\\UNC\\([^\\/:<>"|?*\x00-\x1f]+)\\([^\\/:<>"|?*\x00-\x1f]+)',
+                       path.drive, flags=re.IGNORECASE)
+    if path.root != "\\" or (drive is None and unc is None):
+        raise ValueError("native_rollout_unsafe_windows_namespace")
+    anchor = drive[1] + "\\" if drive else "\\\\" + unc[1] + "\\" + unc[2] + "\\"
+    normalized = Path(anchor, *path.parts[1:])
+    if not normalized.samefile(Path(raw)):
+        raise ValueError("native_rollout_windows_identity_changed")
+    return normalized
 
 
 def find_native_rollout(
@@ -79,7 +108,7 @@ def find_native_rollout(
             return None
         if not isinstance(cwd, str) or not isinstance(raw_path, str):
             return None
-        repository, path = Path(cwd), Path(raw_path)
+        repository, path = _native_path(cwd), _native_path(raw_path)
         if not repository.is_absolute() or not repository.is_dir():
             return None
         if repo_path is not None and repository.resolve(strict=True) != Path(repo_path).resolve(strict=True):

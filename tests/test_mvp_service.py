@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
+import os
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
@@ -377,19 +378,27 @@ def write_rollout(
     return path
 
 
+@pytest.mark.parametrize("extended_path", [False, True])
 def test_rollout_task_complete_notifies_when_stop_hook_is_missing(
     tmp_path: Path,
+    extended_path: bool,
 ) -> None:
+    if extended_path and os.name != "nt":
+        pytest.skip("actual Windows extended-path completion notification")
     runtime = tmp_path / "runtime"
     repo = tmp_path / "ProjectAlpha"
     repo.mkdir()
     tracked = workspace(repo, "vscode-internal")
-    write_rollout(
+    rollout = write_rollout(
         runtime / "codex-home",
         tracked,
         "turn-complete",
         last_output="ProjectAlpha final output",
     )
+    if extended_path:
+        with sqlite3.connect(runtime / "codex-home" / "state_5.sqlite") as database:
+            database.execute("UPDATE threads SET rollout_path=?, cwd=? WHERE id=?",
+                             ("\\\\?\\" + str(rollout), "\\\\?\\" + str(repo), tracked.session_id))
     notifier = FakeNotifier(runtime)
     service = build_service(
         runtime,

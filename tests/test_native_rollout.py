@@ -1,6 +1,7 @@
 """Exact native lookup: native fixtures only, no provider/CLI or session scans."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
 
@@ -50,6 +51,46 @@ def test_exact_native_lookup_preserves_native_bytes_and_ignores_other_rollout(na
     assert find_native_rollout(home, THREAD_ID, repo) == rollout
     assert find_native_rollout(home, THREAD_ID) == rollout
     assert all(p.read_bytes() == raw for p, raw in before.items())
+
+
+@pytest.mark.skipif(os.name != "nt", reason="actual Windows extended-path identity")
+@pytest.mark.parametrize("extended_cwd", [False, True])
+def test_windows_extended_rollout_is_same_exact_native_file(native, extended_cwd):
+    home, repo, rollout = native
+    fields = {"rollout_path": "\\\\?\\" + str(rollout)}
+    if extended_cwd:
+        fields["cwd"] = "\\\\?\\" + str(repo)
+    change(home, **fields)
+    before = {p: p.read_bytes() for p in (home / "state_5.sqlite", rollout)}
+    assert find_native_rollout(home, THREAD_ID, repo) == rollout
+    assert all(p.read_bytes() == raw for p, raw in before.items())
+
+
+@pytest.mark.skipif(os.name != "nt", reason="actual Windows namespace parsing")
+@pytest.mark.parametrize("spelling", [
+    r"\\.\C:\native.jsonl", r"\\?\GLOBALROOT\Device\HarddiskVolume1\native.jsonl",
+    r"\\?\Volume{00000000-0000-0000-0000-000000000000}\native.jsonl",
+])
+def test_windows_nonstandard_namespace_still_refuses(native, spelling):
+    home, repo, _ = native
+    change(home, rollout_path=spelling)
+    assert find_native_rollout(home, THREAD_ID, repo) is None
+
+
+@pytest.mark.skipif(os.name != "nt", reason="actual Windows extended-path containment")
+@pytest.mark.parametrize("kind", ["outside", "traversal", "wrong_filename"])
+def test_windows_extended_paths_preserve_containment(native, tmp_path, kind):
+    home, repo, rollout = native
+    if kind == "outside":
+        path = tmp_path / rollout.name
+        path.write_bytes(b"not a session")
+    elif kind == "traversal":
+        path = rollout.parent / ".." / rollout.parent.name / rollout.name
+    else:
+        path = rollout.with_name("rollout-test-" + OTHER + ".jsonl")
+        path.write_bytes(b"wrong native UUID")
+    change(home, rollout_path="\\\\?\\" + str(path))
+    assert find_native_rollout(home, THREAD_ID, repo) is None
 
 
 @pytest.mark.parametrize("field,value", [
