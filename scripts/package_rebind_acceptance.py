@@ -1,5 +1,4 @@
 """Exercise manual registration migration through an actual packaged CLI."""
-from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -25,9 +24,9 @@ def verify_manual_rebind(executable: Path, root: Path, environment: dict) -> Non
         env["CODEX_WATCHDOG_MACOS_SECURITY_BIN"] = str(security)
     git = shutil.which("git", path=env["PATH"])
     assert git
-    def run(args):
+    def run(args, *, input=None, timeout=30):
         result = subprocess.run([str(v) for v in args], env=env, cwd=root, capture_output=True,
-                                text=True, timeout=30)
+                                text=True, input=input, timeout=timeout)
         assert result.returncode == 0, (args[1:2], result.stdout, result.stderr)
         return result.stdout
     run([git, "init", "--initial-branch=main", repo])
@@ -56,16 +55,18 @@ def verify_manual_rebind(executable: Path, root: Path, environment: dict) -> Non
     original = state_path.read_bytes()
     run([*prefix, "workspace-remove", "--workspace", "manual-rebind"])
     run([*prefix, "workspace-add", "--workspace", "manual-rebind", "--repo", repo, "--thread", new])
-    def write_stop(name, identity):
-        event = {"schema_version": 1, "event_type": "Stop", "outcome": "grace_expired_parked",
-                 "session_id": new, "workspace": str(repo), "audit_id": identity,
-                 "invocation_id": identity, "turn_id": identity,
-                 "hook_completed_at": datetime.now(timezone.utc).isoformat()}
-        (audit / name).write_text(json.dumps(event))
-    write_stop("aa-first-new-stop.json", "first-new-stop")
+    def publish_stop(identity):
+        # Exercise the packaged native-hook producer. Legacy audit files alone
+        # are intentionally not imported by the history-independent service.
+        payload = {"hook_event_name": "Stop", "session_id": new, "cwd": str(repo),
+                   "turn_id": identity, "last_assistant_message": "Package rebind fixture"}
+        result = json.loads(run([*prefix, "hook", "--grace-seconds", "30"],
+                                input=json.dumps(payload), timeout=45))
+        assert result == {}
+    publish_stop("first-new-stop")
     assert cycle()["stop_count"] == 1
     assert cycle()["stop_count"] == 0
-    write_stop("zzz-next-stop.json", "next-stop")
+    publish_stop("next-stop")
     assert cycle()["stop_count"] == 1
     assert cycle()["stop_count"] == 0
     state = json.loads(state_path.read_text())
