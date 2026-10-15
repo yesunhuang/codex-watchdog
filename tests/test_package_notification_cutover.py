@@ -9,6 +9,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import sysconfig
 import time
 from types import SimpleNamespace
 
@@ -57,25 +58,32 @@ def test_unreadable_census_model_refuses(monkeypatch):
         tracker.census()
 
 
-def sleep_image(tmp_path):
-    image = tmp_path / "unique-fixture-sleep"
-    shutil.copyfile(shutil.which("sleep"), image)
+def python_image(tmp_path):
+    # Copy the actual ELF, independent of a distribution command's wrapper or
+    # multicall implementation. This fixture imports no application modules.
+    image = tmp_path / "unique-fixture-python"
+    shutil.copyfile("/proc/self/exe", image)
     image.chmod(0o700)
+    with image.open("rb") as stream:
+        assert stream.read(4) == b"\x7fELF"
     return image
 
 
 @linux
 def test_native_census_requires_backend_and_detached_image_closure(tmp_path, native_census_available):
-    image = sleep_image(tmp_path)
+    image = python_image(tmp_path)
+    probe_environment = {"PYTHONHOME": sys.base_prefix,
+        "LD_LIBRARY_PATH": sysconfig.get_config_var("LIBDIR") or str(Path(sys.base_prefix) / "lib")}
     tracker = helper.FixtureSenders(tmp_path, [image])
     ready, release = tmp_path / "ready", tmp_path / "release"
     # Owned controller exits on release; its finite-lived backend stays in the
     # original group. No test process is killed or signaled by this test.
     code = ("import pathlib,subprocess,sys,time; "
-            "subprocess.Popen([sys.argv[1],'3']); pathlib.Path(sys.argv[2]).write_text('ready'); "
+            "subprocess.Popen([sys.argv[1],'-S','-c','import time; time.sleep(3)']); pathlib.Path(sys.argv[2]).write_text('ready'); "
             "deadline=time.monotonic()+5\n"
             "while not pathlib.Path(sys.argv[3]).exists() and time.monotonic()<deadline: time.sleep(.01)\n")
-    parent = tracker.spawn([sys.executable, "-c", code, str(image), str(ready), str(release)])
+    parent = tracker.spawn([sys.executable, "-S", "-c", code, str(image), str(ready), str(release)],
+                           env=probe_environment)
     try:
         deadline = time.monotonic() + 3
         while not ready.exists() and time.monotonic() < deadline:
@@ -89,8 +97,13 @@ def test_native_census_requires_backend_and_detached_image_closure(tmp_path, nat
         while tracker.census()["live"] and time.monotonic() < deadline:
             time.sleep(.03)
         assert not tracker.census()["live"]
-        detached = subprocess.Popen([str(image), "1"], start_new_session=True)
+        detached = subprocess.Popen([str(image), "-S", "-c", "import time; time.sleep(2)"],
+                                    env=probe_environment, start_new_session=True)
         try:
+            deadline = time.monotonic() + 1
+            while helper.proc_record(detached.pid).get("image") != helper.resource(image):
+                assert detached.poll() is None and time.monotonic() < deadline, "fixture ELF not running"
+                time.sleep(.01)
             live = tracker.census()["live"]
             assert any(r["pid"] == detached.pid and r["group"] not in tracker.groups for r in live)
         finally:
