@@ -48,6 +48,18 @@ foreach ($receiptGuidePhrase in @("notification-receipts-export", "--runtime", "
     }
 }
 
+foreach ($guideCheck in @(
+    @{ Name = "NOTIFICATION_RETENTION.md"; Phrases = @("notification-retention-prepare", "--runtime", "--projection", "--quiescence", "caller_native_receipt_not_independent_census") },
+    @{ Name = "SESSION_ACTIVITY.md"; Phrases = @("72 hours", "last four", "exact Codex session", "one Hello") }
+)) {
+    $guidePath = Join-Path $package ("docs\" + $guideCheck.Name)
+    if (-not (Test-Path -LiteralPath $guidePath -PathType Leaf)) { throw "Packaged guide is missing: $($guideCheck.Name)" }
+    $guideText = Get-Content -LiteralPath $guidePath -Raw -Encoding UTF8
+    foreach ($phrase in $guideCheck.Phrases) {
+        if (-not $guideText.Contains($phrase)) { throw "Packaged guide is incomplete: $($guideCheck.Name)" }
+    }
+}
+
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("codex-watchdog-package-test-" + [guid]::NewGuid().ToString("N"))
 $savedEnvironment = @{}
 $environmentNames = @(

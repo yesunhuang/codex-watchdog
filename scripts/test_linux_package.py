@@ -107,7 +107,7 @@ def validate_archive(package: Path) -> dict:
     architecture, machine = {"aarch64": ("arm64", 183), "x86_64": ("x64", 62)}[platform.machine()]
     assert manifest["platform"] == "linux" and manifest["architecture"] == architecture
     assert manifest["schema_version"] == 1 and len(manifest["source_commit"]) == 40
-    allowed = {"codex-watchdog", "LICENSE", "LINUX_PACKAGE.md", "FEISHU_LARK.md", "MESSAGING_SETUP.md", "SETUP.md", "ONEBOT_QQ.md", "ONEBOT_REUSE.md", "SESSION_BINDING.md", "SESSION_ACCESS.md", "NOTIFICATION_RECEIPTS.md", "THIRD_PARTY_NOTICES.md",
+    allowed = {"codex-watchdog", "LICENSE", "LINUX_PACKAGE.md", "FEISHU_LARK.md", "MESSAGING_SETUP.md", "SETUP.md", "ONEBOT_QQ.md", "ONEBOT_REUSE.md", "SESSION_BINDING.md", "SESSION_ACCESS.md", "NOTIFICATION_RECEIPTS.md", "NOTIFICATION_RETENTION.md", "SESSION_ACTIVITY.md", "PLATFORM_SUPPORT.md", "THIRD_PARTY_NOTICES.md",
                "THIRD_PARTY_LICENSES/README.md", "THIRD_PARTY_LICENSES/inventory.json"}
     inventory = json.loads((package / "THIRD_PARTY_LICENSES/inventory.json").read_text())
     assert inventory["schema_version"] == 1
@@ -127,6 +127,12 @@ def validate_archive(package: Path) -> dict:
     assert all(digest(package / name) == sha for name, sha in manifest["files"].items())
     rollback_guide = (package / "NOTIFICATION_RECEIPTS.md").read_text(encoding="utf-8")
     assert all(text in rollback_guide for text in ("notification-receipts-export", "--runtime", "sent", "uncertain"))
+    retention_guide = (package / "NOTIFICATION_RETENTION.md").read_text(encoding="utf-8")
+    assert all(text in retention_guide for text in (
+        "notification-retention-prepare", "--runtime", "--projection", "--quiescence",
+        "caller_native_receipt_not_independent_census"))
+    activity_guide = (package / "SESSION_ACTIVITY.md").read_text(encoding="utf-8")
+    assert all(text in activity_guide for text in ("72 hours", "last four", "exact Codex session", "one Hello"))
     archive = package.parent / (package.name + ".zip")
     assert digest(archive) == (archive.parent / (archive.name + ".sha256")).read_text().split()[0]
     with zipfile.ZipFile(archive) as zipped:

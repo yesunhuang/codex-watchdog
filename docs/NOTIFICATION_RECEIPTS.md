@@ -42,6 +42,8 @@ modify native queues or export secrets. Existing schema2 reply journals retain
 their bounded compatibility reader; that reader does not implicitly migrate or
 prune another owner's state.
 
+The selected notification root is supplied with `--runtime`; it is distinct
+from a controller root when an existing authority selects portable storage.
 Existing notification history requires the explicit offline transition in
 [retention and upgrades](NOTIFICATION_RETENTION.md). The operator excludes all
 actual old notification senders and subprocesses, supplies the exact current
