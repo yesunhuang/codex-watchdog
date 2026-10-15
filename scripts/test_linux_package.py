@@ -23,6 +23,7 @@ import types
 import zipfile
 
 from package_rebind_acceptance import verify_manual_rebind
+from package_notification_cutover import FixtureSenders
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -213,9 +214,18 @@ def main() -> None:
         shutil.copytree(package, copied)
         executable = copied / "codex-watchdog"
         executable.chmod(0o700)
+        fixture_senders = FixtureSenders(root, [executable])
         def run(arguments, accepted=(0,), input_text=None, timeout=45, env=None):
-            result = subprocess.run([str(v) for v in arguments], cwd=work, env=env or environment,
-                                    input=input_text, capture_output=True, text=True, timeout=timeout)
+            child = fixture_senders.spawn([str(v) for v in arguments], cwd=work, env=env or environment,
+                stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                stdout, stderr = child.communicate(input_text, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                child.kill()  # Same owned-child cleanup as subprocess.run(timeout=...).
+                child.communicate()
+                raise
+            result = subprocess.CompletedProcess(child.args, child.returncode, stdout, stderr)
             output_log.append(result.stdout + result.stderr)
             assert result.returncode in accepted, (arguments[1:2], result.returncode, result.stdout, result.stderr)
             return result
@@ -268,6 +278,7 @@ def main() -> None:
         old_hooks = (codex / "hooks.json").read_bytes()
         assert json.loads(run([executable, "linux-install"]).stdout)["runtime_reused"]
         installed = config / "bin/codex-watchdog"
+        fixture_senders.remember_image(installed)
         profile_path = config / "linux-launcher.json"
         profile = json.loads(profile_path.read_text())
         assert profile["runtime"] == str(runtime) and profile["codex_home"] == str(codex)
@@ -287,6 +298,7 @@ def main() -> None:
         before_inode = installed.stat().st_ino
         assert json.loads(run([executable, "linux-install"]).stdout)["status"] == "installed"
         assert installed.stat().st_ino != before_inode
+        fixture_senders.remember_image(installed)
         assert json.loads(profile_path.read_text())["future_setting"] == {"retain": True}
         assert next(installed.parent.glob("codex-watchdog.backup-*")).read_bytes() == installed.read_bytes()
         assert json.loads(run([installed, "linux-hooks", "--install"]).stdout)["status"] == "unchanged"
@@ -365,7 +377,7 @@ def main() -> None:
         # Discard only the fixture's old observation before waiting for a new one.
         (runtime / "linux/status.json").unlink()
         def start_owner(env=None):
-            return subprocess.Popen([str(installed), "linux-run", "--interval", "1", "--codex-executable", str(fake_codex)],
+            return fixture_senders.spawn([str(installed), "linux-run", "--interval", "1", "--codex-executable", str(fake_codex)],
                                     cwd=work, env=env or environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     text=True, start_new_session=True)
         process = start_owner()
@@ -438,6 +450,10 @@ def main() -> None:
             wait_state(runtime, "released")
             process.communicate(timeout=15)
             assert process.returncode == 0
+            cold_preparation = fixture_senders.prepare(installed, runtime, codex, "package-fixture", THREAD,
+                environment, work, root / "notification cutover evidence",
+                protected_files=[*protected, profile_path, codex / "hooks.json", reservation,
+                                 codex / "state_5.sqlite", codex / "queue_1.sqlite"])
             # Exercise the frozen notification path against a loopback-only
             # Slack-compatible receiver, with no provider credentials/accounts.
             alerts = []
@@ -695,6 +711,7 @@ with lock.open("w") as handle:
               "queue_courier_invocations": len(courier_calls),
               "queue_admission_rejections_without_side_effects": queue_admission_rejections,
               "detached_owner_loss_and_recovery_notifications": True,
+              "fixture_notification_cold_cli_preparation": cold_preparation,
               "notification_fixture_transport": "loopback_http_no_provider_credentials",
               "watchdog_git_read_only": True, "production_fixture_stop_ms": terminal[0]["hook_duration_ms"],
               "real_codex_hook_acceptance": "separate_native_user_test",

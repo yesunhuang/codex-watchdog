@@ -68,7 +68,7 @@ def find_native_rollout(
             plan = db.execute("EXPLAIN QUERY PLAN " + _QUERY, (thread_id,)).fetchmany(8)
             # A compatible native index is required before any thread rows are
             # visited. LIMIT alone would still scan H rows on a missing UUID.
-            if len(plan) != 1 or not plan[0][3].startswith("SEARCH threads ") or "(id=?)" not in plan[0][3]:
+            if len(plan) != 1 or not plan[0][3].startswith(("SEARCH threads ", "SEARCH TABLE threads ")) or "(id=?)" not in plan[0][3]:
                 return None
             rows = db.execute(_QUERY, (thread_id,)).fetchmany(2)
         after = _regular(database)

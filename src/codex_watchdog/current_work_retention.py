@@ -68,7 +68,7 @@ def _indexed_rows(db, query, arguments, index):
     detail = "SEARCH records USING INDEX " + index + " (" + expected + ")"
     # Refuse an unsupported plan locally. Index rebuilding belongs to cold
     # preparation; no history query or schema repair is attempted here.
-    if len(plan) != 1 or plan[0][3] != detail:
+    if len(plan) != 1 or plan[0][3] not in (detail, "SEARCH TABLE records USING INDEX " + index + " (" + expected + ")"):
         raise NativeInflightError("native_retention_index_unavailable")
     return db.execute(query, arguments).fetchall()
 

@@ -178,7 +178,7 @@ class LegacyReplyTickets(ReplyTickets):
             # SQLite3.45 recognizes the metadata-only rank seek as covering;
             # both shapes retain all exact equality keys and no sort/scan.
             suffixes = (suffix, suffix.replace('USING INDEX ', 'USING COVERING INDEX '))
-            if len(plan) != 1 or not plan[0][3].startswith('SEARCH records ') or not plan[0][3].endswith(suffixes):
+            if len(plan) != 1 or not plan[0][3].startswith(('SEARCH records ', 'SEARCH TABLE records ')) or not plan[0][3].endswith(suffixes):
                 raise ValueError('reply_ticket_legacy_schema_invalid')
 
     def _before_prune(self, db):

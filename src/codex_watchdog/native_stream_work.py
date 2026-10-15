@@ -94,7 +94,7 @@ def stream_exact_thread(home, thread, repo):
             if db.execute("SELECT type FROM sqlite_master WHERE name='threads'").fetchmany(2)!=[("table",)]:
                 return False
             plan=db.execute("EXPLAIN QUERY PLAN "+query,(thread,)).fetchmany(8)
-            if len(plan)!=1 or not plan[0][3].startswith("SEARCH threads ") or "(id=?)" not in plan[0][3]:
+            if len(plan)!=1 or not plan[0][3].startswith(("SEARCH threads ","SEARCH TABLE threads ")) or "(id=?)" not in plan[0][3]:
                 return False
             rows=db.execute(query,(thread,)).fetchmany(2)
         after=path.stat()
