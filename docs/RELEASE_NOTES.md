@@ -1,34 +1,34 @@
-# Codex WatchDog 2.2.8
+# Codex WatchDog 2.2.9
 
-WatchDog now reserves each logical effect durably before one permitted external
-attempt. Failed, uncertain, timed-out and crash-left attempts remain ineligible
-for automatic retry. Their original evidence is preserved, while later distinct
-commands, Git observations, notifications and supported handoffs can proceed.
-Historical wake, acknowledgement and completion records no longer gate routine
-activation. Completion reconciliation remains an explicit bounded forensic tool.
+WatchDog keeps routine observation, polling, Stop handling and notification work
+independent of accumulated history. Indexed current snapshots, bounded receipt
+retention and source-time retirement preserve at-most-once delivery: a failed,
+uncertain or crash-left claim remains ineligible for automatic replay while later
+independent work can proceed. Current native writers, sender fences, exact grants,
+FIFO, one-shot tickets, UUID deduplication and provider backoff retain their guards.
 
-Current native writers, queued work, live ownership, sender leases and in-flight
-sends retain their guards. Exact-session grants, principals, routes, one-shot
-tickets and UUID deduplication are preserved. Closed or evicted tickets remain
-untracked; the last four valid tickets per provider/session and bounded indexed
-polling, failure isolation and provider backoff remain in effect.
+Reply tickets expire at their absolute 72-hour lifetime and retain the last four
+still-valid tickets per provider and exact session. Closed or evicted tickets stay
+untracked. Dormancy follows genuine activity; a restart is not new activity and
+genuine ongoing native work remains monitored. A later verified activity
+generation can produce one new Hello through the configured route.
 
-Linux handoffs use current authenticated native ownership evidence rather than
-historical receipt settlement. A cross-node transition still needs a verified
-peer transport; automatic peer-route configuration is not included. A refusal
-affects that transition, while independent selected-owner work can continue.
-Existing shared authority state is reused without repeating its offline import.
-See [Linux authority, recovery and rollback](LINUX_SESSION_RELAY_AUTHORITY.md).
+First-install notifications initialize only a genuinely absent namespace under
+actual sender exclusion, preserving original event birth and committing both
+finite receipt families before sending. Existing notification history uses the
+explicit controlled offline `notification-retention-prepare` transition. It
+requires actual old-sender/subprocess exclusion, an exact current projection and
+a fresh bound native receipt; the command does not establish an OS census itself.
+Interrupted preparations recover forward with their original plan and claims.
+Do not restart old senders against prepared finite state or restore old journals.
+See [notification retention and upgrades](NOTIFICATION_RETENTION.md).
 
-Saved profiles, credentials, pairings, destinations, grants and journals are
-reused. Windows x64, Linux x64, Linux ARM64 and macOS ARM64 preview are built from
-one canonical public revision. Package acceptance includes the immediately
-previous public 2.2.7 profile/runtime upgrade path and the embedded Windows icon.
-Source, package, native deployment and end-to-end acceptance remain distinct.
-Once the candidate has claimed an effect, older 2.2.7 senders and embedded
-helpers do not enforce those new claims. Recover with a reservation-aware build;
-do not automatically restart old senders against post-candidate state or restore
-an older journal. Retained old images support rollback before candidate activity.
+Saved compatible profiles, credentials, pairings, destinations, grants and provider
+journals are reused without routine reconfiguration. Windows x64, Linux x64,
+Linux ARM64 and macOS ARM64 preview use one canonical public revision. Package,
+previous-public 2.2.8 upgrade, compiled behavior, native rollout and fresh
+end-to-end acceptance remain distinct; individual results and exclusions must be
+verified before publication. The Windows executable embeds the application icon.
 
 macOS remains an ARM64 preview. Other-window coverage and Linux stale-boot writer
 recovery limitations remain. Native writer parking does not establish editor GUI

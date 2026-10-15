@@ -20,6 +20,12 @@ CONTINUED = "31111111-2222-4333-8444-555555555555"
 QUEUE = "41111111-2222-4333-8444-555555555555"
 
 
+def _input_payload(text):
+    return json.dumps({"UserInput": {
+        "content": [{"type": "text", "text": text, "text_elements": []}],
+        "client_id": "51111111-2222-4333-8444-555555555555"}})
+
+
 @pytest.fixture
 def scenario(tmp_path, monkeypatch):
     home, repo = tmp_path / "codex", tmp_path / "project"
@@ -28,11 +34,13 @@ def scenario(tmp_path, monkeypatch):
     rollout.parent.mkdir(parents=True)
     rollout.write_text("{}\n")
     with sqlite3.connect(home / "state_5.sqlite") as db:
-        db.execute("CREATE TABLE threads(id,cwd,source,thread_source,archived,rollout_path)")
+        db.execute("CREATE TABLE threads(id TEXT PRIMARY KEY,cwd,source,thread_source,archived,rollout_path)")
         db.execute("INSERT INTO threads VALUES (?,?,'vscode','user',0,?)", (THREAD, str(repo), str(rollout)))
     with sqlite3.connect(home / "queue_1.sqlite") as db:
-        db.execute("CREATE TABLE queued_items(id,thread_id,payload_json)")
-        db.execute("CREATE TABLE queued_thread_revisions(thread_id,revision)")
+        db.execute("CREATE TABLE queued_items(id TEXT PRIMARY KEY,thread_id TEXT,payload_json TEXT,"
+                   "queue_order INTEGER DEFAULT 0)")
+        db.execute("CREATE INDEX queued_items_thread_order_idx ON queued_items(thread_id,queue_order)")
+        db.execute("CREATE TABLE queued_thread_revisions(thread_id TEXT PRIMARY KEY,revision INTEGER)")
     monkeypatch.setattr(linux_binding, "locality_identity", lambda: "fixture-host")
     binding = LinuxBinding(tmp_path / "runtime", home)
     workspace = TrackedWorkspace.create("fixture-project", repo, THREAD)
@@ -50,7 +58,9 @@ def scenario(tmp_path, monkeypatch):
         if data.uncertain:
             raise subprocess.TimeoutExpired(args, 1)
         with sqlite3.connect(home / "queue_1.sqlite") as db:
-            db.execute("INSERT INTO queued_items VALUES (?,?,?)", (QUEUE, THREAD, args[5]))
+            payload = _input_payload(args[5])
+            db.execute("INSERT INTO queued_items(id,thread_id,payload_json) VALUES (?,?,?)",
+                       (QUEUE, THREAD, payload))
         return subprocess.CompletedProcess(args, 0, f"Queued message {QUEUE} for thread {THREAD}.", "")
 
     dispatcher = QueueWakeDispatcher(binding.runtime, codex_executable="fixture-codex", runner=queue, codex_home=home)
@@ -96,6 +106,7 @@ def scenario(tmp_path, monkeypatch):
                                 client_factory=lambda *a: Client(), continue_interrupted=enabled)
 
     data.owner = make_owner()
+    data.client_factory = data.owner.client_factory
     data.make_owner = make_owner
     data.dispatcher = dispatcher
     data.notifier = notifier
@@ -181,7 +192,8 @@ def test_no_continuation_while_gated(scenario, gate):
         s.owner.approval_required = True
     elif gate == "pending":
         with sqlite3.connect(s.binding.codex_home / "queue_1.sqlite") as db:
-            db.execute("INSERT INTO queued_items VALUES (?,?,?)", (QUEUE, THREAD, "user's queued work"))
+            db.execute("INSERT INTO queued_items(id,thread_id,payload_json) VALUES (?,?,?)",
+                       (QUEUE, THREAD, _input_payload("user's queued work")))
     elif gate == "release":
         s.binding.request_release()
     else:
@@ -358,7 +370,8 @@ def test_reconciled_receipt_keeps_fresh_handback_guards(scenario, gate):
         s.native_status = "active"
     elif gate == "new_queue":
         with sqlite3.connect(s.binding.codex_home / "queue_1.sqlite") as db:
-            db.execute("INSERT INTO queued_items VALUES (?,?,?)", (QUEUE, THREAD, "new work"))
+            db.execute("INSERT INTO queued_items(id,thread_id,payload_json) VALUES (?,?,?)",
+                       (QUEUE, THREAD, _input_payload("new work")))
     else:
         def change_writer(method, params):
             if method == "thread/read":
@@ -542,6 +555,54 @@ def test_parked_prepared_without_queue_record_does_not_admit_work(scenario, monk
     assert result["owner_state"] == "parked" and result["continuation"]["status"] == "prepared"
     assert not s.receipt_path.exists() and s.owner.client is None and s.writer is None
     assert s.calls == s.native_calls_before_restart and len(s.sent) == 1 and not s.notices
+
+
+def test_distinct_current_courier_import_resumes_parked_owner_without_replaying_uncertain_continuation(
+    scenario, monkeypatch,
+):
+    from codex_watchdog import control_state as cs
+    s = scenario
+    _park_and_restart_saved_continuation(s, monkeypatch)
+    old = json.loads(s.receipt_path.read_text())
+    old["state"] = "uncertain"
+    InstructionStore._atomic_json(s.receipt_path, old)
+    old_bytes = s.receipt_path.read_bytes()
+    value = json.loads(s.owner.continuation.path.read_text())
+    value["status"] = "uncertain"
+    InstructionStore._atomic_json(s.owner.continuation.path, value)
+
+    # This is a distinct fixture submission already admitted to CURRENT native
+    # Q. Import observes its exact native header/body and original node receipt;
+    # it neither dispatches a prompt nor starts/skips a queue item.
+    instruction, prompt = "git:distinct-current-fixture", "distinct fixture work"
+    digest = sha256_text(prompt)
+    wrapped = "[CODEX_WATCHDOG_WAKE id=%s sha256=%s]\n%s" % (instruction, digest, prompt)
+    payload = json.dumps({"UserInput": {"content": [
+        {"type": "text", "text": wrapped, "text_elements": []}],
+        "client_id": "51111111-2222-4333-8444-555555555555"}})
+    home = s.binding.codex_home
+    path = cs.control_state_home(home)/"remote-wake"/(sha256_text(instruction)+".json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    receipt = dict(schema_version=2, instruction_id=instruction, thread_id=THREAD,
+                   queue_message_id=QUEUE, prompt_sha256=digest, state="enqueued")
+    InstructionStore._atomic_json(path, receipt)
+    with sqlite3.connect(home/"queue_1.sqlite") as db:
+        db.execute("INSERT INTO queued_items(id,thread_id,payload_json) VALUES(?,?,?)",
+                   (QUEUE, THREAD, payload))
+    assert linux_owner.node_has_queued_wake(home, THREAD) is False
+    assert cs.control_import_current_couriers(home, THREAD)["imported"] == 1
+    queue_bytes = path.read_bytes()
+    with sqlite3.connect(home/"queue_1.sqlite") as db:
+        before_queue = db.execute("SELECT * FROM queued_items ORDER BY queue_order").fetchall()
+    monkeypatch.setattr(s.owner, "client_factory", s.client_factory)
+    result = _step_parked(s)
+    assert result["owner_state"] == "owned"
+    assert s.owner.client is not None and s.writer == s.owner.client.process.pid
+    assert s.store.read()["node_parked"] is False
+    assert s.receipt_path.read_bytes() == old_bytes and path.read_bytes() == queue_bytes
+    assert len(s.sent) == 1 and not _start_calls(s)
+    with sqlite3.connect(home/"queue_1.sqlite") as db:
+        assert db.execute("SELECT * FROM queued_items ORDER BY queue_order").fetchall() == before_queue
 
 
 def test_parked_reconciliation_is_rate_limited_between_owner_steps(scenario, monkeypatch):
@@ -748,7 +809,6 @@ def _native_queue(s):
     """The real native payload and FIFO schema of interrupted queue tests."""
     s.step()
     with sqlite3.connect(s.binding.codex_home / "queue_1.sqlite") as db:
-        db.execute("ALTER TABLE queued_items ADD COLUMN queue_order INTEGER DEFAULT 0")
         db.execute("UPDATE queued_items SET payload_json=? WHERE id=?", (json.dumps({
             "UserInput": {"content": [{"type": "text", "text": s.sent[0], "text_elements": []}],
                           "client_id": "51111111-2222-4333-8444-555555555555"}}), QUEUE))
@@ -844,7 +904,8 @@ def test_continuation_does_not_jump_other_queued_input(scenario):
     s = scenario
     _native_queue(s)
     with sqlite3.connect(s.binding.codex_home / "queue_1.sqlite") as db:
-        db.execute("INSERT INTO queued_items VALUES (?,?,?,-1)", (CONTINUED, THREAD, "human input"))
+        db.execute("INSERT INTO queued_items VALUES (?,?,?,-1)",
+                   (CONTINUED, THREAD, _input_payload("human input")))
     s.step()
     assert not _start_calls(s)
     assert len(s.sent) == 1

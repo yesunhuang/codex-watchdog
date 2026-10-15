@@ -11,6 +11,7 @@ from .app_server import AppServerError
 from .linux_binding import LinuxBindingError, read_json
 from .models import sha256_text, utc_now
 from .notifications import NotificationEvent, notification_workspace_label
+from .notification_context import source_time
 from .remote_control import notify_local_control
 from .storage import FileLock, InstructionStore
 
@@ -105,6 +106,8 @@ class LinuxContinuation:
             transition_fingerprint=sha256_text(value["instruction_id"]),
             subject=f"[Codex Watchdog] {label} automatic continuation " + ("started" if started else "needs attention"),
             message=message,
+            source_born=source_time(value.get("created_at")),
+            source_thread_id=workspace.session_id,
         )
         selected = current_control()
         if selected is not None:

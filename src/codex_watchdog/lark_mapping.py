@@ -19,10 +19,11 @@ class LarkThreadMapping:
 
 class LarkThreadStore:
     provider = "lark"
-    def __init__(self, runtime, scope):
+    def __init__(self, runtime, scope, *, clock=None):
         if not isinstance(scope, str) or re.fullmatch(r"[0-9a-f]{64}", scope) is None:
             raise ValueError("Lark scope is invalid")
         self.runtime = Path(runtime)
+        self.clock = clock
         self.scope = scope
         self.path = Path(runtime) / "lark" / scope / "relay-state.json"
         self.lock_path = Path(runtime) / "locks" / ("lark-relay-" + scope + ".lock")
@@ -77,11 +78,15 @@ class LarkThreadStore:
 
     @property
     def journal(self):
-        from .reply_tickets import ReplyTickets
+        from .legacy_reply_tickets import select_reply_journal as ReplyTickets
+        authority = getattr(self, "relay_authority", None)
+        retention = getattr(self, "retention_binding", None) or getattr(authority, "retention_binding", None)
         return ReplyTickets(self.path, self.lock_path, self.provider, self.runtime, self._legacy_state,
-                            authority=getattr(self, "relay_authority", None))
+                            authority=authority,clock=self.clock,
+                            before_prune=getattr(retention, "before_prune", None),
+                            retention_fence=getattr(retention, "fence", None))
 
-    def prepare_notification(self, fingerprint, payload_sha256):
+    def prepare_notification(self, fingerprint, payload_sha256, *, created_at=None, thread_id=None):
         if not self._digest(fingerprint) or not self._digest(payload_sha256):
             raise ValueError("Lark notification fingerprint is invalid")
         journal = self.journal
@@ -93,8 +98,27 @@ class LarkThreadStore:
                 if previous["state"] != "sent":
                     raise LarkTransportError("lark_notification_outcome_uncertain")
                 return dict(previous)
-            journal.put(db, "notifications", fingerprint, dict(payload_sha256=payload_sha256,
-                        state="uncertain", created_at=utc_now()))
+            from .recent_state import epoch, now, TTL_SECONDS
+            current = now(journal, db)
+            if created_at is None:
+                from datetime import datetime, timezone
+                # datetime rounds sub-microsecond inputs. Truncate instead so
+                # our new parent never lies just beyond the same source clock.
+                whole = int(current)
+                micros = int((current - whole) * 1_000_000)
+                birth = datetime.fromtimestamp(whole, timezone.utc).replace(microsecond=micros).isoformat().replace("+00:00", "Z")
+            else:
+                birth = created_at
+                original = epoch(created_at)
+                if original is None or original > current or current-original >= TTL_SECONDS:
+                    raise LarkTransportError("lark_notification_ticket_retired")
+            entry = dict(payload_sha256=payload_sha256, state="uncertain", created_at=birth)
+            if thread_id is not None:
+                import uuid
+                if str(uuid.UUID(thread_id)) != thread_id:
+                    raise ValueError("notification_source_thread_invalid")
+                entry["thread_id"] = thread_id
+            journal.put(db, "notifications", fingerprint, entry)
         return None
 
     def finish_notification(self, fingerprint, chat_id, message_id, target=None):
@@ -102,9 +126,11 @@ class LarkThreadStore:
         journal = self.journal
         with journal.transaction() as db:
             receipt = journal.get(db, "notifications", fingerprint)
+            if not isinstance(receipt, dict) or not isinstance(receipt.get("created_at"),str):
+                return  # A late/retired callback cannot mint a new reply parent.
             if target is not None:
                 journal.record(db, key, dict(chat_id=chat_id, message_id=message_id,
-                    target=target.to_dict(), event_fingerprint=fingerprint, created_at=utc_now()))
+                    target=target.to_dict(), event_fingerprint=fingerprint, created_at=receipt["created_at"]))
             receipt.update(state="sent", chat_id=chat_id, message_id=message_id)
             journal.put(db, "notifications", fingerprint, receipt)
 

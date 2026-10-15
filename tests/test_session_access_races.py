@@ -103,6 +103,12 @@ def case(request, tmp_path, monkeypatch):
 def grant_delegate(case):
     """Grant through the provider's real add handler, preserving the older source."""
     case.record(case.grant_source)
+    if case.relay.thread_store.provider == "onebot":
+        from datetime import datetime, timezone
+        # A physical reply is created only after its corresponding parent.
+        # Constructing it in case() made it precede this newly created parent
+        # by >1s under load, correctly triggering the source's stale guard.
+        case.grant_event["time"] = int(datetime.now(timezone.utc).timestamp())
     result = case.handle(case.grant_event)
     assert (result.status, result.delivery_status) == ("access_applied", "added")
     with case.journal.transaction() as db:

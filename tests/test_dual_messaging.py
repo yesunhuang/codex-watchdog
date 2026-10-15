@@ -82,12 +82,12 @@ def test_one_event_reaches_both_once_and_preserves_both_reply_routes(tmp_path, m
 def test_provider_timeout_does_not_block_other_or_replay_either_after_restart(tmp_path, failed):
     calls = ProviderCalls(failed)
     result = calls.notifier(tmp_path).notify(EVENT)
-    assert result.status == "delivery_failed" and not result.state_persisted
+    assert result.status == "delivery_failed" and result.state_persisted
     assert result.channel == ("lark" if failed == "slack" else "slack")
     assert len(calls.slack) == len(calls.lark) == 1
     calls.failed = None
     repeated = calls.notifier(tmp_path).notify(EVENT)
-    assert repeated.status == "delivery_failed" and repeated.attempted_channels == ()
+    assert repeated.status == "suppressed" and repeated.attempted_channels == ()
     assert len(calls.slack) == len(calls.lark) == 1
     with FileLock(tmp_path / "locks/notifications.lock"), DualDeliveryReceipts(tmp_path) as receipts:
         receipt = receipts.get(EVENT.event_fingerprint())
@@ -98,11 +98,13 @@ def test_provider_timeout_does_not_block_other_or_replay_either_after_restart(tm
 def test_enabling_both_does_not_replay_legacy_events(tmp_path):
     calls = ProviderCalls()
     assert calls.notifier(tmp_path, replace(config(), interactive_transport="slack")).notify(EVENT).status == "sent"
-    before = (tmp_path/"notifications/last-events.json").read_bytes()
+    from codex_watchdog.notification_state import CurrentNotificationState
+    state_path=CurrentNotificationState(tmp_path).path(EVENT.dedupe_key())
+    before = state_path.read_bytes()
     receipt_before = (tmp_path/"notifications/dual-deliveries.json").read_bytes()
     assert calls.notifier(tmp_path).notify(EVENT).duplicate
     assert len(calls.slack) == 1 and not calls.lark
-    assert (tmp_path/"notifications/last-events.json").read_bytes() == before
+    assert state_path.read_bytes() == before
     assert (tmp_path/"notifications/dual-deliveries.json").read_bytes() == receipt_before
 
 
@@ -131,7 +133,7 @@ def test_post_send_write_failure_is_not_replayed(tmp_path, monkeypatch):
     assert first.status == "delivery_failed"
     assert first.provider_outcomes == {"slack": "uncertain", "lark": "sent"}
     result = calls.notifier(tmp_path).notify(EVENT)
-    assert result.status == "delivery_failed"
+    assert result.status == "suppressed"
     assert len(calls.slack) == len(calls.lark) == 1
 
 

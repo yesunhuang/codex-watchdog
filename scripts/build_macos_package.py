@@ -90,6 +90,9 @@ def main() -> None:
     shutil.copy2(ROOT / "docs/SESSION_BINDING.md", package / "SESSION_BINDING.md")
     shutil.copy2(ROOT / "docs/SESSION_ACCESS.md", package / "SESSION_ACCESS.md")
     shutil.copy2(ROOT / "docs/NOTIFICATION_RECEIPTS.md", package / "NOTIFICATION_RECEIPTS.md")
+    shutil.copy2(ROOT / "docs/NOTIFICATION_RETENTION.md", package / "NOTIFICATION_RETENTION.md")
+    shutil.copy2(ROOT / "docs/SESSION_ACTIVITY.md", package / "SESSION_ACTIVITY.md")
+    shutil.copy2(ROOT / "docs/PLATFORM_SUPPORT.md", package / "PLATFORM_SUPPORT.md")
     shutil.copy2(ROOT / "THIRD_PARTY_NOTICES.md", package / "THIRD_PARTY_NOTICES.md")
     subprocess.run([
         sys.executable, str(ROOT / "tools/generate_dependency_licenses.py"),

@@ -107,7 +107,7 @@ def test_allowlisted_known_thread_reply_is_queued_verbatim_once(
     assert queue.calls[0][3] == "slack_reply"
     durable = service.thread_store.path.read_text(encoding="utf-8")
     assert "use B, then continue" not in durable
-    assert json.loads(durable)["schema_version"] == 2
+    assert json.loads(durable)["schema_version"] == 3
     assert service.thread_store.lookup_reply("event:Ev12345678")["state"] == "delivered"
 
 

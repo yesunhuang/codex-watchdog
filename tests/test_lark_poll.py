@@ -68,10 +68,11 @@ def setup(root, *, parent=ROOT, tid=THREAD, api=None):
     calls = []
     queue = SimpleNamespace(dispatch=lambda *args: calls.append(args) or SimpleNamespace(status="enqueued"))
     relay = LarkReplyRelay(root, cfg, queue_dispatcher=queue, remote_ssh_adapter=None, api=api)
+    clock = [100]
+    relay.thread_store.clock=lambda:clock[0]
     relay.thread_store.cache_mappings([dict(provider="lark", scope=cfg.scope, chat_id=CHAT,
         message_id=parent, event_fingerprint="a" * 64, ticket_schema=1,
         created_at="1970-01-01T00:01:40Z")], RelayTarget("workspace", tid, "process_local"))
-    clock = [100]
     poller = LarkReplyPoller(relay, api=api, clock=lambda: clock[0])
     poller._read()
     clock[0] = 110

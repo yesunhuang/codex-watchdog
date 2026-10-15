@@ -123,6 +123,7 @@ class Rig:
         dispatcher = SimpleNamespace(dispatch=self.dispatch)
         self.relay = LarkReplyRelay(path, cfg, queue_dispatcher=dispatcher,
                                    remote_ssh_adapter=None, api=self.api)
+        self.relay.thread_store.clock=lambda:self.clock[0]
         self.poller = self.restart()
         # Preserve a pre-upgrade chat cursor without resuming its history.
         self.poller._read(baseline_ms=100000)
@@ -286,6 +287,7 @@ def test_provider_session_cap_spans_app_namespaces_without_becoming_global(tmp_p
     cfg = LarkConfig("cli_fixture000002", "synthetic-secret", OTHER_CHAT, (USER,))
     other = LarkReplyRelay(tmp_path, cfg, queue_dispatcher=SimpleNamespace(dispatch=r.dispatch),
                            remote_ssh_adapter=None, api=r.api)
+    other.thread_store.clock=lambda:r.clock[0]
     other.thread_store.cache_mappings([dict(provider="lark", scope=cfg.scope, ticket_schema=1,
         chat_id=OTHER_CHAT, message_id=OTHER_ROOT, created_at="1970-01-01T00:01:44Z",
         event_fingerprint="b" * 64)], RelayTarget("workspace", THREAD, "process_local"))

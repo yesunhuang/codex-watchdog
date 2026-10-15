@@ -54,6 +54,19 @@ teammate or manager can address that exact existing agent. Managers may be human
 or AI, centralized or distributed. No single manager or WatchDog server is
 required.
 
+
+Reply-enabled parents expire **72 hours after creation**, with at most the last
+**four valid parents per provider and exact session**. Closed or expired parents
+are no longer polled. A new verified session, or genuine reactivation of a
+dormant session, can send one fresh Hello through its existing authorized route.
+Polling and restarts do not count as user activity or renew an old parent.
+
+Current-work snapshots and bounded recent claims keep routine observation
+independent of accumulated history. Current native work and uncertain delivery
+claims retain their safety checks. Existing notification history uses an explicit
+controlled offline transition; see [retention and upgrades](docs/NOTIFICATION_RETENTION.md)
+and [session activity](docs/SESSION_ACTIVITY.md).
+
 ## Architecture and philosophy
 
 - **WatchDog observes; Codex acts.** WatchDog uses read-only Git checks to detect

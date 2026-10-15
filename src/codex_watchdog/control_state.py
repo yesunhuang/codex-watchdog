@@ -635,33 +635,18 @@ class ControlStore:
             return dict(receipt, duplicate=False)
 
     def merge_slack_mappings(self, value, entries, event_id=None):
-        for entry in entries:
-            if (not isinstance(entry, dict)
-                    or re.fullmatch(r"[CG][A-Z0-9]{8,}", str(entry.get("channel_id", ""))) is None
-                    or re.fullmatch(r"[0-9]{10,}\.[0-9]+", str(entry.get("thread_ts", ""))) is None
-                    or re.fullmatch(r"[0-9a-f]{64}", str(entry.get("event_fingerprint", ""))) is None
-                    or event_id is not None and entry.get("event_fingerprint") != event_id):
-                raise ControlError("control_slack_mapping_invalid")
-            key = hashlib.sha256((entry["channel_id"] + "\0" + entry["thread_ts"]).encode()).hexdigest()
-            path = self.directory / "slack-threads" / (key + ".json")
-            if path.exists():
-                continue  # The exact Slack address is immutable routing evidence.
-            mapping = dict(schema_version=1, **{
-                name: entry[name] for name in ("channel_id", "thread_ts", "event_fingerprint")})
-            mapping.update(self._ticket_metadata(entry))
-            control_atomic_json(path, mapping)
+        return self.merge_relay_mappings(value, entries, event_id)
 
     def slack_mappings(self):
-        return [control_read_json(path) for path in sorted((self.directory / "slack-threads").glob("*.json"))]
+        return [entry for entry in self.relay_mappings() if entry.get("provider", "slack") == "slack"]
 
     @staticmethod
     def _ticket_metadata(entry):
         if "ticket_schema" not in entry:
             return {}  # Legacy routing evidence stays closed on upgraded import.
-        if (type(entry["ticket_schema"]) is not int or entry["ticket_schema"] != 1
-                or not isinstance(entry.get("created_at"), str)
-                or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z", entry["created_at"]) is None):
+        if type(entry["ticket_schema"]) is not int or entry["ticket_schema"] != 1:
             raise ControlError("control_reply_ticket_metadata_invalid")
+        control_mapping_time(entry.get("created_at"))
         return dict(ticket_schema=1, created_at=entry["created_at"])
 
     @staticmethod
@@ -699,37 +684,34 @@ class ControlStore:
         return key, mapping
 
     def merge_relay_mappings(self, value, entries, event_id=None):
-        for entry in entries:
-            if isinstance(entry, dict) and entry.get("provider") in ("lark", "onebot"):
-                provider = entry["provider"]
-                validate = self._lark_mapping if provider == "lark" else self._onebot_mapping
-                key, mapping = validate(entry, event_id)
-                path = self.directory / (provider + "-threads") / (key + ".json")
-                if path.exists():
-                    if control_read_json(path) != mapping:
-                        raise ControlError("control_" + provider + "_mapping_collision")
-                else:
-                    control_atomic_json(path, mapping)
-            elif isinstance(entry, dict) and entry.get("provider") in (None, "slack"):
-                self.merge_slack_mappings(value, [entry], event_id)
-            else:
-                raise ControlError("control_relay_provider_invalid")
+        result = control_mapping_merge(self, entries, event_id)
+        self.relay_mapping_status = result.get("reason", "ok")
+        return result
 
     def relay_mappings(self):
-        mappings = self.slack_mappings()
-        for path in sorted((self.directory / "lark-threads").glob("*.json")):
-            stored = control_read_json(path)
-            key, mapping = self._lark_mapping(stored)
-            if stored != mapping or path.stem != key:
-                raise ControlError("control_lark_mapping_invalid")
-            mappings.append(mapping)
-        for path in sorted((self.directory / "onebot-threads").glob("*.json")):
-            stored = control_read_json(path)
-            key, mapping = self._onebot_mapping(stored)
-            if stored != mapping or path.stem != key:
-                raise ControlError("control_onebot_mapping_invalid")
-            mappings.append(mapping)
-        return mappings
+        try:
+            result = control_current_mappings(self)
+            self.relay_mapping_status = "ok"
+            return result
+        except (ControlError, OSError, ValueError, TypeError, RecursionError) as exc:
+            # Current mappings are optional transport metadata. Refuse this
+            # export without stalling independent Git/native observations or
+            # resetting the original corrupt snapshot/authority/configuration.
+            self.relay_mapping_status = (str(exc) if isinstance(exc, ControlError)
+                                         else "control_current_mappings_unavailable")
+            return []
+
+    def import_current_mappings(self, now=None, active_mappings=None):
+        return control_import_current_mappings(self, now, active_mappings)
+
+    def retire_relay_mappings(self, provider, keys, now=None, created_at_by_key=None):
+        return control_retire_current_mappings(self, provider, keys, now, created_at_by_key)
+
+    def cleanup_legacy_mappings(self, budget=16, now=None):
+        return control_cleanup_legacy_mappings(self, budget, now)
+
+    def reconstruct_current_mappings(self, active_mappings, trusted_floors, now=None):
+        return control_reconstruct_current_mappings(self, active_mappings, trusted_floors, now)
 
     def finish_notification(self, token, event_id, operation_id, result, relay_mappings=()):
         path = self.effect_path("notification", event_id)
@@ -742,11 +724,13 @@ class ControlStore:
                     or receipt.get("epoch") != token.get("epoch")
                     or receipt.get("instance") != token.get("instance")):
                 raise ControlError("control_external_effect_mismatch")
-            self.merge_relay_mappings(value, relay_mappings, event_id)
-            # Retain routing before clearing the external-send barrier. A crash
-            # cannot publish a completed send while losing its reply address.
+            projection = self.merge_relay_mappings(value, relay_mappings, event_id)
+            # Delivery truth is independent of optional address projection.
+            # A can reconstruct addresses from its current authoritative ticket
+            # view; an unavailable projection never requests another send.
             control_atomic_json(self.path, value)
-            receipt.update(state="completed", result=result)
+            receipt.update(state="completed", result=result,
+                           relay_mapping_status=projection.get("status", "ok"))
             control_atomic_json(path, receipt)
             barrier = value["external_effect"]
             if isinstance(barrier, dict) and barrier.get("id") == operation_id:
@@ -799,9 +783,10 @@ class ControlStore:
                 receipt = dict(schema_version=1, state="uncertain", fingerprint=fingerprint,
                                epoch=token["epoch"], instance=token["instance"],
                                operation_id=operation_id, sender=sender)
-            self.merge_relay_mappings(value, relay_mappings, event_id)
+            projection = self.merge_relay_mappings(value, relay_mappings, event_id)
             control_atomic_json(self.path, value)
-            receipt.update(state="completed", result=dict(result, terminal=True))
+            receipt.update(state="completed", result=dict(result, terminal=True),
+                           relay_mapping_status=projection.get("status", "ok"))
             control_atomic_json(path, receipt)
             if isinstance(barrier, dict) and barrier.get("id") == operation_id:
                 value["external_effect"] = None
@@ -836,4 +821,8 @@ class ControlStore:
 CONTROL_SOURCE += GIT_WAKE_RETIREMENT_SOURCE
 from .wake_attempt_protocol import WAKE_ATTEMPT_SOURCE
 CONTROL_SOURCE += WAKE_ATTEMPT_SOURCE
+from .current_relay_snapshot import CURRENT_RELAY_SOURCE
+CONTROL_SOURCE += CURRENT_RELAY_SOURCE
+from .current_courier_snapshot import CURRENT_COURIER_SOURCE
+CONTROL_SOURCE += CURRENT_COURIER_SOURCE
 exec(compile(CONTROL_SOURCE, "<watchdog-control-state>", "exec"))

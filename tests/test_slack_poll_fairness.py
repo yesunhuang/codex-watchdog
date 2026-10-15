@@ -355,7 +355,10 @@ def test_history_growth_keeps_fixed_active_discovery_and_index_work_bounded(tmp_
 
         def connect(*args, **kwargs):
             db = original_connect(*args, **kwargs)
-            assert str(args[0]) == str(journal.database)
+            actual = str(args[0])
+            assert actual in (str(journal.database), journal.database.absolute().as_uri() + "?mode=ro")
+            if actual.startswith("file:"):
+                assert kwargs.get("uri") is True
             db.set_trace_callback(statements.append)
             db.set_progress_handler(progress, 1)
             return db

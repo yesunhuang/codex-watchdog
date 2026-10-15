@@ -7,7 +7,8 @@ from .app_server import AppServerError
 from .control_context import current_control, effect_guard
 from .control_state import ControlError, control_read_json
 from .linux_binding import LinuxBindingError
-from .models import sha256_text
+from .models import sha256_text, utc_now
+from .notification_context import source_time
 from .notifications import NotificationEvent, notification_workspace_label
 from .remote_control import notify_local_control
 from .storage import FileLock, InstructionStore
@@ -45,6 +46,10 @@ class LinuxOwnerHealth:
                 if state["health"] != health:
                     if state["health"] == "healthy" and reason is not None:
                         state["outage_id"] = str(uuid.uuid4())
+                        state["attention_born"] = utc_now()
+                        state.pop("recovery_born", None)
+                    elif health == "healthy":
+                        state["recovery_born"] = utc_now()
                     state.update(health=health, pending=True)
                 if not state.get("pending"):
                     if state.get("reason") != reason:
@@ -71,6 +76,8 @@ class LinuxOwnerHealth:
                     f"The Linux WatchDog can watch and control the existing Codex thread "
                     f"{thread[:8]} in {label} again."
                 ),
+                source_born=source_time(state.get("attention_born" if reason is not None else "recovery_born")),
+                source_thread_id=thread,
             )
             selected = current_control()
             if selected is not None:

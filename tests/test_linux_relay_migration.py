@@ -4,6 +4,7 @@ Pure CLI guards live in test_linux_relay_migration_cli.py and pure merge,
 cursor and snapshot coverage lives in test_relay_authority_migration.py.
 """
 from datetime import datetime, timezone
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -17,8 +18,10 @@ from codex_watchdog import relay_authority_rollback as rollback
 from codex_watchdog.control_state import ControlError
 from codex_watchdog.models import sha256_text
 from codex_watchdog.relay import RelayTarget
-from codex_watchdog.relay_authority_migration import read_snapshot
+from codex_watchdog.relay_authority_migration import (read_snapshot, read_authority_snapshot,
+                                                     write_authority_snapshot)
 from codex_watchdog.slack_poll import SlackPollingThreadStore
+from codex_watchdog.reply_tickets import ReplyTickets
 
 
 SID = "11111111-2222-4333-8444-000000000001"
@@ -34,6 +37,31 @@ def write_json(path, value, mode=0o600):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")
     path.chmod(mode)
+
+
+def legacy_schema2(journal):
+    """Fixture projection of unchanged rows into the real pre-retention schema."""
+    value=read_authority_snapshot(journal.database)
+    value.update(source_schema=2,recent_records=[],current_boundaries=[])
+    temporary=journal.database.with_name("fixture-schema2.sqlite3")
+    write_authority_snapshot(temporary,value)
+    os.replace(temporary,journal.database)
+    write_json(journal.path,dict(schema_version=2,storage="reply-tickets.sqlite3",
+                                active_limit=4,active_scope="provider_session"))
+
+
+@contextmanager
+def current_fixture(store):
+    """Use the normal current API to extend a legacy fixture, then export2."""
+    # The runtime selector intentionally keeps schema2 in compatibility mode.
+    # This explicit fixture conversion must request the current API directly.
+    journal = ReplyTickets(store.path, store.lock_path, "slack", store.runtime,
+                           store._legacy_state, clock=store.clock)
+    journal.migrate_recent_state()
+    try:
+        yield journal
+    finally:
+        legacy_schema2(journal)
 
 
 @pytest.fixture
@@ -62,6 +90,7 @@ def fleet(tmp_path, monkeypatch):
         ):
             (runtime / filename).write_text(payload)
         store = SlackPollingThreadStore(runtime)
+        store.clock=lambda:NOW
         store.record_thread(CHANNEL, PARENT,
                             RelayTarget("control-fixture", SID, "process_local"), "a" * 64)
         key = store.thread_key(CHANNEL, PARENT)
@@ -73,6 +102,8 @@ def fleet(tmp_path, monkeypatch):
     journal = stores["login6"].journal
     with journal.transaction() as db:
         journal.put(db, "slack_bot_grants", sha256_text("slack\0" + CHANNEL + "\0bot_grant\0" + SID), grant)
+    for store in stores.values():
+        legacy_schema2(store.journal)
     database = home / "state_5.sqlite"
     with sqlite3.connect(database) as db:
         db.execute("CREATE TABLE threads(id TEXT,cwd TEXT,archived INTEGER,source TEXT,thread_source TEXT)")
@@ -142,7 +173,7 @@ def test_old_source_refusal_markers_prevent_accidental_legacy_restart(fleet):
         assert marker["schema_version"] == 3 and marker["storage"] == "cluster_provider_journals_v1"
         backup = store.path.with_name(store.path.name + ".relay-authority-v1-backup")
         assert backup.read_bytes() == old_markers[node]
-        with pytest.raises(ValueError, match="marker_invalid"):
+        with pytest.raises(ValueError, match="reply_ticket_marker_invalid"):
             with store.journal.transaction():
                 pass
 
@@ -276,11 +307,12 @@ def test_existing_ready_label_cannot_mask_incomplete_or_wrong_authority(fleet, t
 
 
 def test_quarantine_has_durable_private_audit_and_backup_provenance(fleet):
-    journal = fleet["stores"]["login3"].journal
-    with journal.transaction() as db:
-        key = journal.get(db, "threads", fleet["stores"]["login3"].thread_key(CHANNEL, PARENT))
-        key["target"]["workspace_id"] = "different-historic-workspace"
-        journal.put(db, "threads", fleet["stores"]["login3"].thread_key(CHANNEL, PARENT), key)
+    store=fleet["stores"]["login3"]
+    with current_fixture(store) as journal:
+        with journal.transaction() as db:
+            key = journal.get(db, "threads", store.thread_key(CHANNEL, PARENT))
+            key["target"]["workspace_id"] = "different-historic-workspace"
+            journal.put(db, "threads", store.thread_key(CHANNEL, PARENT), key)
     result = apply(fleet)
     assert result["quarantines"] == {"slack": 1}
     rows, _ = read_snapshot(fleet["root"] / "runtime" / "slack" / "reply-tickets.sqlite3")
@@ -370,6 +402,7 @@ def test_existing_state_cannot_take_fresh_install_shortcut(fleet):
 
 def test_fresh_install_enrolls_only_the_verified_existing_exact_session(fleet):
     import shutil
+    from codex_watchdog.control_state import ControlStore
     from codex_watchdog.relay_authority import SessionRelayAuthority
     for runtime in fleet["runtimes"].values():
         shutil.rmtree(runtime / "slack")
@@ -382,12 +415,23 @@ def test_fresh_install_enrolls_only_the_verified_existing_exact_session(fleet):
     def admitted_native_epoch():
         calls.append(SID)
         return proof
-    store = SimpleNamespace(codex_home=fleet["home"], thread_id=SID, repo_path=str(fleet["repo"]))
-    authority = SessionRelayAuthority(store, {}, SimpleNamespace(capture_relay_epoch=admitted_native_epoch), "control-fixture")
+    # Keep the admitted-epoch fixture while exercising the real capability and
+    # observation lock now required during first notification-parent setup.
+    store = ControlStore(fleet["home"], SID, fleet["repo"],
+                         boot_id="current-boot", clock=lambda: NOW)
+    token = store.attach("exact-instance", "login3", "vscode")
+    observed = []
+    def current_native_epoch():
+        observed.append(SID)
+        return proof
+    observation = SimpleNamespace(capture_relay_epoch=admitted_native_epoch,
+        lock_path=store.directory / "fixture-observation.lock", _read=current_native_epoch)
+    authority = SessionRelayAuthority(store, token, observation, "control-fixture")
     authority.activate()
     manifest = json.loads((fleet["root"] / "sessions" / (SID + ".json")).read_text())
     assert manifest["thread_id"] == SID and manifest["repo_path"] == str(fleet["repo"])
     assert authority.expected == proof and calls == [SID, SID]
+    assert observed == [SID]
     with sqlite3.connect(fleet["home"] / "state_5.sqlite") as db:
         assert db.execute("SELECT id FROM threads").fetchall() == [(SID,)]
 
@@ -397,10 +441,11 @@ def create_native_receipt(fleet, *, node="login6", offset=0, instruction="slack:
     event_key = "fixture-native-event"
     prompt = "preserve exact original request; never replay"
     if same_event:
-        claimed, _ = store.claim_reply(event_key=event_key, channel_id=CHANNEL, thread_ts=PARENT,
-            instruction_id=instruction, text=prompt)
-        assert claimed
-        store.finish_reply(event_key, state_value="delivered", delivery_status="enqueued")
+        with current_fixture(store):
+            claimed, _ = store.claim_reply(event_key=event_key, channel_id=CHANNEL, thread_ts=PARENT,
+                instruction_id=instruction, text=prompt)
+            assert claimed
+            store.finish_reply(event_key, state_value="delivered", delivery_status="enqueued")
     rollout = fleet["home"] / "original-native-rollout.jsonl"
     if not rollout.exists():
         rollout.write_text('{"type":"event_msg","payload":{"type":"irrelevant"}}\n')
@@ -468,7 +513,7 @@ def test_pre_first_use_rollback_restores_only_known_original_json_and_preserves_
     assert run_rollback(fleet)["status"] == "already_rolled_back"
     assert files_bytes(fleet["home"]) == after
     for store in fleet["stores"].values():
-        with store.journal.transaction() as db:
+        with sqlite3.connect(store.journal.database) as db:
             assert db.execute("SELECT 1 FROM records WHERE kind='slack_bot_grants'").fetchone() in (None, (1,))
 
 
@@ -483,6 +528,55 @@ def test_post_admission_or_any_canonical_state_change_refuses_stale_rollback(fle
         run_rollback(fleet)
     assert marker.read_bytes() == before
     assert json.loads((fleet["root"] / "cluster.json").read_text())["state"] == "ready"
+
+
+@pytest.mark.parametrize("field,value",[
+    ("storage","session_provider_journals_v3"),("plan_sha256","b"*64),
+    ("state","prepared"),("thread_id",OTHER),("repo_path","/different-exact-repo"),
+    ("schema_version",True),
+])
+def test_isolated_session_selector_refuses_old_cluster_rollback_before_any_restore(fleet,field,value):
+    apply(fleet)
+    root=fleet["root"]
+    manifest=root/"sessions"/(SID+".json")
+    selector=json.loads(manifest.read_bytes())
+    # The exact-session upgrade deliberately leaves every old shared journal
+    # byte pristine. Its selector must be enough to fence old-sender rollback;
+    # rollback must not rely on scanning the new current receipt history.
+    selector[field]=value
+    write_json(manifest,selector)
+    digest=json.loads((root/"cluster.json").read_bytes())["plan_sha256"]
+    migration._validate_runtime(root,digest,pristine=False)
+    before=files_bytes(fleet["home"])
+    with pytest.raises(ControlError,match="recovery_session_changed"):
+        run_rollback(fleet)
+    assert files_bytes(fleet["home"])==before
+    assert not (root/"rollback-intent.json").exists()
+    assert all(json.loads(store.path.read_bytes())["schema_version"]==3 for store in fleet["stores"].values())
+
+
+@pytest.mark.parametrize("change",["missing_original","later_enrolled_isolated"])
+def test_pristine_rollback_checks_all_registered_selectors_including_later_enrollment(fleet,change):
+    apply(fleet)
+    path=fleet["root"]/"sessions"/(SID+".json")
+    if change=="missing_original":path.unlink()
+    else:
+        selector=json.loads(path.read_bytes())
+        selector.update(thread_id=OTHER,storage="session_provider_journals_v3")
+        write_json(path.with_name(OTHER+".json"),selector)
+    before=files_bytes(fleet["home"])
+    with pytest.raises(ControlError,match="recovery_session_changed"):run_rollback(fleet)
+    assert files_bytes(fleet["home"])==before
+    assert not (fleet["root"]/"rollback-intent.json").exists()
+
+
+def test_initial_prepared_missing_selector_exception_cannot_bypass_ready_rollback_guard(fleet):
+    apply(fleet)
+    root=fleet["root"]
+    (root/"sessions"/(SID+".json")).unlink()
+    digest=json.loads((root/"cluster.json").read_bytes())["plan_sha256"]
+    with pytest.raises(ControlError,match="recovery_session_changed"):
+        migration._validate_runtime(root,digest,pristine=True,allow_incomplete_selectors=True)
 
 
 def test_tampered_original_json_backup_blocks_all_restoration_before_candidate_fence(fleet):
@@ -546,6 +640,7 @@ def test_unknown_staged_authorization_is_not_promoted_as_if_it_came_from_frozen_
         key = sha256_text("slack\0C87654321\0bot_grant\0" + SID)
         db.execute("INSERT INTO records(namespace,kind,key,value) VALUES(?,?,?,?)",
                    (namespace, "slack_bot_grants", key, json.dumps(unexpected)))
+    legacy_schema2(journal)
     with pytest.raises((ControlError, ValueError)):
         apply(fleet)
     assert not (fleet["root"] / "cluster.json").exists()

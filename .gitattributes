@@ -1,0 +1,2 @@
+# Frozen previous-public reader fixtures must retain their original byte hashes.
+tests/fixtures/notification_public_228/* text eol=lf

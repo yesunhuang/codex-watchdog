@@ -20,7 +20,7 @@ from codex_watchdog.relay import ExactThreadRelay
 from codex_watchdog.relay_authority import SessionRelayAuthority
 from codex_watchdog.slack_bot_acl import BotRequestReused
 from test_linux_node import nodes
-from test_linux_auto import scenario
+from test_linux_auto import queue_native_reply, save_native_reply_receipt, scenario
 from test_relay_authority import (
     LOGIN3, _admitted_native_fixture, _completed_native_receipt, _grant,
     _grow_history, _node, _park, _rows, _stamp, _target,
@@ -263,15 +263,18 @@ def test_own_native_resume_and_queued_restart_hold_shared_admission(scenario, mo
     assert clients[0].closed and cs.control_read_json(observation.path)["writer_live"] is False
 
     queue_id = "99999999-aaaa-4bbb-8ccc-dddddddddddd"
-    with sqlite3.connect(store.codex_home / "queue_1.sqlite") as db:
-        db.execute("INSERT INTO queued_items VALUES (?,?,'{}')", (queue_id, store.thread_id))
-    receipt = cs.control_state_home(store.codex_home) / "remote-wake/reply.json"
-    cs.control_atomic_json(receipt, dict(schema_version=1, thread_id=store.thread_id,
-                                       state="enqueued", queue_message_id=queue_id))
+    receipt = queue_native_reply(store, queue_id)
+    path = save_native_reply_receipt(store, receipt)
+    original = path.read_bytes()
+    assert dog.step(observe=False)[0]["state"] == "parked"
+    # Explicit compatibility import uses only actual Q and its exact old receipt.
+    assert cs.control_import_current_couriers(store.codex_home, store.thread_id)["imported"] == 1
+    assert cs.control_import_current_couriers(store.codex_home, store.thread_id)["imported"] == 0
 
     assert dog.step(observe=False)[0]["state"] == "owned"
     assert admitted_resumes == [store.thread_id, store.thread_id]
     assert cs.control_read_json(observation.path)["writer_live"] is True
+    assert path.read_bytes() == original
     with sqlite3.connect(store.codex_home / "queue_1.sqlite") as db:
         assert db.execute("SELECT id FROM queued_items WHERE thread_id=?", (store.thread_id,)).fetchall() == [(queue_id,)]
 

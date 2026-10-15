@@ -5,6 +5,7 @@ from .binding_challenges import BindingChallenges
 from .models import sha256_text
 from .relay import ReplyResult
 from .storage import StoreBusyError
+from .relay_authority import sender_guarded
 
 
 def binding_control(text):
@@ -23,6 +24,7 @@ class DestinationBinding:
         kwargs = {} if clock is None else {"clock": clock}
         self.store = BindingChallenges(relay.thread_store, provider, relay.config.scope, **kwargs)
 
+    @sender_guarded
     def command(self, operation, *, event_key, chat_id, parent_id, user_id, text,
                 message_id, created_at):
         if operation not in ("bind", "unbind"):
@@ -52,6 +54,7 @@ class DestinationBinding:
         except Exception:
             return ReplyResult("rejected_or_uncertain_route_command")
 
+    @sender_guarded
     def confirm(self, text, user_id, destination, *, message_id, created_at):
         if text != text.strip():
             return ReplyResult("rejected_route_challenge")

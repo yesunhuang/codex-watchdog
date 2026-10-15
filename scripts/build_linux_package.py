@@ -101,6 +101,9 @@ def main() -> None:
                            ("docs/SESSION_BINDING.md", "SESSION_BINDING.md"),
                            ("docs/SESSION_ACCESS.md", "SESSION_ACCESS.md"),
                            ("docs/NOTIFICATION_RECEIPTS.md", "NOTIFICATION_RECEIPTS.md"),
+                           ("docs/NOTIFICATION_RETENTION.md", "NOTIFICATION_RETENTION.md"),
+                           ("docs/SESSION_ACTIVITY.md", "SESSION_ACTIVITY.md"),
+                           ("docs/PLATFORM_SUPPORT.md", "PLATFORM_SUPPORT.md"),
                            ("THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md")):
         shutil.copy2(ROOT / source, package / target)
     subprocess.run([

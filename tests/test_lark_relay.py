@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from codex_watchdog.control_state import ControlStore
+from codex_watchdog.control_state import ControlError, ControlStore
 from codex_watchdog.lark_mapping import LarkThreadStore
 from codex_watchdog.lark_relay import LarkReplyRelay
 from codex_watchdog.lark_transport import LarkConfig, LarkTransportError
@@ -223,7 +223,8 @@ def test_slack_target_alias_and_saved_mapping_format_remain_compatible(tmp_path)
 def test_mixed_provider_control_cache_keeps_slack_schema_and_lark_scope(relay, tmp_path):
     instance, _, _, _, notification = relay
     entry = instance.thread_store.notification_mappings(notification.event_fingerprint())[0]
-    slack_entry = {"channel_id": "C1234567890", "thread_ts": "1789000000.100001", "event_fingerprint": "a" * 64}
+    slack_entry = {"channel_id": "C1234567890", "thread_ts": "1789000000.100001", "event_fingerprint": "a" * 64,
+                   "ticket_schema": 1, "created_at": entry["created_at"]}
     store = ControlStore(tmp_path / "codex", THREAD, tmp_path / "repo", clock=lambda: 100, boot_id="fixture")
     token = store.attach("local", "host", "vscode")
     store.merge_relay_mappings(store.read(), [slack_entry, entry])
@@ -236,7 +237,7 @@ def test_mixed_provider_control_cache_keeps_slack_schema_and_lark_scope(relay, t
     lark.cache_mappings(mappings, local_target)
     assert lark.lookup_thread(CHAT, MESSAGE).target == local_target
     assert slack.lookup_thread(slack_entry["channel_id"], slack_entry["thread_ts"]).target == local_target
-    with pytest.raises(Exception, match="lark_mapping_collision"):
+    with pytest.raises(ControlError, match="^control_mapping_immutable_collision$"):
         store.merge_relay_mappings(store.read(), [{**entry, "event_fingerprint": "c" * 64}])
     assert store.relay_mappings() == mappings
 

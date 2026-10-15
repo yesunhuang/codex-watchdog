@@ -60,6 +60,14 @@ def create_queue_database(path: Path, revision: int = 0) -> None:
         )
 
 
+def index_native_rollout(home: Path, rollout: Path) -> None:
+    with sqlite3.connect(home / "state_5.sqlite") as db:
+        db.execute("CREATE TABLE threads(id TEXT PRIMARY KEY,cwd TEXT,source TEXT,"
+                   "thread_source TEXT,archived INTEGER,rollout_path TEXT)")
+        db.execute("INSERT INTO threads VALUES (?,?,?,?,?,?)",
+                   (THREAD_ID, str(home.parent), "vscode", "user", 0, str(rollout)))
+
+
 def test_extension_upgrade_refreshes_auto_executable_before_new_wake(tmp_path, monkeypatch):
     current = ["old-extension/codex.exe"]
     monkeypatch.setattr(queue_wake, "_resolve_codex_executable", lambda: current[0])
@@ -499,6 +507,7 @@ def test_exact_new_rollout_user_message_promotes_to_started(tmp_path: Path) -> N
     )
     rollout.parent.mkdir(parents=True)
     rollout.write_text('{"type":"baseline"}\n', encoding="utf-8")
+    index_native_rollout(codex_home, rollout)
     runner = FakeRunner()
     dispatcher = QueueWakeDispatcher(
         tmp_path / "runtime", runner=runner, codex_home=codex_home
@@ -543,6 +552,7 @@ def test_assistant_marker_echo_is_not_started_evidence(tmp_path: Path) -> None:
     rollout = codex_home / "sessions" / f"rollout-test-{THREAD_ID}.jsonl"
     rollout.parent.mkdir(parents=True)
     rollout.write_text("", encoding="utf-8")
+    index_native_rollout(codex_home, rollout)
     runner = FakeRunner()
     dispatcher = QueueWakeDispatcher(
         tmp_path / "runtime", runner=runner, codex_home=codex_home
@@ -611,6 +621,7 @@ def queued_rollout(tmp_path):
         rollout = home / "sessions" / f"rollout-test-{THREAD_ID}.jsonl"
         rollout.parent.mkdir(parents=True)
         rollout.touch()
+        index_native_rollout(home, rollout)
         append_wake_events(rollout, *history)
         database = home / "queue_1.sqlite"
         create_queue_database(database)

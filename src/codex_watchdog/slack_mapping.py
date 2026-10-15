@@ -47,8 +47,9 @@ class SlackThreadStore:
 
     provider = "slack"
 
-    def __init__(self, runtime: Path) -> None:
+    def __init__(self, runtime: Path, *, clock=None) -> None:
         self.runtime = Path(runtime)
+        self.clock = clock
         self.path = self.runtime / "slack" / "relay-state.json"
         self.lock_path = self.runtime / "locks" / "slack-relay.lock"
 
@@ -62,18 +63,22 @@ class SlackThreadStore:
 
     @property
     def journal(self):
-        from .reply_tickets import ReplyTickets
+        from .legacy_reply_tickets import select_reply_journal as ReplyTickets
+        authority = getattr(self, "relay_authority", None)
+        retention = getattr(self, "retention_binding", None) or getattr(authority, "retention_binding", None)
         return ReplyTickets(self.path, self.lock_path, "slack", self.runtime, self._legacy_state,
-                            authority=getattr(self, "relay_authority", None))
+                            authority=authority,clock=self.clock,
+                            before_prune=getattr(retention, "before_prune", None),
+                            retention_fence=getattr(retention, "fence", None))
 
-    def record_thread(self, channel_id, thread_ts, target, event_fingerprint):
+    def record_thread(self, channel_id, thread_ts, target, event_fingerprint, *, created_at=None):
         key = self.thread_key(channel_id, thread_ts)
         if not isinstance(event_fingerprint, str) or re.fullmatch(r"[0-9a-f]{64}", event_fingerprint) is None:
             raise ValueError("notification event fingerprint is invalid")
         journal = self.journal
         with journal.transaction() as db:
             journal.record(db, key, dict(channel_id=channel_id, thread_ts=thread_ts,
-                target=target.to_dict(), event_fingerprint=event_fingerprint, created_at=utc_now()))
+                target=target.to_dict(), event_fingerprint=event_fingerprint, created_at=created_at or utc_now()))
 
     def lookup_thread(self, channel_id, thread_ts):
         key = self.thread_key(channel_id, thread_ts)

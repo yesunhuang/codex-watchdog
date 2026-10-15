@@ -261,6 +261,8 @@ class BotCommandReceipts:
                          state="claimed", message_ts=None, fingerprint=self._fingerprint(key), proof=proof)
             db.execute("INSERT INTO records(namespace,kind,key,value) VALUES(?,?,?,?)",
                        (_NAMESPACE, _KIND, key, json.dumps(entry, sort_keys=True)))
+            from .recent_state import track
+            track(journal,db,_KIND,key,entry,namespace=_NAMESPACE)
             return BotReceiptClaim(key, outcome, context, source["channel_id"], source["thread_ts"], entry["fingerprint"])
 
     def finish(self, claim: BotReceiptClaim, status: str = "sent", message_ts: Optional[str] = None) -> None:

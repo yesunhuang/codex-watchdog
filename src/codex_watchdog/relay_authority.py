@@ -4,7 +4,7 @@ Provider journals share one namespace on the existing same-user filesystem.
 Native control records and transports remain node-local. Import is an explicit
 offline operation; neither a handoff nor a polling tick copies old journals.
 """
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from functools import wraps
 from pathlib import Path
@@ -14,6 +14,7 @@ from .control_context import current_control, current_effect
 from .control_state import ControlBusy, ControlError, control_read_json, control_atomic_json
 from .node_observation import observation_lock
 from .models import sha256_text
+from .storage import StoreBusyError
 
 
 # A real native event exceeded 1 MiB. Four rows per provider still cap a
@@ -41,13 +42,36 @@ def relay_ack_guarded(method):
     @wraps(method)
     def guarded(self, *args, **kwargs):
         authority = getattr(self, "relay_authority", None)
-        if authority is None:
-            return method(self, *args, **kwargs)
         try:
-            with authority.guard():
-                return method(self, *args, **kwargs)
-        except ControlBusy:
+            from .notification_senders import sender_fence
+            with authority.guard() if authority is not None else nullcontext():
+                runtime = authority.runtime if authority is not None else self.runtime
+                with sender_fence(runtime):
+                    return method(self, *args, **kwargs)
+        except (ControlBusy, StoreBusyError):
             return None  # Never replay a command because its ACK was fenced.
+    return guarded
+
+
+def sender_guarded(method):
+    """Exclude control sends from their durable claim through send/commit.
+
+    Exclusion is not targeting authority. Existing exact grants, owner guards
+    and one-shot claims still authorize every effect.
+    """
+    @wraps(method)
+    def guarded(self, *args, **kwargs):
+        from .notification_senders import sender_fence
+        owner = getattr(self, "relay", self)
+        authority = getattr(owner, "relay_authority", None)
+        try:
+            with authority.guard() if authority is not None else nullcontext():
+                runtime = authority.runtime if authority is not None else owner.runtime
+                with sender_fence(runtime):
+                    return method(self, *args, **kwargs)
+        except (ControlBusy, StoreBusyError):
+            from .relay import ReplyResult
+            return ReplyResult("deferred", delivery_status="notification_sender_busy")
     return guarded
 
 
@@ -58,6 +82,7 @@ class SessionRelayAuthority:
         self.workspace_id = workspace_id
         self.root = store.codex_home / "watchdog-relay-authority"
         self.runtime = self.root / "runtime"
+        self.notification_runtime = self.runtime / "session-notifications" / self.thread_id
         self.manifest = self.root / "sessions" / (self.thread_id + ".json")
         self.expected = None
         self._local = threading.local()
@@ -68,6 +93,24 @@ class SessionRelayAuthority:
                 or self.runtime.resolve() != self.runtime
                 or (self.runtime / "locks").resolve() != self.runtime / "locks"):
             raise ControlError("relay_authority_path_invalid")
+        if self.manifest.exists():
+            selected = control_read_json(self.manifest)
+            from .session_authority_retention import STORAGE, selected_session_runtime
+            if selected.get("storage") == STORAGE:
+                self.runtime = selected_session_runtime(self, selected)
+                notification = "runtime/session-notifications/" + self.thread_id
+                if selected.get("notifications_relative") != notification:
+                    raise ControlError("session_authority_notification_path_invalid")
+                self.notification_runtime = self.root / notification
+                if selected.get("notification_plan_sha256") is not None:
+                    from .relay_notification_migration import validate_notification_migration
+                    validate_notification_migration(self.notification_runtime,
+                                                    selected["notification_plan_sha256"])
+                return
+        # The old cluster/default stays usable by its unknown/unmigrated
+        # sessions. Only the exact session manifest selects isolated storage.
+        self.runtime = self.root / "runtime"
+        self.notification_runtime = self.runtime / "session-notifications" / self.thread_id
         cluster = self.root / "cluster.json"
         if not cluster.exists():
             if not enroll:
@@ -97,13 +140,31 @@ class SessionRelayAuthority:
             raise ControlError("relay_authority_manifest_invalid")
         if value.get("notification_plan_sha256") is not None:
             from .relay_notification_migration import validate_notification_migration
-            validate_notification_migration(self.runtime / "session-notifications" / self.thread_id,
+            validate_notification_migration(self.notification_runtime,
                                             value["notification_plan_sha256"])
 
     def activate(self):
         """Called only after NodeObservation admits its native owner proof."""
         self._ready(enroll=True)
         self.expected = self.observation.capture_relay_epoch()
+        with self.guard():
+            # Bind runs before admission, so only activation may prepare these
+            # fixed parents. The selected sender fence creates the UUID leaf;
+            # fresh notification entry alone creates its notifications state.
+            from .notification_senders import _directory_id, _ensure_directory
+            runtime = self.root / "runtime"
+            parent = runtime / "session-notifications"
+            if self.notification_runtime != parent / self.thread_id:
+                raise ControlError("relay_authority_notification_path_invalid")
+            try:
+                root_id = _directory_id(self.root)
+                runtime_id = _ensure_directory(runtime)
+                _ensure_directory(parent)
+                if (_directory_id(self.root) != root_id
+                        or _directory_id(runtime) != runtime_id):
+                    raise ValueError("relay authority notification parent changed")
+            except (OSError, ValueError) as exc:
+                raise ControlError("relay_authority_notification_path_invalid") from exc
 
     @contextmanager
     def guard(self):
@@ -147,8 +208,11 @@ class SessionRelayAuthority:
             path = self.runtime / provider / "reply-tickets.sqlite3"
             if path.is_symlink() or path.resolve() != path:
                 raise ControlError("relay_authority_path_invalid")
-            cluster = control_read_json(self.root / "cluster.json")
-            providers = cluster.get("providers", ())
+            selected = control_read_json(self.manifest)
+            from .session_authority_retention import STORAGE
+            configured = (selected if selected.get("storage") == STORAGE
+                          else control_read_json(self.root / "cluster.json"))
+            providers = configured.get("providers", ())
             if not isinstance(providers, (list, tuple)):
                 raise ControlError("relay_authority_cluster_invalid")
             if provider in providers and not path.is_file():
@@ -157,11 +221,14 @@ class SessionRelayAuthority:
                 yield
 
     def journal(self, provider):
-        from .reply_tickets import ReplyTickets
+        from .legacy_reply_tickets import select_reply_journal as ReplyTickets
         local_runtime = Path(self.store.read()["runtime_path"])
         path = local_runtime / provider / "authority-cursors.json"
+        retention = getattr(self, "retention_binding", None)
         return ReplyTickets(path, local_runtime / "locks" / (provider + "-authority-cursors.lock"),
-                            provider, local_runtime, lambda: {}, authority=self)
+                            provider, local_runtime, lambda: {}, authority=self,
+                            before_prune=getattr(retention, "before_prune", None),
+                            retention_fence=getattr(retention, "fence", None))
 
     def read_cursor(self, provider, key, default):
         journal = self.journal(provider)
@@ -326,7 +393,7 @@ def bind_service_authority(service, authority):
         notifier.relay_authority = authority
         # Notification receipts are session-scoped; a handoff does not resend
         # a result that was already sent, or retry an uncertain provider effect.
-        notifier.relay_runtime = authority.runtime / "session-notifications" / authority.thread_id
+        notifier.relay_runtime = authority.notification_runtime
         notifier.state_path = notifier.relay_runtime / "notifications" / "last-events.json"
         stores = [getattr(notifier, name, None) for name in
                   ("slack_thread_store", "lark_thread_store", "onebot_thread_store")]

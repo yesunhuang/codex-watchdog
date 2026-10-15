@@ -595,9 +595,7 @@ def test_notify_test_distinct_ids_bypass_debounce(
     assert distinct["status"] == "sent"
     assert first["event_fingerprint"] != distinct["event_fingerprint"]
     assert len(calls) == 2
-    durable = (runtime / "notifications" / "last-events.json").read_text(
-        encoding="utf-8"
-    )
+    durable = ''.join(path.read_text(encoding='utf-8') for path in (runtime/'notifications/current').glob('*.json'))
     assert "delivery-001" not in durable
     assert "delivery-002" not in durable
 

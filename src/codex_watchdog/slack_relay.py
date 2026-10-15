@@ -24,7 +24,7 @@ from .remote_control import RemoteControlClient
 from .notifications import NotificationEvent
 from .slack_presentation import slack_message_with_host
 from .relay import ExactThreadRelay, ReplyResult as SlackReplyResult
-from .relay_authority import relay_guarded, relay_ack_guarded
+from .relay_authority import relay_guarded, relay_ack_guarded, sender_guarded
 
 
 _DELIVERED_STATES = frozenset({"enqueued", "consumed_or_started", "started"})
@@ -484,6 +484,8 @@ class SlackReplyRelay(ExactThreadRelay):
             )
 
         try:
+            from .provider_activity import record_admitted_activity
+            record_admitted_activity(self.thread_store,mapping.target,float(message_ts))
             controlled = self._controlled_reply(mapping, stable_event_id, instruction_id, text,
                                                 check_legacy_receipt=False)
             if controlled is not None:
@@ -555,6 +557,7 @@ class SlackReplyRelay(ExactThreadRelay):
             raise ValueError("bot_transport_context_mismatch")
         return context
 
+    @sender_guarded
     def _handle_bot_control(self, event, event_key, mapping, team_id, app_id, from_poll):
         from .slack_bot_identity import BotVerificationDeferred, parse_bot_control_event
         user = event["user"]
@@ -683,6 +686,8 @@ class SlackReplyRelay(ExactThreadRelay):
                 bot_receipt=(receipt_context, "rejected") if previous == "ticket_closed" else None)
         result, legacy_dispatch = None, False
         try:
+            from .provider_activity import record_admitted_activity
+            record_admitted_activity(self.thread_store,mapping.target,float(timestamp))
             result = self._controlled_reply(mapping, event_key, instruction_id, prompt,
                                              check_legacy_receipt=False)
             if result is None:
@@ -748,6 +753,7 @@ class SlackReplyRelay(ExactThreadRelay):
                 raise RuntimeError("slack_sdk required for access sender")
         return _sender
 
+    @sender_guarded
     def _handle_access_command(
         self,
         event: Any,
@@ -873,6 +879,7 @@ class SlackReplyRelay(ExactThreadRelay):
             delivery_status=status,
         )
 
+    @sender_guarded
     def _handle_route_command(
         self,
         event: Any,

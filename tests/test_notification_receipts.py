@@ -164,11 +164,12 @@ def test_migration_failure_recovers_without_losing_history_or_sending(tmp_path, 
             raise OSError("synthetic commit failure")
         original_commit(store)
     def writer(target, value):
-        if stage == "marker_before_write" and not triggered:
+        is_marker=target==path
+        if is_marker and stage == "marker_before_write" and not triggered:
             triggered.append(True)
             raise OSError("synthetic marker failure")
         InstructionStore._atomic_json(target, value)
-        if stage == "marker_after_write" and not triggered:
+        if is_marker and stage == "marker_after_write" and not triggered:
             triggered.append(True)
             raise OSError("synthetic crash after marker")
     monkeypatch.setattr(storage, "snapshot_state", snapshot)
@@ -226,7 +227,7 @@ def test_claim_and_confirmation_crashes_never_replay_attempted_provider(tmp_path
     restarted.notify(EVENT)
     assert all(p not in repeated for p in attempted)
     if boundary == "before_claim_commit":
-        assert provider not in attempted and provider in repeated
+            assert provider not in attempted and provider not in repeated
     elif boundary == "after_claim_commit":
         assert provider not in attempted and provider not in repeated
     else:
@@ -472,8 +473,8 @@ def test_history_growth_keeps_hot_path_point_queries_and_bounded_payloads(tmp_pa
     assert result.status == "sent" and calls == ["slack", "lark"]
     receipt_selects = [sql for sql in trace if sql.startswith("SELECT") and " FROM receipts" in sql]
     assert len(receipt_selects) == 1 and "WHERE fingerprint=" in receipt_selects[0]
-    assert len(trace) <= 24 and len(marker_reads) == 1 and marker_reads[0] < 256
-    assert len(writes) == 1 and writes[0] < 300
+    assert len(trace) <= 64 and len(marker_reads) == 1 and marker_reads[0] < 256
+    assert len(writes) == 2 and max(writes) < 1024
     assert not any("SELECT fingerprint,slack,lark FROM receipts" in sql for sql in trace)
     print(json.dumps({"dual_receipt_growth": {"H": count, "sql_statements": len(trace),
         "receipt_point_selects": len(receipt_selects), "marker_bytes_read": sum(marker_reads),

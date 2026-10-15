@@ -336,6 +336,23 @@ def _history_lookup(directory, fingerprint):
 
 def validate_notification_migration(runtime, expected_plan_sha256=None):
     """Validate installed readiness with indexed reads, never create or send."""
+    from .notification_root_retention import read_notification_root
+    from .notification_receipt_retention import RetentionError
+    try:
+        finite = read_notification_root(runtime)
+    except RetentionError as error:
+        raise RelayNotificationMigrationError(str(error)) from None
+    if finite is not None:
+        # Exact old authority manifest identity survives; its disposable
+        # suppression history need not remain a permanent dependency.
+        relay = finite.get("relay")
+        if relay is None:
+            raise RelayNotificationMigrationError("relay_notification_existing_migration_conflict")
+        if expected_plan_sha256 is not None and relay["plan_sha256"] != expected_plan_sha256:
+            raise RelayNotificationMigrationError("notification_root_relay_plan_mismatch")
+        # Receipt-family health is local to that sender, not a condition for
+        # independent native-owner selection, control or provider ingress.
+        return dict(relay, history_retired=True)
     directory = _runtime(runtime) / "notifications"
     _safe(directory)
     for name in ("relay-migration.json", "last-events.json", "dual-deliveries.json",
@@ -374,10 +391,14 @@ def validate_notification_migration(runtime, expected_plan_sha256=None):
     return {key: value[key] for key in ("plan_sha256", "source_count", "history_count", "dual_count")}
 
 
-def previous_notification(runtime, fingerprint):
-    """Indexed pre-send suppression, including conflicting older event histories."""
+def previous_notification(runtime, fingerprint, *, born=None):
+    """Legacy indexed suppression, or the prepared original-source cutoff."""
     if not _fingerprint(fingerprint):
         raise RelayNotificationMigrationError("relay_notification_fingerprint_invalid")
+    from .notification_root_retention import source_eligible
+    eligible = source_eligible(runtime, born)
+    if eligible is not None:
+        return not eligible
     directory = _runtime(runtime) / "notifications"
     _safe(directory)
     receipt, database = directory / "relay-migration.json", directory / "relay-migration-history.sqlite3"

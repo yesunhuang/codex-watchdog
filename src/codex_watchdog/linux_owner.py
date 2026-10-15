@@ -54,31 +54,12 @@ def pending_count(codex_home: Path, thread: str) -> int:
 
 
 def node_has_queued_wake(codex_home: Path, thread: str) -> bool:
-    """Require this node's durable courier receipt for an actual queued item."""
-    queues = []
-    for path in codex_home.glob("queue_*.sqlite"):
-        try:
-            with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
-                queues.append({row[0] for row in db.execute(
-                    "SELECT id FROM queued_items WHERE thread_id=?", (thread,))})
-        except sqlite3.Error:
-            continue
-    if len(queues) != 1:
-        raise LinuxBindingError("linux_queue_unavailable_or_ambiguous")
-    if not queues[0]:
-        return False
-    for path in (control_state_home(codex_home) / "remote-wake").glob("*.json"):
-        try:
-            with path.open("rb") as handle:
-                raw = handle.read(65537)
-            value = json.loads(raw) if len(raw) <= 65536 else None
-        except (OSError, ValueError):
-            continue  # Missing/ambiguous evidence never authorizes a resume.
-        if (isinstance(value, dict) and value.get("thread_id") == thread
-                and value.get("state") in ("enqueued", "consumed_or_started", "started")
-                and value.get("queue_message_id") in queues[0]):
-            return True
-    return False
+    """Join current native Q to this node's compact receipt points, never H."""
+    from .control_state import control_has_current_courier
+    try:
+        return control_has_current_courier(codex_home, thread)
+    except ControlError as exc:
+        raise LinuxBindingError(str(exc)) from exc
 
 
 class _BoundCatalog:
@@ -110,6 +91,8 @@ class LinuxThreadOwner:
         )
         self.client_factory = client_factory
         self.client: Optional[StdioAppServer] = None
+        from .linux_native_work import LinuxNativeWork
+        self.native_work = LinuxNativeWork(self)
         self.resumed = False
         self.resume_requested = False
         self._resume_blocked = False
@@ -137,6 +120,7 @@ class LinuxThreadOwner:
         )
 
     def _event(self, message: Dict[str, Any]) -> None:
+        self.native_work.observe(message)
         method = message.get("method")
         if method == "watchdog/approvalRequired":
             self.approval_required = True

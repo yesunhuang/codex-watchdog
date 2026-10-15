@@ -9,7 +9,7 @@ from .lark_mapping import LarkThreadStore
 from .lark_transport import LarkApi, LarkConnection, LarkTransportError, valid_id
 from .models import MAX_PROMPT_CHARS, sha256_text
 from .relay import ExactThreadRelay, ReplyResult, _DELIVERED_STATES
-from .relay_authority import relay_guarded, relay_ack_guarded
+from .relay_authority import relay_guarded, relay_ack_guarded, sender_guarded
 from .storage import FileLock, StoreBusyError
 
 
@@ -18,14 +18,14 @@ class LarkReplyRelay(ExactThreadRelay):
 
     def __init__(self, runtime, config, *, queue_dispatcher, remote_ssh_adapter,
                  timeout=10.0, thread_store=None, api=None, connection_factory=LarkConnection,
-                 clock=time.time, session_acl=None):
+                 clock=None, session_acl=None):
         if not config.relay_configured:
             raise ValueError("Lark relay requires a configured bot, chat and user allowlist")
         self.runtime = Path(runtime)
         self.config = config
         self.queue_dispatcher = queue_dispatcher
         self.remote_ssh_adapter = remote_ssh_adapter
-        self.thread_store = thread_store or LarkThreadStore(runtime, config.scope)
+        self.thread_store = thread_store or LarkThreadStore(runtime, config.scope, clock=clock)
         self.timeout = timeout
         self.api = api
         self.connection_factory = connection_factory
@@ -34,7 +34,7 @@ class LarkReplyRelay(ExactThreadRelay):
         self._poller = None
         self._session_acl = session_acl
         from .destination_binding import DestinationBinding
-        self.binding = DestinationBinding(self, "lark", self._send_control, clock=clock)
+        self.binding = DestinationBinding(self, "lark", self._send_control, clock=clock or time.time)
 
     def _send_control(self, text, operation_id, destination, *, reply_to=None):
         api = self.api or LarkApi(self.config, self.timeout)
@@ -235,6 +235,9 @@ class LarkReplyRelay(ExactThreadRelay):
             return ReplyResult("rejected_state_or_collision", error_sha256=self._error_digest(exc))
         try:
             # Lark has already durably bound both provider identities to this payload.
+            from .provider_activity import record_admitted_activity
+            raw_created=message.get('create_time',header.get('create_time'))
+            record_admitted_activity(self.thread_store,mapping.target,int(raw_created)/1000 if str(raw_created).isdigit() else None)
             result = self._controlled_reply(mapping, event_key, instruction_id, text, check_legacy_receipt=False)
             if result is None:
                 delivery = self._dispatch(mapping, instruction_id, text)
@@ -252,6 +255,7 @@ class LarkReplyRelay(ExactThreadRelay):
                                result.delivery_status, error_sha256=self._error_digest(exc))
         return result
 
+    @sender_guarded
     def _handle_access_command(self, header, message, event_key, mapping, chat_id,
                                 open_id, text, operation, raw_delegate_id):
         """Handle admin add/remove/access with once-only confirmation mapping."""

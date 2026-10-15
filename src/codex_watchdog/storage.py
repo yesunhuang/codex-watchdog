@@ -290,10 +290,10 @@ class InstructionStore:
         value.setdefault("schema_version", 1)
         value.setdefault("recorded_at", utc_now())
         value.setdefault("audit_id", str(uuid.uuid4()))
-        filename = f"{value['recorded_at'].replace(':', '-')}_{value['audit_id']}.json"
-        path = self.audit / filename
-        self._atomic_json(path, value)
-        return path
+        # Import here to keep the small atomic/lock primitives usable by the
+        # current Stop store without a module initialization cycle.
+        from .stop_snapshots import StopSnapshots
+        return StopSnapshots(self.root, writer=self._atomic_json).record(value)
 
     def list_state(self, directory: str) -> Iterator[Instruction]:
         selected = {

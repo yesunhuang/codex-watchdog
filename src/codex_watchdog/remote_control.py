@@ -348,6 +348,12 @@ def reconcile_local_notifications(store, runtime):
 
 
 def _notify_with_receipt(event, notifier, attempt, token, prepare, finish, reconcile):
+    # The attempt lease itself creates notifications/control-attempts. Give the
+    # real notifier its bounded fresh entry before that directory exists; no
+    # control/effect/provider reservation is skipped or moved after a send.
+    prepare_entry = getattr(notifier, "prepare_notification_entry", None)
+    if callable(prepare_entry):
+        prepare_entry(event)
     with attempt.lease():
         # Historical settlement is explicit optional forensics, never a
         # synchronous provider/RPC prerequisite for the next distinct effect.

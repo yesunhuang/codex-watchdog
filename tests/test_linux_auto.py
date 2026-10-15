@@ -1,4 +1,5 @@
 from pathlib import Path
+import hashlib
 import json
 import os
 import sqlite3
@@ -17,6 +18,28 @@ from codex_watchdog.notifications import EnvironmentNotifier, NotificationConfig
 
 
 THREAD = "11111111-2222-4333-8444-555555555555"
+ROLLOUT = "rollout-fixture-" + THREAD + ".jsonl"
+
+
+def queue_native_reply(store, queue_id):
+    """Synthetic native enqueue; no local courier has claimed it yet."""
+    instruction, prompt = "slackbot:fixture-reply", "Resume this exact fixture thread."
+    digest = hashlib.sha256(prompt.encode()).hexdigest()
+    text = "[CODEX_WATCHDOG_WAKE id=%s sha256=%s]\n%s" % (instruction, digest, prompt)
+    payload = json.dumps({"UserInput": {"client_id": queue_id,
+        "content": [{"type": "text", "text": text, "text_elements": []}]}})
+    with sqlite3.connect(store.codex_home / "queue_1.sqlite") as db:
+        db.execute("INSERT INTO queued_items VALUES (?,?,?)", (queue_id, store.thread_id, payload))
+    return dict(thread_id=store.thread_id, state="enqueued", queue_message_id=queue_id,
+                instruction_id=instruction, prompt_sha256=digest)
+
+
+def save_native_reply_receipt(store, receipt):
+    from codex_watchdog.control_state import control_state_home
+    path = control_state_home(store.codex_home) / "remote-wake" / (
+        hashlib.sha256(receipt["instruction_id"].encode()).hexdigest() + ".json")
+    control_atomic_json(path, receipt)
+    return path
 
 
 @pytest.fixture
@@ -24,14 +47,15 @@ def scenario(tmp_path, monkeypatch, request):
     home = tmp_path / "codex"
     repo = tmp_path / "disposable"
     repo.mkdir()
-    rollout = home / "sessions" / "thread.jsonl"
+    rollout = home / "sessions" / ROLLOUT
     rollout.parent.mkdir(parents=True)
     rollout.write_text("{}\n")
     with sqlite3.connect(home / "state_5.sqlite") as db:
-        db.execute("CREATE TABLE threads(id,cwd,source,thread_source,archived,rollout_path)")
+        db.execute("CREATE TABLE threads(id TEXT PRIMARY KEY,cwd,source,thread_source,archived,rollout_path)")
         db.execute("INSERT INTO threads VALUES (?,?,'vscode','user',0,?)", (THREAD, str(repo), str(rollout)))
     with sqlite3.connect(home / "queue_1.sqlite") as db:
-        db.execute("CREATE TABLE queued_items(id,thread_id,payload_json)")
+        db.execute("CREATE TABLE queued_items(id TEXT PRIMARY KEY,thread_id TEXT,payload_json TEXT)")
+        db.execute("CREATE INDEX queued_items_thread_order_idx ON queued_items(thread_id,id)")
         db.execute("CREATE TABLE queued_thread_revisions(thread_id,revision)")
     monkeypatch.setattr(linux_binding, "locality_identity", lambda: "remote-host")
     monkeypatch.setattr(linux_auto, "locality_identity", lambda: "remote-host")
@@ -118,7 +142,7 @@ def scenario(tmp_path, monkeypatch, request):
 
 @pytest.mark.parametrize("scenario", [True], indirect=True)
 def test_node_idle_release_ignores_foreign_changes_but_accepts_its_own_queued_reply(scenario):
-    from codex_watchdog.control_state import control_state_home
+    from codex_watchdog.control_state import control_publish_courier_association
     store, local, writer, clock, clients, make_agent = scenario
     dog = make_agent()
     cycles = []
@@ -131,10 +155,9 @@ def test_node_idle_release_ignores_foreign_changes_but_accepts_its_own_queued_re
     assert clients[0].closed and store.read()["node_parked"] is True
     count = len(cycles)
     # The home/transcript and Codex queue are shared with a different node.
-    (store.codex_home / "sessions/thread.jsonl").write_text('{"foreign":true}\n')
+    (store.codex_home / "sessions" / ROLLOUT).write_text('{"foreign":true}\n')
     queue_id = "99999999-aaaa-4bbb-8ccc-dddddddddddd"
-    with sqlite3.connect(store.codex_home / "queue_1.sqlite") as db:
-        db.execute("INSERT INTO queued_items VALUES (?,?,'{}')", (queue_id, THREAD))
+    receipt = queue_native_reply(store, queue_id)
     assert dog.step()[0]["state"] == "parked"
     assert len(clients) == 1 and len(cycles) == count
     # Simulate a clean controller restart on the same boot; do not lose the gate.
@@ -143,12 +166,16 @@ def test_node_idle_release_ignores_foreign_changes_but_accepts_its_own_queued_re
     item["locks"].close()
     assert dog.step()[0]["state"] == "parked"
     assert len(clients) == 1 and len(cycles) == count
-    # Only an exact accepted courier receipt in this node's directory admits it.
-    receipt = control_state_home(store.codex_home) / "remote-wake/reply.json"
-    control_atomic_json(receipt, dict(schema_version=1, thread_id=THREAD,
-                                     state="enqueued", queue_message_id=queue_id))
+    # Publish the exact current-Q association after its durable node receipt.
+    path = save_native_reply_receipt(store, receipt)
+    original = path.read_bytes()
+    assert dog.step()[0]["state"] == "parked"  # Receipt alone is no discovery lane.
+    assert control_publish_courier_association(store.codex_home, receipt)["status"] == "published"
     assert dog.step()[0]["state"] == "owned"
     assert len(clients) == 2 and store.read()["node_parked"] is False
+    assert path.read_bytes() == original
+    with sqlite3.connect(store.codex_home / "queue_1.sqlite") as db:
+        assert db.execute("SELECT id FROM queued_items WHERE thread_id=?", (THREAD,)).fetchall() == [(queue_id,)]
 
 
 def test_host_observes_attached_thread_and_keeps_observation_after_idle_handback(scenario):
@@ -291,7 +318,7 @@ def test_lark_handoff_restart_rejects_real_identity_mismatch(lark_handoff, field
     agent, store, tickets, target, starts, clients, chat = lark_handoff
     journal = tickets.journal
     with journal.transaction() as db:
-        key = tickets._address(chat, "om_notice000000")
+        key = tickets._address(chat, "om_notice000005")  # Still-valid N4 parent.
         entry = journal.get(db, "threads", key)
         if field == "event_fingerprint":
             entry[field] = value
@@ -304,6 +331,19 @@ def test_lark_handoff_restart_rejects_real_identity_mismatch(lark_handoff, field
     result = agent.step(observe=False)[0]
     assert result["state"] == "blocked"
     assert ticket_rows(tickets) == before and not agent.controllers and not starts and not clients
+
+
+def test_evicted_lark_handoff_mismatch_does_not_gate_current_observation(lark_handoff):
+    agent, store, tickets, target, starts, clients, chat = lark_handoff
+    with tickets.journal.transaction() as db:
+        key = tickets._address(chat, "om_notice000000")
+        entry = tickets.journal.get(db, "threads", key)
+        entry["target"]["workspace_id"] = "obsolete-other-workspace"
+        tickets.journal.put(db, "threads", key, entry)
+    before = ticket_rows(tickets)
+    assert agent.step(observe=False)[0]["state"] == "observing"
+    assert ticket_rows(tickets) == before and len(starts) == 1 and not clients
+    assert tickets.lookup_thread(chat, "om_notice000005").target == target
 
 
 def test_desktop_crash_takeover_and_remote_crash_restart_keep_same_thread(scenario):
@@ -472,7 +512,7 @@ def test_history_changed_during_probe_does_not_gate_independent_current_work(sce
     agent.step(observe=False)
     assert writer[0] is None
     item = agent.controllers[THREAD]
-    rollout = store.codex_home / "sessions/thread.jsonl"
+    rollout = store.codex_home / "sessions" / ROLLOUT
 
     def changed_probe(*args, **kwargs):
         rollout.write_text('{"foreign":true}\n')
@@ -630,6 +670,8 @@ def test_second_remote_process_stays_standby(scenario):
 def test_attached_completion_is_sent_by_host_once_without_resuming_vscode(scenario):
     from codex_watchdog.mvp_service import MvpWatchdogService
     from codex_watchdog.control_state import ControlError
+    from datetime import datetime, timedelta, timezone
+    completed_at = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
     store, local, writer, clock, clients, make_agent = scenario
     agent = make_agent()
     sent = []
@@ -642,7 +684,7 @@ def test_attached_completion_is_sent_by_host_once_without_resuming_vscode(scenar
         ns["git_observation"] = lambda repo: dict(status="observed", topology="equal", blockers=[],
                                                   head_oid="a" * 40, upstream_oid="a" * 40)
         ns["rollout_completion"] = lambda thread: dict(
-            turn_id="five-minute-turn", completed_at="2026-01-01T00:00:00Z", final_output="yes",
+            turn_id="five-minute-turn", completed_at=completed_at, final_output="yes",
             final_output_sha256="8a798890fe93817163b10b5f7bd2ca4d25d84c52739a645a889c173eee7d9d3d",
             final_output_chars=3,
         )
@@ -1069,6 +1111,8 @@ def test_large_frame_recovers_exact_owner_and_notifies_completion_once(scenario,
     from codex_watchdog.app_server import StdioAppServer
     from codex_watchdog.mvp_service import MvpWatchdogService
     from codex_watchdog.control_state import ControlError
+    from datetime import datetime, timedelta, timezone
+    completed_at = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
     store, local, writer, clock, clients, make_agent = scenario
     events, sent, requests = [], [], []
     script = tmp_path / "server.py"
@@ -1116,7 +1160,7 @@ for line in sys.stdin:
         ns["ControlError"] = ControlError
         ns["control_exact_thread"] = lambda repo, thread: repo == store.repo_path and thread == THREAD
         ns["git_observation"] = lambda repo: dict(status="observed", topology="equal", blockers=[], head_oid="a"*40, upstream_oid="a"*40)
-        ns["rollout_completion"] = lambda thread: (dict(turn_id="large-frame-turn", completed_at="2026-01-01T00:00:00Z", final_output="yes",
+        ns["rollout_completion"] = lambda thread: (dict(turn_id="large-frame-turn", completed_at=completed_at, final_output="yes",
             final_output_sha256="8a798890fe93817163b10b5f7bd2ca4d25d84c52739a645a889c173eee7d9d3d", final_output_chars=3)
             if any(e.get("method") == "turn/completed" for e in events) else None)
         notifier = EnvironmentNotifier(runtime, config=NotificationConfig(slack_webhook_url="https://hooks.slack.invalid/host"),

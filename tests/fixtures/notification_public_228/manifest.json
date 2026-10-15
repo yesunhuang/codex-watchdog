@@ -1,0 +1,41 @@
+{
+  "canonical_project_version": "2.2.8",
+  "execution_status": "not executed during fixture preparation",
+  "fixture_package_init": "Fixture-only namespace documentation; deliberately omits original version import so the three exact modules can be loaded under an isolated alias without ambient installed metadata. No old reader/storage/models logic is changed.",
+  "license": {
+    "bytes": 1084,
+    "original_path": "LICENSE",
+    "path": "LICENSE",
+    "sha256": "a37bb31bd416ef2496e53a440bf8048c767a0a31501a09f47791a7badc0eb3c5"
+  },
+  "public_repository": "https://github.com/yesunhuang/codex-watchdog",
+  "public_revision": "657a6a28a3a97e467ed0a3f22fee52e46687d756",
+  "purpose": "Frozen previous-public notification reader regression fixtures; not an executable or full notifier package",
+  "schema_version": 1,
+  "source_archive": {
+    "bytes": 16060144,
+    "format": "GitHub git tar.gz",
+    "git_pax_comment": "657a6a28a3a97e467ed0a3f22fee52e46687d756",
+    "sha256": "ad51c973a58b7d502371b434f062c71ed12a662eb101a09f680f6470c1cdaa6b"
+  },
+  "source_files": {
+    "models.py": {
+      "bytes": 3421,
+      "modifications": "none",
+      "original_path": "src/codex_watchdog/models.py",
+      "sha256": "07720e85168fc204051025f224e8152d3eb42775590df939df023d7a0f83e79f"
+    },
+    "notification_receipts.py": {
+      "bytes": 18910,
+      "modifications": "none",
+      "original_path": "src/codex_watchdog/notification_receipts.py",
+      "sha256": "112b7e7700d1338b902e1a3f701062e6381e032c05a96d870102143e2020b8f8"
+    },
+    "storage.py": {
+      "bytes": 13635,
+      "modifications": "none",
+      "original_path": "src/codex_watchdog/storage.py",
+      "sha256": "9d9c7cb29fabffbe5d2d7ebc207a027b90e9bf3c2ebd0451126c351f6415b090"
+    }
+  }
+}

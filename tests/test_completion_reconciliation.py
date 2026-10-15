@@ -178,7 +178,15 @@ def test_exact_immutable_native_proof_is_required(existing, mismatch):
             "baseline": ("rollout_baseline_offset", 1),
             "proof-thread": ("thread_id", "22222222-2222-4222-8222-222222222222")}[mismatch]
         (proof if mismatch == "proof-thread" else proof["receipt"])[field] = value
-        journal.put(db, "relay_native_receipts", key, proof)
+        if mismatch == "proof-thread":
+            # Simulate corrupt stored evidence. The public writer must reject
+            # this foreign UUID before persistence; reconciliation also refuses it.
+            with pytest.raises(ValueError, match="relay_authority_foreign_session"):
+                journal.put(db, "relay_native_receipts", key, proof)
+            db.execute("UPDATE records SET value=? WHERE namespace=? AND kind=? AND key=?",
+                       (json.dumps(proof), journal.namespace, "relay_native_receipts", key))
+        else:
+            journal.put(db, "relay_native_receipts", key, proof)
     original = event_row(journal.database, args["event_key"])
     assert reconcile_existing_native_completions(first.store)["completed"] == 0
     assert event_row(journal.database, args["event_key"]) == original

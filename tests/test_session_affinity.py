@@ -445,10 +445,14 @@ def test_notifier_unbound_failure_does_not_attempt_same_slack_effect_by_webhook(
     rt = _target(3)
     event = NotificationEvent("ws-3", "codex_started", sha256_text("fp3"), "subject", "msg",
                                relay_target=rt)
-    assert notifier.notify(event).status == "delivery_failed"
+    first = notifier.notify(event)
+    assert first.status == "delivery_failed"
+    assert first.provider_outcomes == {"slack": "uncertain"}
     repeated = notifier.notify(event)
-    assert repeated.status == "delivery_failed"
-    assert repeated.provider_outcomes == {"slack": "uncertain"}
+    assert repeated.status == "suppressed" and repeated.duplicate
+    from codex_watchdog.notification_receipts import DualDeliveryReceipts
+    with DualDeliveryReceipts(tmp_path) as receipts:
+        assert receipts.get(event.event_fingerprint()) == {"slack": "uncertain"}
     assert len(api_calls) == 1 and not webhook_calls
     # A different logical notification remains eligible even after uncertainty.
     next_event = NotificationEvent("ws-3", "codex_started", sha256_text("next-fp3"), "subject", "msg",

@@ -146,7 +146,8 @@ def test_lark_uncertain_delivery_is_never_resent(tmp_path):
     first = notifier.notify(event)
     second = notifier.notify(event)
 
-    assert first.status == second.status == "delivery_failed"
+    assert first.status == "delivery_failed"
+    assert second.status == "suppressed" and second.duplicate
     assert len(api.calls) == 1  # the second attempt never re-sent
 
 
@@ -239,7 +240,8 @@ def test_onebot_uncertain_delivery_is_never_resent(tmp_path):
     first = notifier.notify(event)
     second = notifier.notify(event)
 
-    assert first.status == second.status == "delivery_failed"
+    assert first.status == "delivery_failed"
+    assert second.status == "suppressed" and second.duplicate
     assert len(api.calls) == 1
 
 

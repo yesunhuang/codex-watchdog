@@ -15,12 +15,13 @@ import uuid
 
 from .models import sha256_text, utc_now, validate_instruction_id, validate_prompt
 from .linux_binding import LinuxBindingError, sender_guard
-from .control_context import effect_guard
+from .control_context import current_control, effect_guard
 from .control_state import (
     ControlBusy, ControlError, control_wake_attempt_lock, control_wake_attempt_claim,
 )
 from .platform_adapters import detect_platform_adapter
 from .process_environment import codex_process_environment
+from .native_rollout import find_native_rollout
 from .storage import InstructionCollisionError, InstructionStore, StoreBusyError
 
 
@@ -569,11 +570,9 @@ class QueueWakeDispatcher:
         )
 
     def _find_rollout(self, thread_id: str) -> Optional[Path]:
-        sessions = self.codex_home / "sessions"
-        if not sessions.is_dir():
-            return None
-        matches = list(sessions.rglob(f"rollout-*{thread_id}.jsonl"))
-        return matches[0].resolve() if len(matches) == 1 else None
+        selected = current_control()
+        repo = selected[0].repo_path if selected is not None else None
+        return find_native_rollout(self.codex_home, thread_id, repo)
 
     @staticmethod
     def _marker(record: Dict[str, Any]) -> str:

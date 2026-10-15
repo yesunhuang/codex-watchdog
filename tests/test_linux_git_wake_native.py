@@ -24,7 +24,7 @@ if "queue" in sys.argv:
     message=sys.argv[sys.argv.index("--message")+1]
     item=str(uuid.uuid4())
     with sqlite3.connect(home/"queue_1.sqlite") as db:
-        db.execute("INSERT INTO queued_items VALUES (?,?,?)",(item,thread,json.dumps({"message":message})))
+        db.execute("INSERT INTO queued_items VALUES (?,?,?)",(item,thread,json.dumps({"UserInput":{"content":[{"type":"text","text":message}]}})))
         db.execute("UPDATE queued_thread_revisions SET revision=revision+1 WHERE thread_id=?",(thread,))
     with (home/"calls.jsonl").open("a") as log: log.write(json.dumps({"thread":thread,"message":message})+"\n")
     print("Queued message "+item+" for thread "+thread+".")
@@ -44,7 +44,7 @@ for line in sys.stdin:
             with sqlite3.connect(home/"queue_1.sqlite") as db:
                 items=db.execute("SELECT id,payload_json FROM queued_items WHERE thread_id=?",(thread,)).fetchall()
                 for item,payload in items:
-                    turn=str(uuid.uuid4()); message=json.loads(payload)["message"]
+                    turn=str(uuid.uuid4()); message=json.loads(payload)["UserInput"]["content"][0]["text"]
                     with open(rollout,"a") as log:
                         for event in ({"type":"task_started","turn_id":turn},
                                       {"type":"item_completed","turn_id":turn,"item":{"type":"UserMessage","content":[{"text":message}]}}):
@@ -79,6 +79,7 @@ def test_parked_git_blocker_reaches_same_thread_once_with_native_processes(tmp_p
         db.execute("INSERT INTO threads VALUES (?,?,'vscode','user',0,?)", (THREAD, str(repo), str(rollout)))
     with sqlite3.connect(home / "queue_1.sqlite") as db:
         db.execute("CREATE TABLE queued_items(id,thread_id,payload_json)")
+        db.execute("CREATE INDEX queued_items_thread_order_idx ON queued_items(thread_id,id)")
         db.execute("CREATE TABLE queued_thread_revisions(thread_id,revision)")
         db.execute("INSERT INTO queued_thread_revisions VALUES (?,0)", (THREAD,))
     node = cs.control_node_directory(home)

@@ -7,6 +7,7 @@ reserved-control denial, and race-regression for both admin and delegate paths.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Optional
 
@@ -244,11 +245,12 @@ def lark_plain_event(*, open_id=LARK_DELEGATE, chat_id=LARK_CHAT,
 
 
 def ob_event(*, user_id=OB_ADMIN, group=OB_GROUP, msg_id=OB_ADMIN_CMD,
-             reply_to=OB_NOTIF_MSG, segments=None, self_id=OB_SELF):
+             reply_to=OB_NOTIF_MSG, segments=None, self_id=OB_SELF, physical_time=None):
     if segments is None:
         segments = [{"type": "reply", "data": {"id": reply_to}},
                     {"type": "text", "data": {"text": "hello"}}]
     return {"post_type": "message", "self_id": int(self_id),
+            "time": int(datetime.now(timezone.utc).timestamp()) if physical_time is None else physical_time,
             "message_type": "group", "user_id": int(user_id),
             "group_id": int(group), "message_id": msg_id,
             "sender": {"user_id": int(user_id)}, "message": segments}
@@ -699,7 +701,6 @@ def test_onebot_bind_reaches_binding_handler_not_reserved_guard(tmp_path):
             {"type": "text", "data": {"text": "bind"}}]
     payload = ob_event(user_id=OB_ADMIN, msg_id=OB_ADMIN_CMD, segments=segs,
                        group=OB_GROUP)
-    payload["time"] = 1000000000
     r = relay.handle_event(payload)
     # Should reach binding handler and produce a route-related result, not
     # "rejected_route_command" from the reserved guard.
@@ -709,6 +710,19 @@ def test_onebot_bind_reaches_binding_handler_not_reserved_guard(tmp_path):
     # (which returns "rejected_route_command" without consulting binding.command).
     # We verify by checking the binding store was consulted (no "ignored_*").
     assert not r.status.startswith("ignored_")
+
+
+@pytest.mark.parametrize("physical_time,status", [(None, "rejected_route_command"),
+                                                  (1000000000, "ignored_stale_message")])
+def test_onebot_missing_or_stale_time_never_admits_binding(tmp_path, physical_time, status):
+    calls, queue = _queue()
+    relay = onebot_relay(tmp_path, queue=queue)
+    record_ob_notification(relay.thread_store)
+    payload = ob_event(segments=[{"type": "reply", "data": {"id": OB_NOTIF_MSG}},
+                                 {"type": "text", "data": {"text": "bind"}}])
+    payload["time"] = physical_time
+    assert relay.handle_event(payload).status == status
+    assert not calls
 
 
 def test_onebot_race_closed_ticket_yields_no_dispatch(tmp_path):

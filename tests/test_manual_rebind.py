@@ -157,6 +157,7 @@ def test_snapshot_is_independent_idempotent_and_refuses_collision(tmp_path):
 
 def test_crash_after_notification_does_not_send_first_stop_twice(tmp_path, monkeypatch):
     from codex_watchdog.notifications import EnvironmentNotifier, NotificationConfig
+    from codex_watchdog.notification_context import source_time
 
     service, registry, old, new, original, _ = setup_rebind(tmp_path, monkeypatch)
     sends = []
@@ -164,7 +165,11 @@ def test_crash_after_notification_does_not_send_first_stop_twice(tmp_path, monke
         sends.append(payload)
         return 200
     config = NotificationConfig(slack_webhook_url="https://hooks.slack.invalid/fixture")
-    service.notifier = EnvironmentNotifier(service.runtime, config, http_post=post)
+    # Keep the notifier clock in this fixture's immutable September Stop era.
+    # Expired real events remain ineligible; the crash assertion needs a live one.
+    fixture_now = source_time("2026-09-01T00:00:30Z")
+    service.notifier = EnvironmentNotifier(service.runtime, config, http_post=post,
+                                         clock=lambda: fixture_now)
     state_path = service.state_path("watchdog")
     def failed_write(path, value):
         if path == state_path:

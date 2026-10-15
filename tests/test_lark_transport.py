@@ -223,14 +223,14 @@ def test_real_sdk_scoped_threads_keep_independent_runtime_routes(provider, tmp_p
     destinations = []
     for label, parent in (("a", ROOT_MESSAGE), ("b", other_parent)):
         calls = []
+        clock = [100]
         queue = SimpleNamespace(dispatch=lambda *args, calls=calls: calls.append(args) or SimpleNamespace(status="enqueued"))
         relay = LarkReplyRelay(tmp_path / label, provider.config, queue_dispatcher=queue,
-                              remote_ssh_adapter=None, api=provider.api())
+                              remote_ssh_adapter=None, api=provider.api(), clock=lambda: clock[0])
         relay.thread_store.cache_mappings([dict(provider="lark", scope=provider.config.scope,
             ticket_schema=1, created_at="1970-01-01T00:01:40Z",
             chat_id=CHAT, message_id=parent, event_fingerprint="a" * 64)],
             RelayTarget(label, THREAD, "process_local"))
-        clock = [100]
         poller = LarkReplyPoller(relay, clock=lambda: clock[0])
         poller._read(); clock[0] = 110
         poller.poll_once()

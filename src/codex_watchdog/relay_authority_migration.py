@@ -11,9 +11,11 @@ from decimal import Decimal
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
 import sqlite3
+import tempfile
 from types import SimpleNamespace
 import uuid
 
@@ -168,9 +170,11 @@ def _row(value):
         _stamp(result["created_at"])
     if type(result["active"]) is not int or result["active"] not in (0, 1):
         raise ValueError(_INVALID)
-    if result["active"] and (result["kind"] not in ("threads", "events")
+    if result["active"] and (result["kind"] not in ("threads", "events", "bind_challenges")
                              or result["thread_id"] is None
                              or result["created_at"] is None):
+        raise ValueError(_INVALID)
+    if result["kind"] == "bind_challenges" and result["active"] and body.get("status") != "pending":
         raise ValueError(_INVALID)
     if result["kind"] == "events" and result["active"] and not _pending(body):
         raise ValueError(_INVALID)
@@ -420,26 +424,141 @@ def merge_records_with_quarantine(sources):
     return merge_records([("completed-import", rows)]), quarantines
 
 
-def read_snapshot(database):
-    """Return ``(rows, sha256)`` from a verified read-only SQLite transaction.
+_RECENT_FIELDS = ("namespace", "kind", "key", "born", "expires", "protected", "session")
+_BOUNDARY_FIELDS = ("namespace", "session", "floor", "checked_at")
+_SNAPSHOT_INVALID = "relay_authority_migration_snapshot_invalid"
+
+
+def _snapshot_path(database):
+    path = Path(database).expanduser().absolute()
+    if path.is_symlink() or path.resolve() != path:
+        raise ValueError(_SNAPSHOT_INVALID)
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(str(path) + suffix)
+        if sidecar.is_symlink() or sidecar.resolve() != sidecar:
+            raise ValueError(_SNAPSHOT_INVALID)
+    return path
+
+
+def _number(value):
+    try:
+        return type(value) in (int, float) and math.isfinite(value) and value >= 0
+    except OverflowError:
+        return False
+
+
+def _snapshot_session(value):
+    return isinstance(value, str) and (value == "" or _uuid(value) == value)
+
+
+def _validate_snapshot(snapshot):
+    """Validate all persistent authorization/retention data, without pruning."""
+    fields = {
+            "schema_version", "source_schema", "namespaces", "records",
+            "recent_records", "current_boundaries"}
+    if (not isinstance(snapshot, dict) or set(snapshot) not in (fields, fields | {"record_order"})
+            or type(snapshot["schema_version"]) is not int or snapshot["schema_version"] != 1
+            or type(snapshot["source_schema"]) is not int or snapshot["source_schema"] not in (2, 3)):
+        raise ValueError(_SNAPSHOT_INVALID)
+    namespaces = snapshot["namespaces"]
+    if (not isinstance(namespaces, list) or any(not isinstance(value, str)
+            or not value or "\0" in value for value in namespaces)
+            or namespaces != sorted(set(namespaces))):
+        raise ValueError(_SNAPSHOT_INVALID)
+    if any(not isinstance(snapshot[key], list) for key in
+           ("records", "recent_records", "current_boundaries")):
+        raise ValueError(_SNAPSHOT_INVALID)
+    records = [_row(row) for row in snapshot["records"]]
+    identities = [(row["namespace"], row["kind"], row["key"]) for row in records]
+    if len(set(identities)) != len(identities) or any(row["namespace"] not in namespaces for row in records):
+        raise ValueError(_SNAPSHOT_INVALID)
+    records.sort(key=lambda row: tuple(row[key] for key in _FIELDS[:3]))
+    by_identity = {tuple(row[key] for key in _FIELDS[:3]): row for row in records}
+    from .legacy_ticket_cutoff import cutoff_order
+    order = cutoff_order(records, snapshot.get("record_order"))
+    if (not isinstance(order, list) or any(not isinstance(item, (list, tuple)) or len(item) != 3
+            or any(not isinstance(part, str) for part in item) for item in order)
+            or len(order) != len(records) or len({tuple(item) for item in order}) != len(records)
+            or {tuple(item) for item in order} != set(by_identity)):
+        raise ValueError(_SNAPSHOT_INVALID)
+    recent = []
+    seen = set()
+    for row in snapshot["recent_records"]:
+        if not isinstance(row, dict) or set(row) != set(_RECENT_FIELDS):
+            raise ValueError(_SNAPSHOT_INVALID)
+        identity = tuple(row[key] for key in _FIELDS[:3])
+        if (any(not isinstance(part, str) for part in identity) or identity not in by_identity
+                or identity in seen or not _number(row["born"]) or not _number(row["expires"])
+                or row["expires"] < row["born"] or type(row["protected"]) is not int
+                or row["protected"] not in (0, 1) or not _snapshot_session(row["session"])):
+            raise ValueError(_SNAPSHOT_INVALID)
+        record = by_identity[identity]
+        body = _load(record["value"])
+        target = body.get("target")
+        session = body.get("thread_id") or (target.get("thread_id") if isinstance(target, dict) else None) or record["thread_id"] or ""
+        if session and row["session"] != session:
+            raise ValueError(_SNAPSHOT_INVALID)
+        seen.add(identity)
+        recent.append(dict(row, born=float(row["born"]) or 0.0, expires=float(row["expires"]) or 0.0))
+    if snapshot["source_schema"] == 3:
+        from .recent_state import RECENT_KINDS
+        if seen != {identity for identity, row in by_identity.items() if row["kind"] in RECENT_KINDS}:
+            raise ValueError(_SNAPSHOT_INVALID)
+    boundaries = []
+    seen = set()
+    for row in snapshot["current_boundaries"]:
+        if (not isinstance(row, dict) or set(row) != set(_BOUNDARY_FIELDS)
+                or not isinstance(row["namespace"], str) or row["namespace"] not in namespaces
+                or not _snapshot_session(row["session"]) or not _number(row["floor"])
+                or not _number(row["checked_at"]) or row["floor"] > row["checked_at"]):
+            raise ValueError(_SNAPSHOT_INVALID)
+        identity = (row["namespace"], row["session"])
+        if identity in seen:
+            raise ValueError(_SNAPSHOT_INVALID)
+        seen.add(identity)
+        boundaries.append(dict(row, floor=float(row["floor"]) or 0.0,
+                               checked_at=float(row["checked_at"]) or 0.0))
+    if snapshot["source_schema"] == 2 and (recent or boundaries):
+        raise ValueError(_SNAPSHOT_INVALID)
+    return dict(schema_version=1, source_schema=snapshot["source_schema"], namespaces=list(namespaces),
+                records=records, recent_records=sorted(recent, key=lambda row: tuple(row[key] for key in _FIELDS[:3])),
+                current_boundaries=sorted(boundaries, key=lambda row: (row["namespace"], row["session"])),
+                record_order=[list(item) for item in order])
+
+
+def snapshot_digest(snapshot):
+    """Digest the full logical state, including recent metadata and pins."""
+    try:
+        value = _validate_snapshot(snapshot)
+        return hashlib.sha256(_json(value).encode("utf-8")).hexdigest()
+    except (ValueError, TypeError, KeyError, RecursionError):
+        raise ValueError(_SNAPSHOT_INVALID) from None
+
+
+def read_authority_snapshot(database):
+    """Cold read of all schema2/3 state in one read-only SQLite transaction.
 
     The digest identifies the complete logical snapshot, including committed
-    WAL state. It is not a main-file byte hash. Snapshot/import belongs to the
-    one-time activation gate, never the ingress or handoff hot path.
+    WAL state. Callers must use structured export/import for schema3: its clock,
+    replay boundaries and protected pins must never be flattened to eight columns.
+    This is explicit cold migration work, never an ordinary polling reader.
     """
-    path = Path(database).expanduser().absolute()
-    if path.is_symlink() or not path.is_file():
-        raise ValueError("relay_authority_migration_snapshot_invalid")
     try:
+        path = _snapshot_path(database)
+        if not path.is_file():
+            raise ValueError()
         with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
             db.execute("PRAGMA query_only=ON")
             db.execute("BEGIN")
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            if version != 2 or db.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
+            if version not in (2,3) or db.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
                 raise ValueError()
-            tables = {row[0] for row in db.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
-            if tables != {"records", "sources"}:
+            objects = db.execute("SELECT type,name FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'").fetchall()
+            tables = {name for kind, name in objects if kind == "table"}
+            if any(kind not in ("table", "index") for kind, _ in objects):
+                raise ValueError()
+            expected={"records","sources"} if version==2 else {"records","sources","recent_records","current_boundaries"}
+            if tables != expected:
                 raise ValueError()
             columns = db.execute("PRAGMA table_info(records)").fetchall()
             if (tuple(row[1] for row in columns) != _FIELDS
@@ -455,13 +574,104 @@ def read_snapshot(database):
             namespaces = [row[0] for row in db.execute("SELECT namespace FROM sources ORDER BY namespace")]
             if any(not isinstance(value, str) or not value or "\0" in value for value in namespaces):
                 raise ValueError()
-            rows = [_row(dict(zip(_FIELDS, values))) for values in db.execute(
+            rows = [dict(zip(_FIELDS, values)) for values in db.execute(
                 "SELECT " + ",".join(_FIELDS) + " FROM records ORDER BY namespace,kind,key")]
-            payload = _json(dict(schema_version=version, namespaces=namespaces, rows=rows))
-            digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-            return rows, digest
-    except (OSError, sqlite3.Error, ValueError, TypeError, IndexError):
-        raise ValueError("relay_authority_migration_snapshot_invalid") from None
+            order = [list(values) for values in db.execute("SELECT namespace,kind,key FROM records ORDER BY rowid")]
+            recent, boundaries = [], []
+            if version == 3:
+                for table, fields, types, nulls, keys in (
+                    ("recent_records", _RECENT_FIELDS, ("TEXT", "TEXT", "TEXT", "REAL", "REAL", "INTEGER", "TEXT"),
+                     (1, 1, 1, 1, 1, 1, 1), (1, 2, 3, 0, 0, 0, 0)),
+                    ("current_boundaries", _BOUNDARY_FIELDS, ("TEXT", "TEXT", "REAL", "REAL"),
+                     (1, 1, 1, 1), (1, 2, 0, 0))):
+                    info = db.execute("PRAGMA table_info(" + table + ")").fetchall()
+                    if (tuple(row[1] for row in info) != fields or tuple(row[2].upper() for row in info) != types
+                            or tuple(row[3] for row in info) != nulls or tuple(row[5] for row in info) != keys):
+                        raise ValueError()
+                recent = [dict(zip(_RECENT_FIELDS, values)) for values in db.execute(
+                    "SELECT " + ",".join(_RECENT_FIELDS) + " FROM recent_records ORDER BY namespace,kind,key")]
+                boundaries = [dict(zip(_BOUNDARY_FIELDS, values)) for values in db.execute(
+                    "SELECT " + ",".join(_BOUNDARY_FIELDS) + " FROM current_boundaries ORDER BY namespace,session")]
+            return _validate_snapshot(dict(schema_version=1, source_schema=version, namespaces=namespaces,
+                records=rows, recent_records=recent, current_boundaries=boundaries, record_order=order))
+    except (OSError, sqlite3.Error, ValueError, TypeError, IndexError, KeyError, RecursionError):
+        raise ValueError(_SNAPSHOT_INVALID) from None
+
+
+def read_snapshot(database):
+    """Compatibility read/checksum API; schema3 import needs the structured API.
+
+    The schema3 checksum includes all persistent metadata even though this
+    legacy return shape exposes rows only. A flat importer must refuse schema3.
+    """
+    value = read_authority_snapshot(database)
+    if value["source_schema"] == 2:
+        # Established legacy checksum identities predate retained tie ordering.
+        legacy = dict(schema_version=2, namespaces=value["namespaces"], rows=value["records"])
+        digest = hashlib.sha256(_json(legacy).encode("utf-8")).hexdigest()
+    else:
+        digest = snapshot_digest(value)
+    return value["records"], digest
+
+
+def write_authority_snapshot(database, snapshot):
+    """Publish a validated isolated copy, never overwrite a different journal.
+
+    Source schema is preserved. Schema2->3 projection/compaction is an explicit
+    caller operation; this writer does not synthesize clocks, pins or expiry.
+    Existing equal logical state is idempotent. Hard-link publication is exclusive
+    and process-crash safe; the caller publishes its exact-session manifest last.
+    """
+    value = _validate_snapshot(snapshot)
+    digest = snapshot_digest(value)
+    path = _snapshot_path(database)
+    if path.exists():
+        if snapshot_digest(read_authority_snapshot(path)) != digest:
+            raise ValueError("relay_authority_snapshot_destination_exists")
+        return digest
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temporary = tempfile.mkstemp(prefix=".authority-snapshot-", suffix=".sqlite3", dir=path.parent)
+    os.close(fd)
+    temporary = Path(temporary)
+    try:
+        with closing(sqlite3.connect(str(temporary))) as db:
+            db.execute("PRAGMA synchronous=FULL")
+            db.execute("CREATE TABLE sources(namespace TEXT PRIMARY KEY)")
+            db.execute("CREATE TABLE records(namespace TEXT NOT NULL,kind TEXT NOT NULL,key TEXT NOT NULL,"
+                       "value TEXT NOT NULL,fingerprint TEXT,thread_id TEXT,active INTEGER NOT NULL DEFAULT 0,"
+                       "created_at TEXT,PRIMARY KEY(namespace,kind,key))")
+            db.execute("CREATE INDEX notification_lookup ON records(namespace,kind,fingerprint)")
+            db.execute("CREATE INDEX thread_lookup ON records(namespace,kind,thread_id)")
+            from .reply_tickets import ReplyTickets
+            ReplyTickets._active_indexes(db)
+            db.execute("CREATE INDEX session_relay_pending ON records(thread_id,namespace,key) "
+                       "WHERE active=1 AND kind='events'")
+            db.executemany("INSERT INTO sources VALUES(?)", [(name,) for name in value["namespaces"]])
+            by_identity = {tuple(row[key] for key in _FIELDS[:3]): row for row in value["records"]}
+            db.executemany("INSERT INTO records VALUES(?,?,?,?,?,?,?,?)",
+                           [[by_identity[tuple(identity)][key] for key in _FIELDS]
+                            for identity in value["record_order"]])
+            if value["source_schema"] == 3:
+                from .recent_state import initialize
+                initialize(db)
+                db.executemany("INSERT INTO recent_records VALUES(?,?,?,?,?,?,?)",
+                               [[row[key] for key in _RECENT_FIELDS] for row in value["recent_records"]])
+                db.executemany("INSERT INTO current_boundaries VALUES(?,?,?,?)",
+                               [[row[key] for key in _BOUNDARY_FIELDS] for row in value["current_boundaries"]])
+            db.execute("PRAGMA user_version=" + str(value["source_schema"]))
+            db.commit()
+        if snapshot_digest(read_authority_snapshot(temporary)) != digest:
+            raise ValueError(_SNAPSHOT_INVALID)
+        with temporary.open("r+b") as stream:
+            os.fsync(stream.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            if snapshot_digest(read_authority_snapshot(path)) != digest:
+                raise ValueError("relay_authority_snapshot_destination_exists") from None
+        return digest
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 _CURSOR_INVALID = "relay_authority_migration_cursor_invalid"

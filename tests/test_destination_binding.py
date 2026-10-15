@@ -29,7 +29,7 @@ class Provider:
 
 
 def setup(root, kind):
-    api, queued, clock = Provider(kind), [], [time.time() + 5]
+    api, queued, clock = Provider(kind), [], [int(time.time()) + 5]
     queue = SimpleNamespace(dispatch=lambda *args: queued.append(args) or SimpleNamespace(status="enqueued"))
     if kind == "lark":
         config = LarkConfig("cli_fixture000001", "synthetic", "oc_default000001", ("ou_fixture000001",))
@@ -92,6 +92,15 @@ def test_onebot_confirmation_in_same_timestamp_second(tmp_path):
     assert result.status == "route_bound"
     assert env.relay.binding.store.routes.destination(THREAD) == env.dest
     assert not env.queued
+
+
+@pytest.mark.parametrize("kind", ["lark", "onebot"])
+def test_submicrosecond_ticket_clock_cannot_make_fresh_parent_future(tmp_path,kind):
+    env=setup(tmp_path,kind)
+    env.clock[0]=1800000000.1234567
+    parent="om_submicro000001" if kind=="lark" else "999"
+    record(env.relay,env.default,parent,env.target,"b"*64)
+    assert env.relay.thread_store.lookup_thread(env.default,parent) is not None
 
 
 @pytest.mark.parametrize("kind", ["lark", "onebot"])

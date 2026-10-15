@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import ExitStack
 from datetime import datetime, timezone
 import json
+from .notification_context import source_time
 import os
 from pathlib import Path
 import re
@@ -38,6 +40,8 @@ from .workspace_registry import TrackedWorkspace, WorkspaceRegistry
 from .control_context import effect_guard
 from .control_state import ControlError
 from .remote_control import RemoteControlClient
+from .native_rollout import find_native_rollout
+from .stop_snapshots import StopSnapshots, STOP_RETENTION, PARKED_STOP_OUTCOMES
 
 
 MVP_STATE_SCHEMA_VERSION = 2
@@ -55,18 +59,7 @@ _ROLLOUT_TAIL_MAX_BYTES = 1_048_576
 _ROLLOUT_STOP_FALLBACK_DELAY_SECONDS = 45
 _REMOTE_FAILURE_DEBOUNCE_CYCLES = 2
 _ROLLOUT_STOP_NAMESPACE = uuid.UUID("d09e48db-cf18-46f0-893c-5e76227854cc")
-_PARKED_STOP_OUTCOMES = frozenset(
-    {
-        "continuation_confirmed_then_parked",
-        "duplicate_turn_parked",
-        "grace_expired_parked",
-        "handler_error_failed_open",
-        "invalid_stop_context_parked",
-        "lock_busy_failed_open",
-        "lock_busy_grace_expired_parked",
-        "loop_guard_parked",
-    }
-)
+_PARKED_STOP_OUTCOMES = PARKED_STOP_OUTCOMES
 
 AtomicWriter = Callable[[Path, Dict[str, Any]], None]
 Sleep = Callable[[float], None]
@@ -237,6 +230,7 @@ class MvpWatchdogService:
             if isinstance(value, str) and value.strip()
         )
         self.store = InstructionStore(runtime)
+        self.stop_snapshots = StopSnapshots(runtime)
         self.remote_control = (
             RemoteControlClient(self.remote_ssh_adapter, runtime)
             if getattr(self.remote_ssh_adapter, "supports_control", False) else None
@@ -251,13 +245,18 @@ class MvpWatchdogService:
         self.states = self.runtime / "service" / "state"
         self._rollout_paths: Dict[str, Path] = {}
         self._rollout_snapshots: Dict[
-            str, Tuple[Path, int, int, Optional[Dict[str, Any]]]
+            str, Tuple[Path, int, int, int, int, Optional[Dict[str, Any]]]
         ] = {}
-        self._observed_rollout_completions = set()
+        self._observed_rollout_completions: Dict[str, str] = {}
+        # Bad optional forensic cursors remain byte-for-value in saved state.
+        # A current-process baseline skips their unsafe old effect while later
+        # independently verified completions can progress without a reset.
+        self._stop_cursor_baselines: Dict[str, Tuple[str, str, Optional[str], Optional[datetime]]] = {}
         # A newly discovered window may already have completed a turn while
         # this monitor was running. Baseline once per process, not per window.
-        startup_audits = self._audit_files()
-        self._startup_audit_cursor = startup_audits[-1].name if startup_audits else None
+        self._startup_stop_time = self._parse_timestamp(utc_now())
+        self._desktop_retention = None
+        self._observer_notification_sources = None
 
     def state_path(self, workspace_id: str) -> Path:
         return self.states / f"{sha256_text(workspace_id)}.json"
@@ -275,7 +274,38 @@ class MvpWatchdogService:
                         key=lambda workspace: workspace.workspace_id,
                     )
                 )
+                # These are current caches, not a history of every seen turn or
+                # session.  Retired scopes have no native-history cleanup.
+                active_sessions = {workspace.session_id for workspace in workspaces}
+                active_workspaces = {workspace.workspace_id for workspace in workspaces}
                 snapshot = getattr(self.registry, "last_snapshot", None)
+                observer_scopes = self._observer_notification_scopes(snapshot)
+                if self._desktop_retention is not None:
+                    self._desktop_retention.retain_sessions(active_sessions)
+                maintenance = getattr(self.notifier, "maintenance", None)
+                if maintenance is not None:
+                    try:
+                        maintenance(current_scopes=active_workspaces | observer_scopes)
+                    except (OSError, StoreBusyError, ValueError):
+                        pass  # Retired metadata cannot stall independent observation.
+                observer_maintenance = getattr(self.notifier, "maintain_observers", None)
+                if observer_maintenance is not None:
+                    try:
+                        observer_maintenance(observer_scopes)
+                    except (OSError, StoreBusyError, ValueError):
+                        pass  # No cold conversion or fake native coverage on this path.
+                for key in tuple(self._stop_cursor_baselines):
+                    if key not in active_workspaces:
+                        del self._stop_cursor_baselines[key]
+                for cache in (self._rollout_paths, self._rollout_snapshots,
+                              self._observed_rollout_completions):
+                    for session in tuple(cache):
+                        if session not in active_sessions:
+                            del cache[session]
+                try:
+                    self.stop_snapshots.cleanup()
+                except (OSError, StoreBusyError, ValueError):
+                    pass  # optional history retirement cannot block observation
                 if snapshot is not None:
                     remote_workspace_count = sum(
                         getattr(window, "locality", None) == "remote_ssh"
@@ -294,15 +324,27 @@ class MvpWatchdogService:
                     attention = self._discovery_attention_notifications(snapshot)
                     if attention:
                         discovery_summary["notifications"] = attention
+                resume_is_ambiguous = (
+                    len(workspaces) != 1 and (self.runtime / "resume_prompt.md").exists()
+                )
+                try:
+                    observed_at = source_time(self.clock().astimezone(timezone.utc).timestamp())
+                except Exception:
+                    observed_at = None  # Unknown optional clock cannot block observation.
+                self._resume_observer_point = self._observer_source(
+                    "resume-prompt", "resume_ambiguity",
+                    self._fingerprint({"ambiguous": resume_is_ambiguous}), observed_at,
+                )
+                try:
+                    self._observer_source_store().cleanup(observed_at)
+                except (OSError, ValueError, StoreBusyError):
+                    pass  # Optional source expiry cannot stall current work.
                 local_results = tuple(
                     self._run_workspace(
                         workspace,
                         cycle_id,
                         replay_latest_stop=replay,
-                        resume_is_ambiguous=(
-                            len(workspaces) != 1
-                            and (self.runtime / "resume_prompt.md").exists()
-                        ),
+                        resume_is_ambiguous=resume_is_ambiguous,
                         notify_resume_ambiguity=index == 0,
                     )
                     for index, workspace in enumerate(workspaces)
@@ -360,16 +402,59 @@ class MvpWatchdogService:
             reason=reason,
         )
 
+    @staticmethod
+    def _observer_window_scope(uri):
+        return "vscode-discovery-" + sha256_text(uri)[:32]
+
+    @classmethod
+    def _observer_notification_scopes(cls, snapshot):
+        """Current observer receipt subjects, never native/control identities."""
+        scopes = {"resume-prompt"}
+        if snapshot is not None:
+            scopes.add("vscode-discovery")
+            scopes.update(cls._observer_window_scope(window.workspace_uri)
+                for window in getattr(snapshot, "windows", ())
+                if getattr(window, "locality", None) == "process_local"
+                and isinstance(getattr(window, "workspace_uri", None), str)
+                and window.workspace_uri)
+        return scopes
+
+    def _observer_source_store(self):
+        from .observer_notification_sources import ObserverNotificationSources
+        store = getattr(self, "_observer_notification_sources", None)
+        if store is None:
+            store = self._observer_notification_sources = ObserverNotificationSources(
+                self.runtime.absolute(), writer=self.atomic_writer)
+        return store
+
+    def _observer_source(self, workspace_id, slot, fingerprint, observed_at):
+        try:
+            return self._observer_source_store().observe(workspace_id, slot, fingerprint, observed_at)
+        except (OSError, ValueError, StoreBusyError):
+            return None  # No verified original clock: drop only this alert's send.
+
+    def _observer_transition(self, condition, point):
+        # A genuine new condition is a new effect. Polling, restarts, missing
+        # files and unknown baselines never mint a fresh eligible birth.
+        return self._fingerprint(dict(condition=condition,
+            born=point.get("born") if point else None,
+            generation=point.get("generation") if point else None))
+
     def _discovery_attention_notifications(self, snapshot: Any) -> List[Dict[str, Any]]:
         notifications = []
-        if "vscode_live_status_unavailable" in getattr(snapshot, "issues", ()):
+        observed_at = source_time(getattr(snapshot, "discovered_at", None))
+        unavailable = "vscode_live_status_unavailable" in getattr(snapshot, "issues", ())
+        condition = self._fingerprint({"unavailable": unavailable})
+        discovery_known = unavailable or getattr(snapshot, "status", None) in ("ok", "partial")
+        point = self._observer_source("vscode-discovery", "discovery_attention", condition, observed_at) if discovery_known else None
+        if unavailable:
             label = notification_workspace_label("vscode-discovery", None)
             notifications.append(self._safe_notify(NotificationEvent(
                 workspace_id="vscode-discovery",
                 event_type="workspace_discovery_attention",
-                transition_fingerprint=self._fingerprint({
-                    "reason": "vscode_live_status_unavailable",
-                }),
+                transition_fingerprint=self._observer_transition(condition, point),
+                source_observer=True,
+                source_born=point.get("born") if point else None,
                 subject=f"[Codex Watchdog] {label} automatic monitoring unavailable",
                 message=(
                     "WatchDog cannot verify live VS Code windows. Automatically "
@@ -384,26 +469,39 @@ class MvpWatchdogService:
             "vscode_thread_owner_unverified",
             "ambiguous_vscode_thread_owner",
         }
+        grouped = {}
         for window in getattr(snapshot, "windows", ()):
-            reason = getattr(window, "reason", None)
-            if getattr(window, "locality", None) != "process_local" or reason not in reasons:
+            uri = getattr(window, "workspace_uri", None)
+            if (getattr(window, "locality", None) == "process_local"
+                    and isinstance(uri, str) and uri):
+                grouped.setdefault(uri, []).append(window)
+        for uri, windows in grouped.items():
+            attention = [w for w in windows if getattr(w, "reason", None) in reasons]
+            workspace_id = self._observer_window_scope(uri)
+            # Do not interpret another unresolved reason or a failed global
+            # discovery as a verified healthy ownership transition.
+            known = discovery_known and not unavailable and all(getattr(w, "reason", None) in reasons
+                or getattr(w, "tracking_status", None) in ("tracked", "tracked_deduplicated")
+                for w in windows)
+            condition = self._fingerprint(sorted({
+                (str(getattr(w, "reason", None)), str(getattr(w, "session_id", None)))
+                for w in windows}))
+            point = self._observer_source(workspace_id, "discovery_attention", condition, observed_at) if known else None
+            if not attention:
                 continue
-            workspace_id = getattr(window, "workspace_id", None) or (
-                "vscode-discovery-" + sha256_text(window.workspace_uri)[:32]
-            )
-            repo = getattr(window, "repo_root", None)
+            # Duplicate views of one URI share one condition; conflicting
+            # evidence must never produce a claim of verified coverage.
+            repo = getattr(attention[0], "repo_root", None)
             label = notification_workspace_label(
                 workspace_id, Path(repo) if repo is not None else None,
             )
-            verified = reason == "vscode_thread_owned_by_another_window"
+            verified = known and all(w.reason == "vscode_thread_owned_by_another_window" for w in attention)
             notifications.append(self._safe_notify(NotificationEvent(
                 workspace_id=workspace_id,
                 event_type="workspace_discovery_attention",
-                transition_fingerprint=self._fingerprint({
-                    "reason": reason,
-                    "session_id": getattr(window, "session_id", None),
-                    "workspace_uri": window.workspace_uri,
-                }),
+                transition_fingerprint=self._observer_transition(condition, point),
+                source_observer=True,
+                source_born=point.get("born") if point else None,
                 subject=f"[Codex Watchdog] {label} thread ownership needs attention",
                 message=(
                     f"Codex shows a follower view in the {label} VS Code window. "
@@ -528,7 +626,7 @@ class MvpWatchdogService:
         return self.remote_ssh_adapter.probe(target, **options)
 
     def _run_remote_owned(
-        self, target: RemoteSshTarget, cycle_id: str, *, initial_state=None, initial_probe=None,
+        self, target: RemoteSshTarget, cycle_id: str, *, initial_state=None, initial_probe=None, lifecycle=None,
     ) -> MvpWorkspaceResult:
         workspace_id = target.workspace_id
         state_path = self.state_path(workspace_id)
@@ -544,7 +642,8 @@ class MvpWatchdogService:
         # Historical delivery reconciliation is optional forensic work. Normal
         # observation must not depend on its transcript, queue UUID or outcome.
         probe = initial_probe if initial_probe is not None else self._remote_probe(target)
-        notifications: List[Dict[str, Any]] = []
+        lifecycle=lifecycle or {"status":"UNKNOWN","notifications":()}
+        notifications: List[Dict[str, Any]] = list(lifecycle.get("notifications",()))
         if probe.get("status") != "ok":
             reason = str(probe.get("reason", "remote_adapter_unavailable"))
             self._record_remote_failure(target, state, cycle_id, reason, notifications)
@@ -577,6 +676,7 @@ class MvpWatchdogService:
             )
         self._record_remote_success(target, state, notifications, session_id)
         if state.get("session_id") not in (None, session_id):
+            state.pop("notification_births", None)
             state.update(
                 last_completion_turn=None,
                 last_remote_oid=None,
@@ -616,6 +716,7 @@ class MvpWatchdogService:
                             + output
                         ),
                         relay_target=self._remote_relay_target(target, session_id),
+                        source_born=source_time(completion.get("completed_at")),
                     )
                 )
             )
@@ -624,8 +725,15 @@ class MvpWatchdogService:
             stop_audit_id = f"rollout:{turn_id}"
 
         git = probe.get("git") if isinstance(probe.get("git"), dict) else {}
+        if lifecycle.get("status")=="DORMANT":
+            state['tracking_state']='DORMANT'
+            return self._finish_remote_cycle(target,cycle_id,state,probe,notifications,
+                observation_path,state_path,status="completed",stop_count=stop_count,stop_audit_id=stop_audit_id)
         head_oid = git.get("head_oid")
         remote_oid = git.get("upstream_oid")
+        if lifecycle.get("activated"):
+            state.update(last_attempted_remote_oid=remote_oid,last_remote_oid=remote_oid,
+                         pending_remote_oid=None,pending_instruction_id=None)
         wake = probe.get("wake") if isinstance(probe.get("wake"), dict) else None
         raw_git_blockers = git.get("blockers")
         if not isinstance(raw_git_blockers, (list, tuple)):
@@ -638,11 +746,12 @@ class MvpWatchdogService:
             )
         )
         attention_id = None
+        attention_fingerprint = self._fingerprint(
+            {"blockers": git_blockers, "head_oid": head_oid,
+             "topology": git.get("topology"), "workspace_id": workspace_id})
+        git_source_born = self._remote_notification_source_birth(target, state, "git_attention",
+            session_id, attention_fingerprint, allow_initial=lifecycle.get("activated") is True)
         if git_blockers:
-            attention_fingerprint = self._fingerprint(
-                {"blockers": git_blockers, "head_oid": head_oid,
-                 "topology": git.get("topology"), "workspace_id": workspace_id}
-            )
             attention_key = sha256_text(session_id + "\0" + attention_fingerprint)
             attention_id = f"git-attention:{sha256_text(workspace_id)[:16]}:{attention_key}"
             notifications.append(
@@ -657,6 +766,7 @@ class MvpWatchdogService:
                             + ", ".join(git_blockers)
                         ),
                         relay_target=self._remote_relay_target(target, session_id),
+                        source_born=git_source_born,
                     )
                 )
             )
@@ -719,6 +829,10 @@ class MvpWatchdogService:
             state.update(last_git_attention=attention_id, pending_instruction_id=attention_id,
                          pending_remote_oid=None)
 
+        wake_source = self._fingerprint(dict(instruction_id=state.get("pending_instruction_id"),
+            state=wake.get("state") if wake else None))
+        wake_source_born = self._remote_notification_source_birth(target, state, "wake_status",
+            session_id, wake_source, allow_initial=lifecycle.get("activated") is True)
         if wake is not None and wake.get("state") == "uncertain":
             notifications.append(
                 self._safe_notify(
@@ -737,6 +851,7 @@ class MvpWatchdogService:
                             "WatchDog will not blindly resend it."
                         ),
                         relay_target=self._remote_relay_target(target, session_id),
+                        source_born=wake_source_born,
                     )
                 )
             )
@@ -893,6 +1008,17 @@ class MvpWatchdogService:
             status="error",
         )
 
+    def _remote_notification_source_birth(self, target, state, slot, session_id, fingerprint,
+                                          *, allow_initial=False):
+        from .observed_notification_birth import observe_notification_source
+        try:
+            birth = observe_notification_source(state, slot, session_id, fingerprint,
+                state["last_seen_at"], allow_initial=allow_initial)
+            self.atomic_writer(self.state_path(target.workspace_id), state)
+            return birth
+        except Exception:
+            return None  # Never manufacture source time from a later send retry.
+
     def _record_remote_failure(
         self,
         target: RemoteSshTarget,
@@ -912,6 +1038,8 @@ class MvpWatchdogService:
         ):
             state["connection_status"] = "disconnected"
             state["outage_id"] = cycle_id
+            state["outage_born"] = utc_now()
+            state.pop("recovery_born", None)
             state["connection_alert_pending"] = True
             state["recovery_alert_pending"] = False
         if state.get("connection_alert_pending") is not True:
@@ -920,6 +1048,10 @@ class MvpWatchdogService:
         if not isinstance(outage_id, str) or not outage_id:
             outage_id = cycle_id
             state["outage_id"] = outage_id
+        try:
+            self.atomic_writer(self.state_path(target.workspace_id), state)
+        except Exception:
+            return  # No alert attempt before its stable source identity is durable.
         notification = self._safe_notify(
             NotificationEvent(
                 workspace_id=target.workspace_id,
@@ -929,6 +1061,8 @@ class MvpWatchdogService:
                 ),
                 subject=f"[Codex Watchdog] {target.label} monitoring lost",
                 message=self._remote_failure_message(target, reason),
+                source_born=source_time(state.get("outage_born")),
+                source_thread_id=state.get("session_id"),
             )
         )
         notifications.append(notification)
@@ -949,6 +1083,7 @@ class MvpWatchdogService:
         state["connection_alert_pending"] = False
         if was_disconnected:
             state["recovery_alert_pending"] = True
+            state["recovery_born"] = utc_now()
         if state.get("recovery_alert_pending") is not True:
             if not was_disconnected:
                 state["outage_id"] = None
@@ -957,6 +1092,10 @@ class MvpWatchdogService:
         if not isinstance(outage_id, str) or not outage_id:
             outage_id = str(uuid.uuid4())
             state["outage_id"] = outage_id
+        try:
+            self.atomic_writer(self.state_path(target.workspace_id), state)
+        except Exception:
+            return
         notification = self._safe_notify(
             NotificationEvent(
                 workspace_id=target.workspace_id,
@@ -970,6 +1109,7 @@ class MvpWatchdogService:
                     "workspace and its exact Codex thread are reachable."
                 ),
                 relay_target=self._remote_relay_target(target, session_id),
+                source_born=source_time(state.get("recovery_born")),
             )
         )
         notifications.append(notification)
@@ -1138,6 +1278,7 @@ class MvpWatchdogService:
         except KeyboardInterrupt:
             return 0
         finally:
+            self.stop_snapshots.close()
             if self.slack_reply_relay is not None:
                 self.slack_reply_relay.close()
         return 0
@@ -1146,7 +1287,27 @@ class MvpWatchdogService:
         self, workspace: TrackedWorkspace, cycle_id: str, **options,
     ) -> MvpWorkspaceResult:
         try:
-            with effect_guard(self.codex_home, workspace.session_id):
+            with effect_guard(self.codex_home, workspace.session_id), ExitStack() as scope:
+                # Optional retention shares the real current observer/owner
+                # guard. Its lexical binding never authorizes global cleanup
+                # of this runtime or ingress running on another thread.
+                try:
+                    if self._desktop_retention is None:
+                        from .desktop_retention import DesktopRetention
+                        from .desktop_editor_route import editor_pids
+                        discovery = getattr(self.registry, "discovery", None)
+                        adapter = getattr(discovery, "platform_adapter", None)
+                        self._desktop_retention = DesktopRetention(
+                            self.runtime, self.codex_home,
+                            route_reader=lambda: editor_pids(adapter),
+                            clock=lambda: self.clock().astimezone(timezone.utc).timestamp())
+                    scope.enter_context(self._desktop_retention.activate(workspace))
+                except ControlError:
+                    raise
+                except (OSError, ValueError):
+                    # Unsupported preparation affects GC only. The existing
+                    # independent observation/notification still runs below.
+                    pass
                 return self._run_owned_workspace(workspace, cycle_id, **options)
         except ControlError as exc:
             return MvpWorkspaceResult(
@@ -1179,11 +1340,24 @@ class MvpWatchdogService:
             workspace.workspace_id
         )
         try:
+            lifecycle = self._lifecycle_state(workspace)
             state, stops = self._load_state_and_stops(
                 workspace, replay_latest_stop=replay_latest_stop
             )
             latest_stop = stops[-1] if stops else None
-            notifications: List[Dict[str, Any]] = []
+            notifications: List[Dict[str, Any]] = list(lifecycle.get("notifications", ()))
+            dormant = lifecycle.get("status") == "DORMANT"
+            if dormant:
+                rollout_stop=self._rollout_stop_fallback(workspace,state=state)
+                if rollout_stop is not None:
+                    stops=(*stops,rollout_stop)
+                    latest_stop=rollout_stop
+            if dormant and not lifecycle.get("monitor_current_work") and not stops:
+                self._write_state(state_path,state)
+                return MvpWorkspaceResult(workspace_id=workspace.workspace_id,status="completed",
+                    stop_count=0,stop_audit_id=None,initial_git=None,final_git=None,wake=None,
+                    notifications=tuple(notifications),observation_path=str(observation_path),
+                    state_path=str(state_path),audit_path=None,reason="session_dormant")
 
             initial = self.git_adapter.observe(workspace.repo_root)
             if self._is_transient_observation(initial):
@@ -1200,7 +1374,7 @@ class MvpWatchdogService:
                     observation_path=observation_path,
                 )
 
-            rollout_stop = self._rollout_stop_fallback(workspace)
+            rollout_stop = None if dormant else self._rollout_stop_fallback(workspace, state=state)
             if rollout_stop is not None:
                 stops = (*stops, rollout_stop)
                 latest_stop = rollout_stop
@@ -1214,9 +1388,14 @@ class MvpWatchdogService:
             # the queued turn, where task context is available.
             remote_trigger: Optional[str] = None
             remote_oid = current.upstream_oid
+            if lifecycle.get("activated"):
+                # A new tracking generation starts at the current Git boundary;
+                # reactivation does not enqueue changes from a dormant interval.
+                state.update(last_attempted_remote_oid=remote_oid,last_remote_oid=remote_oid,
+                             pending_remote_oid=None,pending_remote_detected_at=None)
             attempted = state.get("last_attempted_remote_oid",
                                   state.get("pending_remote_oid") or state.get("last_remote_oid"))
-            if remote_oid is not None:
+            if remote_oid is not None and not dormant:
                 if remote_oid == current.head_oid:
                     state["last_remote_oid"] = remote_oid
                     state["pending_remote_oid"] = None
@@ -1237,7 +1416,7 @@ class MvpWatchdogService:
             if resume_is_ambiguous:
                 if notify_resume_ambiguity:
                     notifications.append(self._notify_resume_ambiguity(workspace))
-            wake = self._dispatch_one_wake(
+            wake = None if dormant else self._dispatch_one_wake(
                 workspace,
                 resume_path,
                 remote_trigger,
@@ -1251,9 +1430,9 @@ class MvpWatchdogService:
                     state["pending_remote_detected_at"] = None
                     self._write_state(state_path, state)
 
-            notifications.extend(
-                self._attention_notifications(workspace, current, wake)
-            )
+            if not dormant:
+                notifications.extend(self._attention_notifications(workspace, current, wake,
+                    source_state=state, allow_initial_source=lifecycle.get("activated") is True))
             self._persist_observation(workspace, current)
 
             self._write_state(state_path, state)
@@ -1302,31 +1481,73 @@ class MvpWatchdogService:
                 reason="workspace_cycle_failed",
             )
 
+    def _lifecycle_state(self, workspace):
+        """Optional activity evidence cannot stop independent current work."""
+        if getattr(self.notifier,"config",None) is None:
+            return {"status":"UNKNOWN","notifications":()}
+        try:
+            from .activity_signals import NativeActivityTracker
+            from .session_lifecycle import SessionLifecycle
+            from .session_activity import SessionActivity
+            authority=getattr(self.notifier,"relay_authority",None)
+            runtime=authority.runtime if authority is not None else self.runtime
+            clock=lambda:self.clock().astimezone(timezone.utc).timestamp()
+            signals=NativeActivityTracker(runtime,self.codex_home,clock=clock).observe(workspace,
+                queue_database=getattr(self.queue_dispatcher,"queue_database",None))
+            if not signals.get("exact"):
+                return {"status":"UNKNOWN","notifications":()}
+            legacy=self.state_path(workspace.workspace_id).exists()
+            prior=SessionActivity(runtime,clock=clock).snapshot(workspace.session_id)
+            # First actual valid enrollment, never a repeated discovery tick.
+            enrollment=clock() if prior is None and not legacy else None
+            return SessionLifecycle(self.runtime,self.notifier,clock=clock).observe(
+                workspace,signals,verified_owner=True,enrollment_at=enrollment,legacy=legacy)
+        except Exception:
+            return {"status":"UNKNOWN","reason":"session_activity_unavailable","notifications":()}
+
     def _load_state_and_stops(
         self, workspace: TrackedWorkspace, *, replay_latest_stop: bool
     ) -> Tuple[Dict[str, Any], Tuple[Dict[str, Any], ...]]:
         path = self.state_path(workspace.workspace_id)
-        audit_files = self._audit_files()
+        snapshot = self.stop_snapshots.read(workspace.session_id, workspace.repo_root)
+        event = snapshot["event"] if snapshot is not None else None
+        now = self.clock()
+        completed = self._parse_timestamp(event["hook_completed_at"]) if event else None
+        eligible = (event is not None and self._is_matching_stop(workspace, event)
+                    and completed is not None and self._aware(now)
+                    and 0 <= (now.astimezone(timezone.utc) - completed).total_seconds()
+                    < STOP_RETENTION.total_seconds())
+
+        def consume(state: Dict[str, Any]) -> None:
+            if not self._stop_cursor_valid(state, now):
+                return
+            if snapshot is not None:
+                floor = self._parse_timestamp(state.get("stop_snapshot_completed_at"))
+                if completed is None or not self._aware(now) or completed > now.astimezone(timezone.utc):
+                    return
+                if floor is not None and completed < floor:
+                    return
+                state.update(stop_snapshot_revision=snapshot["revision"],
+                             stop_snapshot_identity=snapshot["identity"],
+                             stop_snapshot_completed_at=snapshot["floor_completed_at"],
+                             audit_cursor=snapshot["legacy_name"])
+
         if not path.exists():
             state = {
                 "schema_version": MVP_STATE_SCHEMA_VERSION,
                 "workspace_id": workspace.workspace_id,
                 "repo_root": str(workspace.repo_root),
                 "session_id": workspace.session_id,
-                "audit_cursor": audit_files[-1].name if audit_files else None,
+                "audit_cursor": snapshot["legacy_name"] if snapshot else None,
                 "last_remote_oid": None,
                 "pending_remote_oid": None,
                 "pending_remote_detected_at": None,
             }
-            candidates = audit_files if replay_latest_stop else tuple(
-                audit_path for audit_path in audit_files
-                if self._startup_audit_cursor is None
-                or audit_path.name > self._startup_audit_cursor
-            )
-            matches = self._matching_stops(workspace, candidates)
-            if replay_latest_stop and matches:
-                return state, (matches[-1],)
-            return state, matches
+            published = self._parse_timestamp(snapshot["published_at"]) if snapshot else None
+            fresh = (published is not None and self._startup_stop_time is not None
+                     and published >= self._startup_stop_time)
+            consume(state)
+            return state, (event,) if eligible and (fresh or replay_latest_stop) else ()
 
         original = path.read_bytes()
         state = self._read_state(path, workspace, allow_thread_change=True)
@@ -1340,29 +1561,50 @@ class MvpWatchdogService:
             if cutover is None:
                 raise ValueError("MVP rebind registration time is invalid")
             snapshot_state(path, original)
-            matches = self._matching_stops(workspace, audit_files)
             # The previous thread's cursor may already be past this thread's first
             # Stop. Select completions since the explicit registration instead.
-            stops = tuple(event for event in matches if
-                          (self._parse_timestamp(event["hook_completed_at"]) or
-                           datetime.min.replace(tzinfo=timezone.utc)) >= cutover)
-            if replay_latest_stop and not stops and matches:
-                stops = (matches[-1],)
+            stops = (event,) if eligible and (completed >= cutover or replay_latest_stop) else ()
             state = {**state, "session_id": workspace.session_id,
-                     "audit_cursor": audit_files[-1].name if audit_files else None}
+                     "audit_cursor": None,
+                     "stop_snapshot_revision": None, "stop_snapshot_identity": None,
+                     "stop_snapshot_completed_at": None}
+            state.pop("rollout_stop_turn_id", None)
+            state.pop("rollout_stop_completed_at", None)
+            state.pop("notification_births", None)  # This authorized registration has a different exact UUID.
+            self._stop_cursor_baselines.pop(workspace.workspace_id, None)
+            consume(state)
             # Keep pending Git and all delivery journals unchanged. Existing wake
             # IDs retain their original thread and refuse cross-thread resends.
             # Normal cycle publication commits this state after handling Stop.
             return state, stops
-        cursor = state["audit_cursor"]
-        candidates = tuple(
-            audit_path
-            for audit_path in audit_files
-            if cursor is None or audit_path.name > cursor
-        )
-        if audit_files:
-            state["audit_cursor"] = audit_files[-1].name
-        return state, self._matching_stops(workspace, candidates)
+        if not self._stop_cursor_valid(state, now):
+            baseline = self._stop_cursor_baselines.get(workspace.workspace_id)
+            scope = (workspace.session_id, str(workspace.repo_root))
+            fresh = False
+            if baseline is not None and baseline[:2] == scope:
+                fresh = (snapshot is not None and snapshot["identity"] != baseline[2]
+                         and completed is not None and baseline[3] is not None
+                         and completed > baseline[3])
+            if baseline is None or baseline[:2] != scope or fresh:
+                floor = completed if completed is not None and self._aware(now) and completed <= now else now if self._aware(now) else None
+                self._stop_cursor_baselines[workspace.workspace_id] = (
+                    *scope, snapshot["identity"] if snapshot else None, floor)
+            # Do not overwrite the corrupt evidence or requalify its unknown
+            # exact effect. Independent Git and subsequent native turns proceed.
+            return state, (event,) if eligible and fresh else ()
+        self._stop_cursor_baselines.pop(workspace.workspace_id, None)
+        if "stop_snapshot_identity" in state:
+            fresh = snapshot is not None and snapshot["identity"] != state["stop_snapshot_identity"]
+            floor = self._parse_timestamp(state.get("stop_snapshot_completed_at"))
+            if floor is not None and completed is not None and completed < floor:
+                fresh = False
+        else:
+            # Explicit upgrade import retains the original filename/cursor
+            # ordering.  Normal observation never enumerates legacy files.
+            cursor = state.get("audit_cursor")
+            fresh = snapshot is not None and (cursor is None or snapshot["legacy_name"] > cursor)
+        consume(state)
+        return state, (event,) if eligible and fresh else ()
 
     @staticmethod
     def _has_only_transient_blocker(blockers: Sequence[str]) -> bool:
@@ -1418,7 +1660,6 @@ class MvpWatchdogService:
                 "workspace_id",
                 "repo_root",
                 "session_id",
-                "audit_cursor",
                 "pending_remote_oid",
                 "pending_remote_detected_at",
             }
@@ -1440,7 +1681,6 @@ class MvpWatchdogService:
                 "workspace_id",
                 "repo_root",
                 "session_id",
-                "audit_cursor",
                 "last_remote_oid",
                 "pending_remote_oid",
                 "pending_remote_detected_at",
@@ -1459,13 +1699,6 @@ class MvpWatchdogService:
         if (not isinstance(state["session_id"], str)
                 or str(uuid.UUID(state["session_id"])) != state["session_id"]):
             raise ValueError("MVP workspace state has an invalid thread")
-        cursor = state["audit_cursor"]
-        if cursor is not None and (
-            not isinstance(cursor, str)
-            or Path(cursor).name != cursor
-            or not cursor.endswith(".json")
-        ):
-            raise ValueError("MVP audit cursor is malformed")
         pending = state["pending_remote_oid"]
         last_remote = state["last_remote_oid"]
         detected_at = state["pending_remote_detected_at"]
@@ -1489,30 +1722,24 @@ class MvpWatchdogService:
             raise ValueError("MVP last remote state is malformed")
         return state
 
+    def _stop_cursor_valid(self, state: Dict[str, Any], now: datetime) -> bool:
+        if "audit_cursor" not in state:
+            return False
+        legacy = state["audit_cursor"]
+        if legacy is not None and (not isinstance(legacy, str) or Path(legacy).name != legacy
+                                   or not legacy.endswith(".json")):
+            return False
+        identity, revision = state.get("stop_snapshot_identity"), state.get("stop_snapshot_revision")
+        recorded = state.get("stop_snapshot_completed_at")
+        if identity is None and revision is None and recorded is None:
+            return True
+        floor = self._parse_timestamp(recorded)
+        return (isinstance(identity, str) and re.fullmatch(r"[0-9a-f]{64}", identity) is not None
+                and type(revision) is int and revision > 0 and floor is not None
+                and self._aware(now) and floor <= now.astimezone(timezone.utc))
+
     def _write_state(self, path: Path, state: Dict[str, Any]) -> None:
         self.atomic_writer(path, state)
-
-    def _audit_files(self) -> Tuple[Path, ...]:
-        audit = self.runtime / "audit"
-        if not audit.is_dir():
-            return ()
-        return tuple(sorted(audit.glob("*.json"), key=lambda path: path.name))
-
-    @classmethod
-    def _matching_stops(
-        cls, workspace: TrackedWorkspace, audit_files: Sequence[Path]
-    ) -> Tuple[Dict[str, Any], ...]:
-        matches: List[Dict[str, Any]] = []
-        for audit_path in audit_files:
-            try:
-                with audit_path.open("r", encoding="utf-8") as handle:
-                    event = json.load(handle)
-                if not cls._is_matching_stop(workspace, event):
-                    continue
-            except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
-                continue
-            matches.append(event)
-        return tuple(matches)
 
     @staticmethod
     def _is_matching_stop(workspace: TrackedWorkspace, event: Any) -> bool:
@@ -1683,6 +1910,7 @@ class MvpWatchdogService:
                 subject=f"[Codex Watchdog] {label} stopped",
                 message=message,
                 relay_target=self._local_relay_target(workspace),
+                source_born=source_time(stop.get("hook_completed_at")),
             )
         )
         if spool_path is not None and (
@@ -1759,27 +1987,51 @@ class MvpWatchdogService:
         return output, path
 
     def _rollout_stop_fallback(
-        self, workspace: TrackedWorkspace
+        self, workspace: TrackedWorkspace, *, state: Optional[Dict[str, Any]] = None
     ) -> Optional[Dict[str, Any]]:
         completion = self._latest_rollout_completion(workspace)
         if completion is None:
             return None
         turn_id = completion["turn_id"]
-        key = (workspace.session_id, turn_id)
-        if key in self._observed_rollout_completions:
+        if self._observed_rollout_completions.get(workspace.session_id) == turn_id:
             return None
         completed_at = self._parse_timestamp(completion["completed_at"])
         now = self.clock()
         if completed_at is None or not self._aware(now):
             return None
         age_seconds = (now.astimezone(timezone.utc) - completed_at).total_seconds()
-        if age_seconds < _ROLLOUT_STOP_FALLBACK_DELAY_SECONDS:
+        if (age_seconds < _ROLLOUT_STOP_FALLBACK_DELAY_SECONDS
+                or age_seconds >= STOP_RETENTION.total_seconds()):
             return None
+        # A current compact Stop may have replaced the exact old claim. Its
+        # chronological floor still prevents an older tail from superseding it.
+        boundary = self.stop_snapshots.read_boundary(workspace.session_id, workspace.repo_root)
+        floor = self._parse_timestamp(boundary["floor_completed_at"]) if boundary else None
+        if floor is not None and floor <= now.astimezone(timezone.utc) and completed_at <= floor:
+            return None
+        if state is not None:
+            if self._stop_cursor_valid(state, now):
+                floor = self._parse_timestamp(state.get("stop_snapshot_completed_at"))
+                if floor is not None and completed_at <= floor:
+                    return None
+            baseline = self._stop_cursor_baselines.get(workspace.workspace_id)
+            if (baseline is not None and baseline[:2] == (workspace.session_id, str(workspace.repo_root))
+                    and baseline[3] is not None and completed_at <= baseline[3]):
+                return None
+            floor = self._parse_timestamp(state.get("rollout_stop_completed_at"))
+            prior_turn = state.get("rollout_stop_turn_id")
+            valid_cursor = (isinstance(prior_turn, str) and 0 < len(prior_turn) <= 4096
+                            and floor is not None and floor <= now.astimezone(timezone.utc))
+            if valid_cursor and (prior_turn == turn_id or completed_at <= floor):
+                return None
         if self._has_matching_stop_turn(workspace, turn_id):
-            self._observed_rollout_completions.add(key)
+            self._observed_rollout_completions[workspace.session_id] = turn_id
             return None
 
-        self._observed_rollout_completions.add(key)
+        self._observed_rollout_completions[workspace.session_id] = turn_id
+        if state is not None:
+            state.update(rollout_stop_turn_id=turn_id,
+                         rollout_stop_completed_at=completion["completed_at"])
         invocation_id = str(
             uuid.uuid5(_ROLLOUT_STOP_NAMESPACE, f"{workspace.session_id}\0{turn_id}",)
         )
@@ -1820,18 +2072,12 @@ class MvpWatchdogService:
     def _latest_rollout_completion(
         self, workspace: TrackedWorkspace
     ) -> Optional[Dict[str, Any]]:
-        path = self._rollout_paths.get(workspace.session_id)
-        if path is None or not path.is_file():
-            sessions = self.codex_home / "sessions"
-            matches = (
-                list(sessions.rglob(f"rollout-*{workspace.session_id}.jsonl"))
-                if sessions.is_dir()
-                else []
-            )
-            if len(matches) != 1:
-                return None
-            path = matches[0]
-            self._rollout_paths[workspace.session_id] = path
+        path = find_native_rollout(self.codex_home, workspace.session_id, workspace.repo_root)
+        if path is None:
+            self._rollout_paths.pop(workspace.session_id, None)
+            self._rollout_snapshots.pop(workspace.session_id, None)
+            return None
+        self._rollout_paths[workspace.session_id] = path
         try:
             stat = path.stat()
         except OSError:
@@ -1842,13 +2088,15 @@ class MvpWatchdogService:
             and cached[0] == path
             and cached[1] == stat.st_size
             and cached[2] == stat.st_mtime_ns
+            and cached[3] == stat.st_dev
+            and cached[4] == stat.st_ino
         ):
-            return cached[3]
+            return cached[5]
         try:
             with path.open("rb") as handle:
                 start = max(0, stat.st_size - _ROLLOUT_TAIL_MAX_BYTES)
                 handle.seek(start)
-                raw = handle.read()
+                raw = handle.read(stat.st_size - start)
         except OSError:
             return None
         if start:
@@ -1868,6 +2116,9 @@ class MvpWatchdogService:
                 continue
             payload = event.get("payload")
             if not isinstance(payload, dict):
+                continue
+            if "thread_id" in payload and payload["thread_id"] != workspace.session_id:
+                latest_lifecycle = None
                 continue
             payload_type = payload.get("type")
             if payload_type == "task_started":
@@ -1902,6 +2153,8 @@ class MvpWatchdogService:
             path,
             stat.st_size,
             stat.st_mtime_ns,
+            stat.st_dev,
+            stat.st_ino,
             completion,
         )
         return completion
@@ -1909,26 +2162,21 @@ class MvpWatchdogService:
     def _has_matching_stop_turn(
         self, workspace: TrackedWorkspace, turn_id: str
     ) -> bool:
-        for audit_path in reversed(self._audit_files()):
-            try:
-                with audit_path.open("r", encoding="utf-8") as handle:
-                    event = json.load(handle)
-            except (OSError, UnicodeError, json.JSONDecodeError):
-                continue
-            if event.get("turn_id") == turn_id and self._is_matching_stop(
-                workspace, event
-            ):
-                return True
-        return False
+        if self.stop_snapshots.has_claimed_turn(workspace.session_id, workspace.repo_root, turn_id):
+            return True
+        snapshot = self.stop_snapshots.read(workspace.session_id, workspace.repo_root)
+        return bool(snapshot is not None and snapshot["event"].get("turn_id") == turn_id
+                    and self._is_matching_stop(workspace, snapshot["event"]))
 
     def _notify_resume_ambiguity(self, workspace: TrackedWorkspace) -> Dict[str, Any]:
+        point = getattr(self, "_resume_observer_point", None)
         return self._safe_notify(
             NotificationEvent(
-                workspace_id=workspace.workspace_id,
+                workspace_id="resume-prompt",
                 event_type="resume_prompt_ambiguous",
-                transition_fingerprint=self._fingerprint(
-                    {"workspace_id": workspace.workspace_id, "ambiguous": True}
-                ),
+                transition_fingerprint=self._observer_transition("ambiguous", point),
+                source_observer=True,
+                source_born=point.get("born") if point else None,
                 subject="[Codex Watchdog] resume prompt needs a target",
                 message=(
                     "resume_prompt.md was retained because more than one workspace "
@@ -1942,6 +2190,7 @@ class MvpWatchdogService:
         workspace: TrackedWorkspace,
         observation: GitObservation,
         wake: Optional[Dict[str, Any]],
+        *, source_state=None, allow_initial_source=False,
     ) -> List[Dict[str, Any]]:
         notifications: List[Dict[str, Any]] = []
         label = notification_workspace_label(
@@ -1953,31 +2202,50 @@ class MvpWatchdogService:
             if blocker != _TRANSIENT_GIT_BLOCKER
         ]
         observation_issues = list(dict.fromkeys(observation_issues))
-        if observation_issues:
+        git_fingerprint = self._fingerprint(dict(blockers=observation_issues,
+            head_oid=observation.head_oid, topology=observation.topology,
+            workspace_id=workspace.workspace_id))
+        wake_kind = "deferred" if wake is not None and wake.get("status") == "deferred_workspace_changed" else (
+            "uncertain" if wake is not None and wake.get("status") not in _NON_ERROR_WAKE_STATES else "quiet")
+        wake_source = self._fingerprint(dict(kind=wake_kind,
+            status=wake.get("status") if wake else None, instruction_id=wake.get("instruction_id") if wake else None))
+        git_born, wake_born = None, None
+        source_known = {"git_attention": True, "wake_status": True}
+        if source_state is not None:
+            from .observed_notification_birth import observe_notification_source
+            births = {}
+            for slot, fingerprint in (("git_attention", git_fingerprint), ("wake_status", wake_source)):
+                try:
+                    births[slot] = observe_notification_source(source_state, slot, workspace.session_id,
+                        fingerprint, observation.observed_at, allow_initial=allow_initial_source)
+                    point = source_state["notification_births"]["points"][slot]
+                    source_known[slot] = point["fingerprint"] == fingerprint and point["checked_at"] == source_time(observation.observed_at)
+                except Exception:
+                    source_known[slot] = False  # One bad point cannot starve another source.
+            git_born, wake_born = births.get("git_attention"), births.get("wake_status")
+            try:
+                self._write_state(self.state_path(workspace.workspace_id), source_state)
+            except Exception:
+                return []  # Lost source publication drops these notices, never prior native work.
+        if observation_issues and source_known["git_attention"]:
             notifications.append(
                 self._safe_notify(
                     NotificationEvent(
                         workspace_id=workspace.workspace_id,
                         event_type="git_attention",
-                        transition_fingerprint=self._fingerprint(
-                            {
-                                "blockers": observation_issues,
-                                "head_oid": observation.head_oid,
-                                "topology": observation.topology,
-                                "workspace_id": workspace.workspace_id,
-                            }
-                        ),
+                        transition_fingerprint=git_fingerprint,
                         subject=(f"[Codex Watchdog] {label} needs Git attention"),
                         message=(
                             "No destructive recovery was attempted. Blockers: "
                             + ", ".join(observation_issues)
                         ),
                         relay_target=self._local_relay_target(workspace),
+                        source_born=git_born,
                     )
                 )
             )
 
-        if wake is not None and wake.get("status") == "deferred_workspace_changed":
+        if source_known["wake_status"] and wake is not None and wake.get("status") == "deferred_workspace_changed":
             notifications.append(
                 self._safe_notify(
                     NotificationEvent(
@@ -1996,10 +2264,11 @@ class MvpWatchdogService:
                             "The pending wake was retained for a later safe cycle."
                         ),
                         relay_target=self._local_relay_target(workspace),
+                        source_born=wake_born,
                     )
                 )
             )
-        elif wake is not None and wake.get("status") not in _NON_ERROR_WAKE_STATES:
+        elif source_known["wake_status"] and wake is not None and wake.get("status") not in _NON_ERROR_WAKE_STATES:
             notifications.append(
                 self._safe_notify(
                     NotificationEvent(
@@ -2020,6 +2289,7 @@ class MvpWatchdogService:
                             "The watchdog will not blindly resend an uncertain wake."
                         ),
                         relay_target=self._local_relay_target(workspace),
+                        source_born=wake_born,
                     )
                 )
             )

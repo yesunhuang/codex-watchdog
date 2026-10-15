@@ -463,8 +463,11 @@ def test_ready_validation_and_notifier_do_not_scan_imported_notification_history
     fresh = event("new-after-10000-historical-events")
     assert notifier.notify(fresh).status == "sent"
     assert calls == [fresh.event_fingerprint()]
-    after = json.loads(notifier.state_path.read_bytes())
-    assert len(after["last_events"]) == 1 and after["last_events"][fresh.dedupe_key()]["fingerprint"] == fresh.event_fingerprint()
+    # Ordinary delivery updates one compact point, never the old H-sized JSON.
+    from codex_watchdog.notification_state import CurrentNotificationState
+    after = CurrentNotificationState(target).read(fresh.dedupe_key())
+    assert after["current"]["fingerprint"] == fresh.event_fingerprint()
+    assert json.loads(notifier.state_path.read_bytes()) == state
 
 
 def test_single_slack_notifier_uses_conflicting_imported_history_after_further_notifications(tmp_path):
@@ -505,7 +508,8 @@ def test_single_provider_delivery_retains_prior_dual_claims_without_retry(tmp_pa
     result = notifier.notify(old)
     assert not calls
     if state == "uncertain":
-        assert result.status == "delivery_failed" and not result.state_persisted
+        assert result.status == "delivery_failed" and result.state_persisted
+        assert result.provider_outcomes == {provider: "uncertain"}
     else:
         assert result.status in ("sent", "suppressed")
     with DualDeliveryReceipts(target) as receipts:
@@ -535,5 +539,5 @@ def test_dual_receipts_prevent_resends_while_allowing_the_missing_provider_only(
     restarted._send_slack = lambda evt: calls.append(("slack", evt.event_fingerprint()))
     restarted._send_lark = lambda evt: calls.append(("lark", evt.event_fingerprint()))
     assert restarted.notify(partial).status == "suppressed"
-    assert restarted.notify(old).status == "delivery_failed"
+    assert restarted.notify(old).status == "suppressed"
     assert calls == [("lark", partial.event_fingerprint())]

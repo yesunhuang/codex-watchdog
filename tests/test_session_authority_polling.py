@@ -39,8 +39,9 @@ def no_network(monkeypatch):
 
 
 class Authority:
-    def __init__(self, thread_id, shared=None):
+    def __init__(self, thread_id, shared=None, *, runtime):
         self.thread_id = thread_id
+        self.runtime = Path(runtime)
         self.shared = shared or SimpleNamespace(epoch=1, cursors={}, lock=threading.RLock())
         self.epoch = self.shared.epoch
         self.depth = 0
@@ -75,7 +76,7 @@ def setup(tmp_path, provider):
     relay = rig.relay
     target = rig.targets[0] if provider == "slack" else next(iter(rig.active().values()))["target"]
     thread_id = target.thread_id if provider == "slack" else target["thread_id"]
-    authority = Authority(thread_id)
+    authority = Authority(thread_id, runtime=relay.runtime)
     relay.relay_authority = authority
     if provider == "slack":
         parent = rig.parents()[0]
@@ -121,7 +122,7 @@ def test_handoff_retains_unread_cursor_without_reading_new_node_legacy_file(tmp_
     assert not c.queued
     delattr(c.relay, c.handler_name)
     c.authority.shared.epoch += 1
-    selected = Authority(c.authority.thread_id, c.authority.shared)
+    selected = Authority(c.authority.thread_id, c.authority.shared, runtime=tmp_path / "login3")
     new = restart(c, tmp_path / "login3", selected)
     local = new.path if provider == "slack" else new.active_path
     local.parent.mkdir(parents=True, exist_ok=True)
@@ -131,7 +132,7 @@ def test_handoff_retains_unread_cursor_without_reading_new_node_legacy_file(tmp_
     with pytest.raises(ControlBusy, match="stale_epoch"):
         c.poller.poll_once()
     selected.shared.epoch += 1
-    newer = Authority(selected.thread_id, selected.shared)
+    newer = Authority(selected.thread_id, selected.shared, runtime=tmp_path / "login4")
     assert restart(c, tmp_path / "login4", newer).poll_once() == []
     assert len(c.queued) == 1
     if provider == "slack":
@@ -245,7 +246,8 @@ def test_shared_cursor_preserves_unknown_fields_and_session_isolation(tmp_path, 
     default["future_unknown"] = {"preserve": [1, 2]}
     with c.authority.guard():
         c.authority.write_cursor(provider, c.cursor_key, default)
-    other = Authority("22222222-2222-4333-8444-555555555555", c.authority.shared)
+    other = Authority("22222222-2222-4333-8444-555555555555", c.authority.shared,
+                      runtime=c.relay.runtime)
     with other.guard():
         other.write_cursor(provider, c.cursor_key, {"other_session": "unchanged"})
     assert c.poller.poll_once()[0]["status"] == "queued"

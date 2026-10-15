@@ -329,6 +329,11 @@ def test_last_output_availability_distinguishes_empty_from_absent(
     empty = stop_payload()
     empty["last_assistant_message"] = ""
     run_hook_text(empty, settings(tmp_path, grace=0.0))
+    first_terminal = next(json.loads(path.read_text(encoding="utf-8"))
+        for path in tmp_path.joinpath("audit").glob("*.json")
+        if json.loads(path.read_text(encoding="utf-8"))["outcome"] == "grace_expired_parked")
+    assert first_terminal["turn_id"] == "turn-1"
+    assert first_terminal["last_assistant_message_available"] is True
 
     absent = stop_payload(turn_id="turn-2")
     absent.pop("last_assistant_message")
@@ -344,7 +349,8 @@ def test_last_output_availability_distinguishes_empty_from_absent(
         record["turn_id"]: record["last_assistant_message_available"]
         for record in records
     }
-    assert availability == {"turn-1": True, "turn-2": False}
+    # The phase diagnostic is current state, not a retained per-turn history.
+    assert availability == {"turn-2": False}
 
 
 def test_invalid_json_fails_open_without_protocol_contamination(tmp_path: Path) -> None:

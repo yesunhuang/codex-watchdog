@@ -27,6 +27,17 @@ def writer_lock_process(path: Path) -> Optional[int]:
 
 
 def _windows_resource_process(path: Path) -> Optional[int]:
+    identity = _windows_resource_details(path)
+    return identity[0] if identity is not None else None
+
+
+def windows_resource_identity(path: Path):
+    """Return the actual Restart Manager PID/FILETIME, never a guessed birth."""
+    identity = _windows_resource_details(path)
+    return identity if identity is not None and identity[1] > 0 else None
+
+
+def _windows_resource_details(path: Path):
     """Query the sole resource user; the caller separately verifies the lock.
 
     Restart Manager registration is temporary. Only query/cleanup functions are
@@ -75,7 +86,9 @@ def _windows_resource_process(path: Path) -> Optional[int]:
             if code == 0:
                 if entries is not None and count.value == 1:
                     pid = int(entries[0].process.pid)
-                    return pid if pid > 0 else None
+                    started = entries[0].process.started
+                    birth = (int(started.dwHighDateTime) << 32) | int(started.dwLowDateTime)
+                    return (pid, birth) if pid > 0 else None
                 return None
             if code != 234 or not 0 < needed.value <= 100:
                 return None

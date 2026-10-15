@@ -67,7 +67,7 @@ def test_uncertain_single_provider_is_terminal_but_distinct_event_progresses(tmp
     assert first.status == "delivery_failed" and calls.calls == [provider]
     calls.failed = None
     repeated = calls.notifier(tmp_path, provider).notify(event())
-    assert repeated.status == "delivery_failed" and calls.calls == [provider]
+    assert repeated.status == "suppressed" and repeated.duplicate and calls.calls == [provider]
     assert calls.notifier(tmp_path, provider).notify(event("new")).status == "sent"
     assert calls.calls == [provider, provider]
 
@@ -86,7 +86,7 @@ def test_crash_after_committed_claim_before_send_is_not_retried(tmp_path, monkey
         calls.notifier(tmp_path, provider).notify(event())
     assert calls.calls == []
     monkeypatch.setattr(DualDeliveryReceipts, "claim", claim)
-    assert calls.notifier(tmp_path, provider).notify(event()).status == "delivery_failed"
+    assert calls.notifier(tmp_path, provider).notify(event()).status == "suppressed"
     assert calls.calls == []
     assert calls.notifier(tmp_path, provider).notify(event("new")).status == "sent"
     assert calls.calls == [provider]
@@ -112,12 +112,13 @@ EnvironmentNotifier(runtime,NotificationConfig(slack_webhook_url='https://hooks.
     http_post=send).notify(NotificationEvent('one-shot-workspace','stopped','old','Fixture subject','Fixture output'))
 '''
     completed = subprocess.run([sys.executable, "-c", script, str(tmp_path), boundary],
-        env={**os.environ, "HOME": str(tmp_path), "USERPROFILE": str(tmp_path)},
+        env={**os.environ, "HOME": str(tmp_path), "USERPROFILE": str(tmp_path),
+             "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
         capture_output=True, text=True, timeout=15)
     assert completed.returncode == 23, completed.stderr
     assert (tmp_path / "actual-attempt").exists() == (boundary == "during_send")
     calls = Calls()
-    assert calls.notifier(tmp_path).notify(event()).status == "delivery_failed"
+    assert calls.notifier(tmp_path).notify(event()).status == "suppressed"
     assert calls.calls == []
     assert calls.notifier(tmp_path).notify(event("new")).status == "sent"
     assert calls.calls == ["slack"]
@@ -126,11 +127,11 @@ EnvironmentNotifier(runtime,NotificationConfig(slack_webhook_url='https://hooks.
 def test_post_send_last_event_write_failure_never_replays_after_restart(tmp_path):
     calls = Calls()
     def fail_last_event(path, value):
-        if path.name == "last-events.json":
+        if path.parent.name == "current" and value.get("current", {}).get("status") == "sent":
             raise OSError("fixture disk failure after provider confirmation")
         InstructionStore._atomic_json(path, value)
     result = calls.notifier(tmp_path, atomic_writer=fail_last_event).notify(event())
-    assert result.status == "state_error" and calls.calls == ["slack"]
+    assert result.status == "sent" and result.error_sha256 and calls.calls == ["slack"]
     calls.notifier(tmp_path).notify(event())
     assert calls.calls == ["slack"]
     calls.notifier(tmp_path).notify(event("new"))

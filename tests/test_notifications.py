@@ -114,7 +114,7 @@ def test_slack_delivery_is_primary_and_identical_event_is_persistently_suppresse
         "Untracked files were left untouched."
     }
 
-    durable = notifier.state_path.read_text(encoding="utf-8")
+    durable = first.state_path.read_text(encoding="utf-8")
     assert WEBHOOK not in durable
     assert "Untracked files" not in durable
     assert "local-watchdog" not in durable
@@ -274,7 +274,7 @@ def test_bot_and_channel_send_notifications_without_a_reply_listener(tmp_path: P
         "unfurl_links": False, "unfurl_media": False,
     })]
     assert not SlackThreadStore(tmp_path).has_notification_mapping(notification.event_fingerprint())
-    assert SLACK_BOT_TOKEN not in notifier.state_path.read_text(encoding="utf-8")
+    assert SLACK_BOT_TOKEN not in first.state_path.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("updates", [
@@ -401,7 +401,7 @@ def test_failed_slack_falls_back_to_authenticated_starttls_smtp(
     assert smtp.message is not None
     assert smtp.message["Subject"] == event().subject
     assert smtp.message.get_content().strip() == event().message
-    persisted = (tmp_path / "notifications" / "last-events.json").read_text(
+    persisted = result.state_path.read_text(
         encoding="utf-8"
     )
     result_output = json.dumps(result.to_dict())
@@ -586,7 +586,7 @@ def test_windows_message_is_opt_in_and_uses_injected_argv_runner(
             2.5,
         )
     ]
-    durable = notifier.state_path.read_text(encoding="utf-8")
+    durable = result.state_path.read_text(encoding="utf-8")
     assert "interactive-user" not in durable
     assert event().message not in durable
 
@@ -654,10 +654,10 @@ def test_all_configured_delivery_failures_are_hash_only_and_not_retried(
     assert first.channel == "local_audit"
     assert first.error_sha256 is not None
     assert WEBHOOK not in json.dumps(first.to_dict())
-    assert first.state_persisted is False
-    assert second.status == "delivery_failed"
-    assert second.duplicate is False
-    assert second.state_persisted is False
+    assert first.state_persisted is True
+    assert second.status == "suppressed"
+    assert second.duplicate is True
+    assert second.state_persisted is True
     assert second.attempted_channels == ()
     assert calls == ["slack", "windows"]
 
@@ -720,10 +720,10 @@ def test_malformed_cache_is_retained_while_durable_claims_fence_delivery(tmp_pat
     )
     result = notifier.notify(event())
 
-    assert result.status == "state_error"
+    assert result.status == "sent"
     assert result.channel == "slack"
-    assert result.state_persisted is False
-    assert result.error_sha256 is not None
+    assert result.state_persisted is True
+    assert result.error_sha256 is None
     assert calls == ["sent"] and state.read_bytes() == original
     assert notifier.notify(event()).attempted_channels == ()
     assert calls == ["sent"] and state.read_bytes() == original
@@ -732,24 +732,32 @@ def test_malformed_cache_is_retained_while_durable_claims_fence_delivery(tmp_pat
 
 
 def test_state_write_failure_reports_hash_only_after_delivery(tmp_path: Path) -> None:
+    calls = []
+    writes = []
     def post(_url: str, _payload: bytes, _timeout: float) -> int:
+        calls.append("sent")
         return 200
 
     def fail_write(_path: Path, _value: Dict[str, Any]) -> None:
         from codex_watchdog.storage import InstructionStore
-        if _path.name == "last-events.json":
-            raise OSError(f"cannot persist {WEBHOOK}")
+        if _path.parent.name == "current":
+            writes.append(_path)
+            if len(writes) == 2:
+                raise OSError(f"cannot persist {WEBHOOK}")
         InstructionStore._atomic_json(_path, _value)
 
-    result = EnvironmentNotifier(
+    notifier = EnvironmentNotifier(
         tmp_path,
         NotificationConfig(slack_webhook_url=WEBHOOK),
         http_post=post,
         atomic_writer=fail_write,
-    ).notify(event())
+    )
+    result = notifier.notify(event())
 
-    assert result.status == "state_error"
+    assert result.status == "sent"
     assert result.channel == "slack"
-    assert result.state_persisted is False
+    assert result.state_persisted is True  # the pre-send claim survives failed finish
     assert result.error_sha256 is not None
     assert WEBHOOK not in json.dumps(result.to_dict())
+    assert notifier.notify(event()).attempted_channels == ()
+    assert calls == ["sent"]

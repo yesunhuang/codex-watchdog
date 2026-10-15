@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from email.message import EmailMessage
 from html import escape
@@ -404,19 +405,42 @@ class NotificationEvent:
     subject: str
     message: str
     relay_target: Optional[SlackRelayTarget] = None
+    provider_filter: Optional[Tuple[str, ...]] = None
+    ticket_created_at: Optional[str] = None
+    source_born: Optional[float] = None
+    source_thread_id: Optional[str] = None
+    source_observer: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.source_observer) is not bool or self.source_observer and (
+                self.relay_target is not None or self.source_thread_id is not None or self.provider_filter is not None):
+            raise ValueError("notification observer cannot be a native relay target")
         for name in ("workspace_id", "event_type", "transition_fingerprint", "subject"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"notification {name} must be a non-empty string")
         if not isinstance(self.message, str):
             raise ValueError("notification message must be a string")
+        if self.source_born is not None:
+            from .notification_context import source_time
+            if source_time(self.source_born) is None:
+                raise ValueError("notification original source time is invalid")
+        if self.source_thread_id is not None and (
+            not _is_canonical_uuid(self.source_thread_id)
+            or self.relay_target is not None and self.source_thread_id.lower() != self.relay_target.thread_id.lower()
+        ):
+            raise ValueError("notification original source thread is invalid")
         if (
             self.relay_target is not None
             and self.relay_target.workspace_id != self.workspace_id
         ):
             raise ValueError("notification relay target workspace does not match")
+        if self.provider_filter is not None and (
+            self.event_type != "session_hello" or not isinstance(self.provider_filter, tuple)
+            or not self.provider_filter or len(set(self.provider_filter)) != len(self.provider_filter)
+            or any(value not in ("slack", "lark", "onebot") for value in self.provider_filter)
+        ):
+            raise ValueError("notification provider filter is reserved for activation Hello")
 
     def dedupe_key(self) -> str:
         stable = json.dumps(
@@ -569,10 +593,13 @@ class EnvironmentNotifier:
         lark_thread_store: Any = None,
         onebot_api: Any = None,
         onebot_thread_store: Any = None,
+        clock: Optional[Callable[[], float]] = None,
     ) -> None:
         if config is not None and environment is not None:
             raise ValueError("provide notification config or environment, not both")
         self.runtime = Path(runtime)
+        from datetime import datetime, timezone
+        self.clock = clock if clock is not None else lambda: datetime.now(timezone.utc).timestamp()
         self.config = (
             config
             if config is not None
@@ -624,122 +651,174 @@ class EnvironmentNotifier:
         return selected[0] if len(selected) == 1 else CombinedThreadStores(*selected)
 
     def notify(self, event: NotificationEvent) -> NotificationResult:
+        from .notification_senders import sender_fence
         authority = getattr(self, "relay_authority", None)
         if authority is not None:
             with authority.guard():
-                with current_effect("notification"):
+                with current_effect("notification"), sender_fence(authority.runtime):
                     return self._guarded_notify(event)
-        with current_effect("notification"):
+        runtime = getattr(self, "relay_runtime", self.runtime)
+        with current_effect("notification"), sender_fence(runtime):
             return self._guarded_notify(event)
 
+    @contextmanager
+    def _notification_locks(self, runtime):
+        from contextlib import ExitStack
+        from .notification_senders import sender_fence
+        with sender_fence(runtime), ExitStack() as locks:
+            locks.enter_context(FileLock(self.lock_path))
+            selected_lock = Path(runtime) / 'locks/notifications.lock'
+            if self.lock_path.absolute() != selected_lock.absolute():
+                locks.enter_context(FileLock(selected_lock))
+            yield
+
+    def _prepare_fresh_entry(self, event, runtime):
+        context = self.receipt_context(event)
+        if context is not None or event.source_observer:
+            from .notification_fresh_entry import ensure_fresh_notification_entry
+            ensure_fresh_notification_entry(runtime, context, clock=self.clock)
+        return context
+
+    def prepare_notification_entry(self, event):
+        """Provision before a control-attempt lease creates notification state.
+
+        This performs no effect claim or send. The actual attempt/control and
+        provider reservations still precede the normal notifier's one attempt.
+        """
+        from contextlib import nullcontext
+        from .notification_senders import sender_fence
+        authority = getattr(self, "relay_authority", None)
+        with authority.guard() if authority is not None else nullcontext():
+            runtime = getattr(self, "relay_runtime", self.runtime)
+            with current_effect("notification"), sender_fence(
+                    authority.runtime if authority is not None else runtime):
+                with self._notification_locks(runtime):
+                    self._prepare_fresh_entry(event, runtime)
+
+    def maintenance(self, *, current_scopes):
+        from contextlib import nullcontext
+        from .notification_state import CurrentNotificationState
+        authority = getattr(self, "relay_authority", None)
+        from .notification_senders import sender_fence
+        with authority.guard() if authority is not None else nullcontext():
+            runtime = getattr(self, "relay_runtime", self.runtime)
+            current = getattr(self, "_notification_current_state", None)
+            if current is None or current.root.parent.parent != Path(runtime).resolve():
+                current = self._notification_current_state = CurrentNotificationState(runtime, writer=self.atomic_writer, clock=self.clock)
+            with sender_fence(authority.runtime if authority is not None else runtime), FileLock(self.lock_path):
+                return current.cleanup(current_scopes=current_scopes)
+
+    def prepare_retention(self, *, scopes, current_keys, contexts, current_pins, old_sender_fence):
+        """Explicit cold entry after real old-sender quiescence, never a tick.
+
+        The trusted caller supplies this selected runtime's complete current
+        projection and exclusion of ALL old notification senders/subprocesses.
+        The callback verifies/retains that exclusion; it must not stop processes
+        or hold notifications.lock here. Partial cold failure needs explicit
+        forward recovery before activating a sender; this never restarts one.
+        """
+        from contextlib import nullcontext
+        from .notification_root_retention import prepare_notification_root
+        from .notification_senders import sender_fence
+        authority = getattr(self, "relay_authority", None)
+        with authority.guard() if authority is not None else nullcontext():
+            runtime = (authority.notification_runtime if authority is not None
+                       else getattr(self, "relay_runtime", self.runtime))
+            with current_effect("notification"), sender_fence(
+                    authority.runtime if authority is not None else runtime):
+                return prepare_notification_root(runtime, scopes=scopes, current_keys=current_keys,
+                    contexts=contexts, current_pins=current_pins, sender_fence=old_sender_fence,
+                    clock=self.clock)
+
+    def maintain_observers(self, workspace_ids):
+        """Enroll only current unbound observers in already prepared families."""
+        from contextlib import nullcontext
+        from .notification_context import observer_scope
+        from .notification_receipts import maintain_observer_receipts
+        from .notification_senders import sender_fence
+        scopes = tuple((subject, scope, provider)
+            for workspace in workspace_ids
+            for subject, scope in (observer_scope(workspace),)
+            for provider in ("slack", "lark", "smtp", "windows_msg"))
+        authority = getattr(self, "relay_authority", None)
+        with authority.guard() if authority is not None else nullcontext():
+            runtime = getattr(self, "relay_runtime", self.runtime)
+            with current_effect("notification"), sender_fence(
+                    authority.runtime if authority is not None else runtime), FileLock(self.lock_path):
+                return maintain_observer_receipts(runtime, scopes=scopes, sender_fence=nullcontext,
+                                                  clock=self.clock)
+
     def _guarded_notify(self, event: NotificationEvent) -> NotificationResult:
+        from .notification_state import CurrentNotificationState
         fingerprint = event.event_fingerprint()
-        dedupe_key = event.dedupe_key()
-        with FileLock(self.lock_path):
+        key = event.dedupe_key()
+        runtime = getattr(self, "relay_runtime", self.runtime)
+        current = getattr(self, "_notification_current_state", None)
+        if current is None or current.root.parent.parent != Path(runtime).resolve():
+            current = self._notification_current_state = CurrentNotificationState(runtime, writer=self.atomic_writer, clock=self.clock)
+        state_path = current.path(key)
+        # Portable notification storage can differ from the authority/controller.
+        # Retain the outer authority fence and lock the selected namespace too.
+        with self._notification_locks(runtime):
             try:
-                state = self._read_state()
-            except Exception as exc:
-                # This last-event cache is historical suppression evidence,
-                # not an activation prerequisite. Preserve it byte-for-byte;
-                # valid independent claim journals still fence new sends.
-                if getattr(self, "relay_runtime", None) is not None:
+                receipt_context = self._prepare_fresh_entry(event, runtime)
+                from .notification_root_retention import source_eligible
+                eligible = source_eligible(runtime, event.source_born)
+                if (receipt_context is not None and event.provider_filter is not None
+                        and eligible is None):
+                    # Activation has its own journal rather than finite delivery
+                    # adapters. It cannot bypass a pending/offline root upgrade.
+                    raise ValueError('notification_activation_explicit_preparation_required')
+                imported = eligible is False
+                if (eligible is None and receipt_context is None
+                        and getattr(self, "relay_runtime", None) is not None):
                     from .relay_notification_migration import previous_notification
-                    if previous_notification(self.relay_runtime, fingerprint):
-                        return NotificationResult(
-                            status="suppressed", channel=None,
-                            event_fingerprint=fingerprint, duplicate=True,
-                            attempted_channels=(),
-                            configuration_issues=self.config.configuration_issues,
-                            state_path=self.state_path, state_persisted=False,
-                            error_sha256=self._error_digest("state_read_failed", exc),
-                        )
-                delivery = self._deliver(event)
-                return NotificationResult(
-                    status="state_error",
-                    channel=delivery.channel,
-                    event_fingerprint=fingerprint,
-                    duplicate=False,
-                    attempted_channels=delivery.attempted_channels,
-                    configuration_issues=self.config.configuration_issues,
-                    state_path=self.state_path,
-                    state_persisted=False,
-                    error_sha256=self._combine_error_digests(tuple(value for value in (
-                        self._error_digest("state_read_failed", exc), delivery.error_sha256) if value is not None)),
-                    provider_outcomes=delivery.provider_outcomes,
-                )
-
-            previous = state["last_events"].get(dedupe_key)
-            imported = False
-            if getattr(self, "relay_runtime", None) is not None:
-                from .relay_notification_migration import previous_notification
-                imported = previous_notification(self.relay_runtime, fingerprint)
-            if imported or previous is not None and previous["fingerprint"] == fingerprint:
-                return NotificationResult(
-                    status="suppressed",
-                    channel=None,
-                    event_fingerprint=fingerprint,
-                    duplicate=True,
-                    attempted_channels=(),
-                    configuration_issues=self.config.configuration_issues,
-                    state_path=self.state_path,
-                    state_persisted=True,
-                )
-
-            delivery = self._deliver(event)
-            if delivery.status == "delivery_failed":
-                return NotificationResult(
-                    status=delivery.status,
-                    channel=delivery.channel,
-                    event_fingerprint=fingerprint,
-                    duplicate=False,
-                    attempted_channels=delivery.attempted_channels,
-                    configuration_issues=self.config.configuration_issues,
-                    state_path=self.state_path,
-                    state_persisted=False,
-                    error_sha256=delivery.error_sha256,
-                    provider_outcomes=delivery.provider_outcomes,
-                )
-            state["last_events"][dedupe_key] = {
-                "fingerprint": fingerprint,
-                "recorded_at": utc_now(),
-            }
-            try:
-                self.atomic_writer(self.state_path, state)
+                    imported = previous_notification(self.relay_runtime, fingerprint)
+                claimed = False if imported else current.claim(key, fingerprint, scope=event.workspace_id)
             except Exception as exc:
-                state_error = self._error_digest("state_write_failed", exc)
-                combined_error = self._combine_error_digests(
-                    tuple(
-                        value
-                        for value in (delivery.error_sha256, state_error)
-                        if value is not None
-                    )
-                )
+                # A failed durable claim loses only this action. There is no
+                # unfenced provider attempt and unrelated keys keep progressing.
                 return NotificationResult(
-                    status="state_error",
-                    channel=delivery.channel,
-                    event_fingerprint=fingerprint,
-                    duplicate=False,
-                    attempted_channels=delivery.attempted_channels,
+                    status="state_error", channel=None, event_fingerprint=fingerprint,
+                    duplicate=False, attempted_channels=(),
                     configuration_issues=self.config.configuration_issues,
-                    state_path=self.state_path,
-                    state_persisted=False,
-                    error_sha256=combined_error,
-                    provider_outcomes=delivery.provider_outcomes,
+                    state_path=state_path, state_persisted=False,
+                    error_sha256=self._error_digest("state_claim_failed", exc),
                 )
+            if not claimed:
+                return NotificationResult(
+                    status="suppressed", channel=None, event_fingerprint=fingerprint,
+                    duplicate=True, attempted_channels=(),
+                    configuration_issues=self.config.configuration_issues,
+                    state_path=state_path, state_persisted=True,
+                )
+            from dataclasses import replace
+            from datetime import datetime, timezone
+            event = replace(event, ticket_created_at=datetime.fromtimestamp(
+                current.claim_time(key,fingerprint),timezone.utc).isoformat().replace('+00:00','Z'))
+            # Eligibility ended durably above, before any provider API call.
+            # A crash, failed HTTP response or absent receipt cannot retry it.
+            delivery = self._deliver(event)
+            errors = [delivery.error_sha256] if delivery.error_sha256 is not None else []
+            status = delivery.status
+            try:
+                current.finish(key, fingerprint, sent=status != "delivery_failed")
+            except Exception as exc:
+                errors.append(self._error_digest("state_write_failed", exc))
+                # The independent ledger already ended automatic eligibility.
+                # Preserve actual provider truth when optional cache finish fails.
             return NotificationResult(
-                status=delivery.status,
-                channel=delivery.channel,
-                event_fingerprint=fingerprint,
-                duplicate=False,
-                attempted_channels=delivery.attempted_channels,
+                status=status, channel=delivery.channel, event_fingerprint=fingerprint,
+                duplicate=False, attempted_channels=delivery.attempted_channels,
                 configuration_issues=self.config.configuration_issues,
-                state_path=self.state_path,
-                state_persisted=True,
-                error_sha256=delivery.error_sha256,
+                state_path=state_path, state_persisted=True,
+                error_sha256=self._combine_error_digests(tuple(errors)),
                 provider_outcomes=delivery.provider_outcomes,
             )
 
     def _deliver(self, event: NotificationEvent) -> _DeliveryResult:
+        if event.provider_filter is not None:
+            return self._deliver_activation(event)
         attempts = []
         failures = []
         outcomes = None
@@ -826,44 +905,115 @@ class EnvironmentNotifier:
             outcomes,
         )
 
+    def _deliver_activation(self, event: NotificationEvent) -> _DeliveryResult:
+        """Only scopes whose durable generation claim was admitted by lifecycle.
+
+        No fallback route/provider is invented for a Hello. A failed provider
+        cannot retry or stall another independently claimed provider.
+        """
+        attempts, sent, failures, outcomes = [], [], [], {}
+        configured = {"slack": self.config.slack_relay_configured,
+                      "lark": self.config.lark.relay_configured,
+                      "onebot": self.config.onebot.relay_configured}
+        methods = {"slack": self._send_slack, "lark": self._send_lark,
+                   "onebot": self._send_onebot}
+        for provider in event.provider_filter or ():
+            if not configured[provider]:
+                outcomes[provider] = "failed"
+                continue
+            attempts.append(provider)
+            try:
+                methods[provider](event)
+            except Exception as exc:
+                outcomes[provider] = "uncertain"
+                failures.append(self._error_digest(provider + "_hello_failed", exc))
+            else:
+                outcomes[provider] = "sent"
+                sent.append(provider)
+        return _DeliveryResult("sent" if len(sent) == len(event.provider_filter or ()) else "delivery_failed",
+                               "+".join(sent) or "local_audit", tuple(attempts),
+                               self._combine_error_digests(tuple(failures)), outcomes)
+
     def _deliver_both(self, event: NotificationEvent) -> _DeliveryResult:
         try:
+            context = self.receipt_context(event)
             with DualDeliveryReceipts(getattr(self, "relay_runtime", self.runtime),
-                                      atomic_writer=self.atomic_writer) as receipts:
-                return self._deliver_with_receipts(event, receipts)
+                                      atomic_writer=self.atomic_writer,
+                                      receipt_context=context, clock=self.clock,
+                                      require_finite=event.source_observer or context is not None,
+                                      current_key=event.dedupe_key()) as receipts:
+                if event.source_observer and receipts.finite is None:
+                    raise ValueError("notification_observer_explicit_preparation_required")
+                return self._deliver_with_receipts(event, receipts, context=context if receipts.finite is not None else None)
         except Exception:
             # Drop only effects whose durable claim store is unavailable.
             # OneBot has its own journal; independent fallback claims can also
             # proceed. A receipt failure never makes Slack/Feishu retryable.
             return self._deliver_with_receipts(event, None)
 
-    def _attempt_fallback(self, event, provider):
+    def _fallback_identity(self, event, provider):
         if provider == "smtp":
             target = (self.config.smtp_host, self.config.smtp_port, self.config.smtp_sender,
                       self.config.smtp_recipients)
-            send = self._send_smtp
         else:
             target = (self.config.windows_message_target,)
-            send = self._send_windows_message
         target_sha256 = sha256_text(json.dumps(target, sort_keys=True, separators=(",", ":")))
         payload_sha256 = sha256_text(json.dumps((event.subject, event.message),
             ensure_ascii=False, separators=(",", ":")))
+        return dict(target_sha256=target_sha256, payload_sha256=payload_sha256)
+
+    def receipt_context(self, event):
+        from .notification_context import receipt_context
+        # An absent producer context must not trigger even optional route reads.
+        if event.source_born is None or (event.relay_target is None and event.source_thread_id is None
+                                         and not event.source_observer):
+            return None
+        identities = {}
+        for provider in self.config.interactive_providers:
+            try:
+                if provider == "slack" and self.config.slack_configured:
+                    identities[provider] = self._slack_message(event)[3]
+                elif provider == "lark" and self.config.lark.configured:
+                    identities[provider] = self._lark_message(event)[4]
+            except Exception:
+                # Unknown exact routing drops this provider's current action;
+                # it must not stop another independently verified provider.
+                continue
+        for provider, configured in (("smtp", self.config.smtp_configured),
+                                     ("windows_msg", self.config.windows_message_configured)):
+            if configured:
+                identities[provider] = self._fallback_identity(event, provider)
+        return receipt_context(event, identities)
+
+    def _attempt_fallback(self, event, provider):
+        send = self._send_smtp if provider == "smtp" else self._send_windows_message
+        identity = self._fallback_identity(event, provider)
+        target_sha256, payload_sha256 = identity["target_sha256"], identity["payload_sha256"]
         attempted = ()
         try:
-            with FallbackDeliveryReceipts(getattr(self, "relay_runtime", self.runtime)) as receipts:
+            context = self.receipt_context(event)
+            with FallbackDeliveryReceipts(getattr(self, "relay_runtime", self.runtime),
+                                          receipt_context=context, clock=self.clock,
+                                          require_finite=event.source_observer or context is not None,
+                                          current_key=event.dedupe_key()) as receipts:
+                if event.source_observer and receipts.finite is None:
+                    raise ValueError("notification_observer_explicit_preparation_required")
                 previous = receipts.claim(event.event_fingerprint(), provider, target_sha256, payload_sha256)
                 if previous == "sent":
                     return "sent", (), None
                 if previous == "uncertain":
                     return "uncertain", (), sha256_text(provider + "_delivery_unconfirmed")
                 attempted = (provider,)
+                from .notification_context import verify_identity
+                current_identity = self._fallback_identity(event, provider)
+                verify_identity(identity, current_identity["target_sha256"], current_identity["payload_sha256"])
                 send(event)
                 receipts.confirm_sent(event.event_fingerprint(), provider)
                 return "sent", attempted, None
         except Exception as error:
             return "uncertain", attempted, self._error_digest(provider + "_failed", error)
 
-    def _deliver_with_receipts(self, event, receipts):
+    def _deliver_with_receipts(self, event, receipts, *, context=None):
         fingerprint = event.event_fingerprint()
         try:
             receipt = receipts.get(fingerprint) if receipts is not None else None
@@ -918,7 +1068,11 @@ class EnvironmentNotifier:
                 continue
             attempts.append(provider)
             try:
-                (self._send_slack if provider == "slack" else self._send_lark)(event)
+                send = self._send_slack if provider == "slack" else self._send_lark
+                if context is None:
+                    send(event)
+                else:
+                    send(event, expected_identity=context["providers"][provider])
             except Exception as error:
                 outcomes[provider] = "uncertain"
                 failures.append(self._error_digest(provider + "_failed", error))
@@ -936,7 +1090,7 @@ class EnvironmentNotifier:
             "+".join(delivered) or "local_audit", tuple(attempts),
             self._combine_error_digests(tuple(failures)), outcomes)
 
-    def _send_slack(self, event: NotificationEvent) -> None:
+    def _slack_message(self, event):
         try:
             machine = _notification_label_component(socket.gethostname()) or "unknown"
         except OSError:
@@ -967,23 +1121,38 @@ class EnvironmentNotifier:
                 )
                 bound_channel = routes.destination(relay_target.thread_id)
             target_channel = bound_channel or self.config.slack_channel_id
+            payload = {"channel": target_channel, "text": relay_text,
+                       "unfurl_links": False, "unfurl_media": False}
+        else:
+            relay_target = None
+            target_channel = None
+            payload = {"text": text}
+        from .notification_context import identity_hash
+        identity = dict(target_sha256=identity_hash(dict(provider="slack", channel=target_channel,
+            webhook_sha256=sha256_text(self.config.slack_webhook_url) if target_channel is None else None,
+            target=relay_target.to_dict() if relay_target is not None else None)),
+            payload_sha256=identity_hash(payload))
+        return target_channel, relay_target, payload, identity
+
+    def _send_slack(self, event: NotificationEvent, *, expected_identity=None) -> None:
+        if event.source_observer and expected_identity is None:
+            raise ValueError("notification_observer_current_identity_required")
+        channel, relay_target, payload, identity = self._slack_message(event)
+        from .notification_context import verify_identity
+        verify_identity(expected_identity, identity["target_sha256"], identity["payload_sha256"])
+        if self.config.slack_post_configured:
             # An API exception may follow a successful external send. Keep its
             # uncertain claim; never make a second Slack webhook attempt.
             result = self.slack_api_post(
                 self.config.slack_bot_token,
                 "chat.postMessage",
-                {
-                    "channel": target_channel,
-                    "text": relay_text,
-                    "unfurl_links": False,
-                    "unfurl_media": False,
-                },
+                payload,
                 self.config.timeout_seconds,
             )
             channel_id = result.get("channel")
             thread_ts = result.get("ts")
             if (
-                channel_id != target_channel
+                channel_id != channel
                 or not valid_slack_channel_id(channel_id)
                 or not valid_slack_timestamp(thread_ts)
             ):
@@ -996,12 +1165,13 @@ class EnvironmentNotifier:
                     thread_ts,
                     relay_target,
                     event.event_fingerprint(),
+                    created_at=event.ticket_created_at,
                 )
             return
         assert self.config.slack_webhook_url is not None
-        self._send_slack_webhook(text)
+        self._send_slack_webhook(payload["text"])
 
-    def _send_lark(self, event: NotificationEvent) -> None:
+    def _lark_message(self, event):
         target = event.relay_target if self.config.lark.relay_configured else None
         try:
             machine = _notification_label_component(socket.gethostname()) or "unknown"
@@ -1014,7 +1184,6 @@ class EnvironmentNotifier:
         text = f"{event.subject.strip()}\n{context}\n{event.message}"
         if target is not None:
             text += "\n\nReply in thread on this message to send text to this exact existing Codex thread."
-        fingerprint = event.event_fingerprint()
         bound_destination = None
         if event.relay_target is not None:
             from .session_routes import SessionRoutes
@@ -1024,8 +1193,23 @@ class EnvironmentNotifier:
         payload_digest = sha256_text(json.dumps(
             [text, resolved_destination, target.to_dict() if target else None],
             ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+        from .notification_context import identity_hash
+        identity = dict(target_sha256=identity_hash(dict(provider="lark", scope=self.config.lark.scope,
+            destination=resolved_destination, target=target.to_dict() if target is not None else None)),
+            payload_sha256=payload_digest)
+        return text, resolved_destination, bound_destination, target, identity
+
+    def _send_lark(self, event: NotificationEvent, *, expected_identity=None) -> None:
+        if event.source_observer and expected_identity is None:
+            raise ValueError("notification_observer_current_identity_required")
+        text, resolved_destination, bound_destination, target, identity = self._lark_message(event)
+        from .notification_context import verify_identity
+        verify_identity(expected_identity, identity["target_sha256"], identity["payload_sha256"])
+        fingerprint = event.event_fingerprint()
+        payload_digest = identity["payload_sha256"]
         store = self.lark_thread_store
-        if store.prepare_notification(fingerprint, payload_digest) is not None:
+        if not event.source_observer and store.prepare_notification(fingerprint, payload_digest,
+                created_at=event.ticket_created_at, thread_id=target.thread_id if target is not None else None) is not None:
             return
         api = self.lark_api or LarkApi(self.config.lark, self.config.timeout_seconds)
         if bound_destination is not None:
@@ -1034,9 +1218,12 @@ class EnvironmentNotifier:
             result = api.send(text, fingerprint)
         if result.get("chat_id") != resolved_destination:
             raise RuntimeError("lark_response_destination_mismatch")
-        store.finish_notification(fingerprint, result["chat_id"], result["message_id"], target)
+        if not event.source_observer:
+            store.finish_notification(fingerprint, result["chat_id"], result["message_id"], target)
 
     def _send_onebot(self, event: NotificationEvent) -> None:
+        if event.source_observer:
+            raise ValueError("notification_observer_provider_not_prepared")
         config = self.config.onebot
         if not config.configured:
             raise RuntimeError("onebot_configuration_incomplete")
@@ -1063,7 +1250,8 @@ class EnvironmentNotifier:
             [text, resolved_destination, target.to_dict() if target else None],
             ensure_ascii=False, sort_keys=True, separators=(",", ":")))
         store = self.onebot_thread_store
-        if store.prepare_notification(fingerprint, payload_digest) is not None:
+        if store.prepare_notification(fingerprint, payload_digest,
+                created_at=event.ticket_created_at, thread_id=target.thread_id if target is not None else None) is not None:
             return
         api = self.onebot_api or OneBotApi(config, self.config.timeout_seconds)
         if bound_destination is not None:
@@ -1144,34 +1332,11 @@ class EnvironmentNotifier:
         if return_code != 0:
             raise RuntimeError("Windows message command returned a non-success status")
 
-    def _read_state(self) -> Dict[str, Any]:
-        if not self.state_path.exists():
-            return {
-                "schema_version": NOTIFICATION_STATE_SCHEMA_VERSION,
-                "last_events": {},
-            }
-        with self.state_path.open("r", encoding="utf-8") as handle:
-            value = json.load(handle)
-        if (
-            not isinstance(value, dict)
-            or frozenset(value) != frozenset({"schema_version", "last_events"})
-            or value["schema_version"] != NOTIFICATION_STATE_SCHEMA_VERSION
-            or not isinstance(value["last_events"], dict)
-        ):
-            raise ValueError("notification state is malformed")
-        for key, entry in value["last_events"].items():
-            if (
-                not isinstance(key, str)
-                or len(key) != 64
-                or not isinstance(entry, dict)
-                or frozenset(entry) != frozenset({"fingerprint", "recorded_at"})
-                or not isinstance(entry["fingerprint"], str)
-                or len(entry["fingerprint"]) != 64
-                or not isinstance(entry["recorded_at"], str)
-                or not entry["recorded_at"]
-            ):
-                raise ValueError("notification state is malformed")
-        return value
+    def _read_state(self, dedupe_key: str) -> Dict[str, Any]:
+        """Point read of current state; explicit upgrade owns the old JSON scan."""
+        from .notification_state import CurrentNotificationState
+        runtime = getattr(self, "relay_runtime", self.runtime)
+        return CurrentNotificationState(runtime).read(dedupe_key)
 
     @staticmethod
     def _email_subject(value: str) -> str:

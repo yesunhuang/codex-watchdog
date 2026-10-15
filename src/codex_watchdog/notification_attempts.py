@@ -159,7 +159,7 @@ class NotificationAttempt:
     def _journal_evidence(database, source, value, mappings, outcomes):
         provider = source["provider"]
         with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
-            if db.execute("PRAGMA user_version").fetchone()[0] != 2:
+            if db.execute("PRAGMA user_version").fetchone()[0] not in (2,3):
                 raise ValueError("journal schema")
             rows = db.execute("SELECT value FROM records INDEXED BY session_active_tickets "
                 "WHERE namespace=? AND kind='threads' AND fingerprint=? "

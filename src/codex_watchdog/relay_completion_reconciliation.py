@@ -95,7 +95,7 @@ def _existing_transaction(database):
 
 
 def _schema(db):
-    if db.execute("PRAGMA user_version").fetchone()[0] != 2:
+    if db.execute("PRAGMA user_version").fetchone()[0] not in (2,3):
         raise ControlError("relay_completion_database_schema_invalid")
     fields = [row[2] for row in db.execute("PRAGMA index_info(session_relay_pending)")]
     definition = db.execute("SELECT sql FROM sqlite_master WHERE type='index' "

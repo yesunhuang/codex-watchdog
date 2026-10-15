@@ -122,6 +122,13 @@ def build_parser() -> argparse.ArgumentParser:
     migration.add_argument("--quiescence", type=_path,
                            help="fresh private native receipts proving every old cluster listener stopped")
 
+    retention = commands.add_parser("notification-retention-prepare",
+        help="explicit offline finite notification upgrade; never stops or starts a sender")
+    retention.add_argument("--projection", type=_path, required=True,
+                           help="exact current notification projection and physical sender roots")
+    retention.add_argument("--quiescence", type=_path, required=True,
+                           help="fresh operator native receipt; all old senders/subprocesses remain excluded")
+
     hook = commands.add_parser(
         "hook", help="handle one native Codex hook event from stdin"
     )
@@ -181,6 +188,8 @@ def build_parser() -> argparse.ArgumentParser:
     workspace_remove.add_argument("--workspace", required=True, type=_safe_id)
 
     commands.add_parser("workspace-list", help="list registered workspaces")
+    enable=commands.add_parser("session-enable",help="explicitly re-enable monitoring of one existing registered local session; never wakes Codex")
+    enable.add_argument('--thread',required=True,type=_thread_id)
     commands.add_parser(
         "workspace-discover",
         help="read all open VS Code windows and resolve safe effective workspaces",
@@ -312,6 +321,16 @@ def _prompt(message: Optional[str], prompt_file: Optional[Path]) -> str:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "notification-retention-prepare":
+        from .notification_cutover import prepare_notification_cutover
+        import sqlite3
+        try:
+            result = prepare_notification_cutover(args.runtime, args.projection, args.quiescence)
+        except (OSError, ValueError, sqlite3.Error, StoreBusyError) as error:
+            result = dict(status="refused", error_type=type(error).__name__,
+                          reason_sha256=sha256_text(str(error)), old_sender_restart_allowed=False)
+        print(json.dumps(result, sort_keys=True))
+        return 1 if result["status"] == "refused" else 0
     if args.command == "notification-receipts-export":
         from .notification_receipts import NotificationReceiptError, export_legacy
         import sqlite3
@@ -504,6 +523,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 }
             )
         )
+        return 0
+    if args.command == "session-enable":
+        from datetime import datetime, timezone
+        from .native_rollout import find_native_rollout
+        from .activation_request import request_activation
+        home=args.codex_home or Path(os.environ.get('CODEX_HOME',Path.home()/'.codex'))
+        try:
+            workspaces=EffectiveWorkspaceCatalog(args.runtime,codex_home=home).list_workspaces()
+            matches=[w for w in workspaces if w.session_id==args.thread and w.execution_locality=='process_local']
+            if len(matches)!=1 or find_native_rollout(home,args.thread,matches[0].repo_root) is None:
+                raise ValueError('session_enable_exact_local_session_unverified')
+            result=request_activation(args.runtime,args.thread,requested_at=datetime.now(timezone.utc).timestamp())
+        except (ValueError,OSError,StoreBusyError):
+            print(json.dumps(dict(status='refused',reason='session_enable_exact_local_session_unverified')))
+            return 1
+        print(json.dumps(result,sort_keys=True))
         return 0
     if args.command == "workspace-add":
         try:

@@ -4,7 +4,7 @@ import itertools
 import json
 import os
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 
@@ -219,11 +219,17 @@ def binding_fixture(runtime, monkeypatch, provider, state="pending", *, hello=No
         message = lambda number: str(3000000 + number)
     target = RelayTarget("control-fixture", SESSION, "process_local")
     now = [datetime.fromisoformat(STAMP.replace("Z", "+00:00")).timestamp() + 30.1234567]
+    store.clock = lambda: now[0]
     challenges = BindingChallenges(store, provider, scope, clock=lambda: now[0])
 
     def parent(number):
+        birth = STAMP
+        if number > 1:
+            later = datetime.fromtimestamp(now[0] - 1, timezone.utc).isoformat().replace("+00:00", "Z")
+            birth = later
+            monkeypatch.setattr("codex_watchdog.lark_mapping.utc_now", lambda: later)
         fingerprint = sha256_text("binding-notification:" + str(number))
-        store.prepare_notification(fingerprint, fingerprint)
+        store.prepare_notification(fingerprint, fingerprint, created_at=birth)
         store.finish_notification(fingerprint, chat, message(number), target)
         return message(number)
 
@@ -324,6 +330,14 @@ def test_binding_epochs_preserved_through_read_only_authority_plan(tmp_path, mon
         db.execute("CREATE TABLE threads(id TEXT,cwd TEXT,archived INTEGER,source TEXT,thread_source TEXT)")
         db.execute("INSERT INTO threads VALUES(?,?,0,'vscode','user')", (SESSION, str(repository)))
     store, challenges = binding_fixture(runtime, monkeypatch, provider, state)
+    # This test exercises the original all-cluster schema2 import. Current
+    # schema3 state uses the exact-session structured migration instead.
+    from codex_watchdog.relay_authority_migration import read_authority_snapshot, write_authority_snapshot
+    legacy = read_authority_snapshot(store.journal.database)
+    legacy.update(source_schema=2, recent_records=[], current_boundaries=[])
+    staging = store.journal.database.with_name("schema2-fixture.sqlite3")
+    write_authority_snapshot(staging, legacy)
+    os.replace(staging, store.journal.database)
     raw = raw_binding_rows(store.journal.database)
     assert_binding_rows_valid(challenges, raw)
     before = {path: path.read_bytes() for path in home.rglob("*") if path.is_file()}
@@ -444,7 +458,7 @@ def test_binding_migration_uses_existing_schema_and_exact_identity_guards(tmp_pa
 @pytest.mark.parametrize("provider", ["lark", "onebot"])
 @pytest.mark.parametrize("kind", ["bind_challenges", "bind_operations"])
 @pytest.mark.parametrize("change", [dict(namespace="slack/poll-relay-state.json"),
-                                      dict(key="unrelated-key"), dict(thread_id=OTHER), dict(active=1)])
+                                      dict(key="unrelated-key"), dict(thread_id=OTHER), dict(active=2)])
 def test_binding_migration_refuses_wrong_namespace_key_session_or_active_ticket(tmp_path, monkeypatch, provider, kind, change):
     store, _ = binding_fixture(tmp_path / "runtime", monkeypatch, provider)
     entry = next(entry for entry in raw_binding_rows(store.journal.database) if entry["kind"] == kind)
@@ -500,7 +514,7 @@ def test_snapshot_includes_committed_wal_without_changing_original(tmp_path):
         assert path.read_bytes() == main_bytes
 
 
-@pytest.mark.parametrize("version", [0, 1, 3])
+@pytest.mark.parametrize("version", [0, 1, 4])
 def test_snapshot_rejects_unsupported_schema_without_migrating(tmp_path, version):
     path = database(tmp_path)
     with sqlite3.connect(path) as db:

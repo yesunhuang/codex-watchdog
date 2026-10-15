@@ -1,5 +1,6 @@
 from dataclasses import replace
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -20,6 +21,7 @@ CFG = OneBotConfig("ws://127.0.0.1:3001", "onebot-fixture-token", "12345", "grou
 
 def incoming(*, reply=-100, message_id=200, text="literal human instruction"):
     return dict(post_type="message", self_id=12345, message_type="group", user_id=54321,
+                time=int(time.time()),
                 group_id=67890, message_id=message_id, sender={"user_id": 54321},
                 message=[{"type": "reply", "data": {"id": str(reply)}},
                          {"type": "text", "data": {"text": text}}])
@@ -133,7 +135,7 @@ def test_uncertain_outbound_is_not_replayed(tmp_path):
     notifier, result, event, _ = notify(tmp_path, api=api)
     assert result.status == "delivery_failed"
     api.failed = False
-    assert notifier.notify(event).status == "delivery_failed"
+    assert notifier.notify(event).status == "suppressed"
     assert len(api.calls) == 1
     assert notifier.relay_thread_store.notification_mappings(event.event_fingerprint()) == []
 
@@ -183,7 +185,7 @@ def test_all_providers_retain_legacy_receipts_and_routes(tmp_path):
     assert result.status == "delivery_failed" and result.channel == "slack+lark"
     assert calls == ["slack", "lark"] and len(api.calls) == 1
     api.failed = False
-    assert notifier.notify(event).status == "delivery_failed"
+    assert notifier.notify(event).status == "suppressed"
     assert calls == ["slack", "lark"] and len(api.calls) == 1
     from codex_watchdog.notification_receipts import DualDeliveryReceipts
     from codex_watchdog.storage import FileLock
@@ -193,6 +195,17 @@ def test_all_providers_retain_legacy_receipts_and_routes(tmp_path):
     instance = reply_relay_from_config(tmp_path, cfg, queue_dispatcher=SimpleNamespace(), remote_ssh_adapter=None)
     instance.thread_store.cache_mappings(notifier.relay_thread_store.notification_mappings(event.event_fingerprint()), TARGET)
     assert len(instance.relays) == 3
+
+
+@pytest.mark.parametrize('stamp',[None,True,1])
+def test_missing_or_ancient_onebot_time_cannot_reuse_message_ids(tmp_path,stamp):
+    notify(tmp_path)
+    instance,calls=relay(tmp_path)
+    payload=incoming()
+    if stamp is None:payload.pop('time')
+    else:payload['time']=stamp
+    assert instance.handle_event(payload).status=='ignored_stale_message'
+    assert not calls
 
 
 @pytest.mark.parametrize("value", [True, False, 1.5, "01", "-0", " 12", "1e3", str(2**63), None])

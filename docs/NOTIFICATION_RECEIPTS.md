@@ -1,70 +1,72 @@
-# Dual-provider notification receipts
+# Notification receipts and finite retention
 
-Slack and Feishu notifications retain a receipt for each event and provider.
-WatchDog replaces repeated full-history JSON rewrites with
-indexed SQLite point operations. Existing notification destinations, mappings,
-settings and credentials remain in place.
+WatchDog durably claims an exact event/provider/destination/payload before its
+one permitted external attempt. A confirmed response records `sent`; failed,
+uncertain and crash-left attempts remain ineligible for automatic retry. Missing
+acknowledgements and historical uncertainty do not block later independent work.
+Current live sender/owner/writer guards, authorization and native FIFO remain.
 
-The store durably records `uncertain` before attempting a provider send. A
-confirmed response changes that provider's receipt to `sent`. Both states
-suppress another attempt, including after restart, a timeout or a failed
-confirmation write. Receipt-storage failure prevents a new send; it never
-replays a task or resets a reply ticket. Slack bot-command acknowledgements
-continue to use their separate existing reply journal.
+Prepared finite notification roots use indexed receipt operations, a compact
+current fingerprint per configured workspace/event and bounded recent claims.
+Eligibility uses the producer's original source time and the durable monotonic
+retirement boundary. A retry, ticket timestamp or restart cannot make an old
+effect fresh. Unknown source evidence or an unavailable receipt family refuses
+the affected action; it does not authorize a legacy fallback or another attempt.
+Independent healthy providers can continue.
 
-On first use, the current version validates and imports the complete legacy
-`notifications/dual-deliveries.json` once under `notifications.lock`, retains an
-exact atomic backup, and commits the indexed store before publishing a schema-2
-marker. Every sent, uncertain and valid empty legacy entry is retained. Later
-notifications use point reads and small committed writes; migration and explicit
-rollback export are separate one-time history-sized operations. Missing,
-incompatible or ambiguous state fails closed.
+Native-session and unbound observer scopes are distinct. An observer alert does
+not establish native ownership, a session grant or permission to dispatch work.
+A newly verified current native scope can enroll on an already prepared root
+using its exact committed current claim, preserving the original root floor.
+Existing damaged boundaries are not silently replaced. Current HTTP receipt pins
+remain separate from native/provider queue and journal references.
 
-## Ended notification attempts
+## First install
 
-A failed or uncertain provider attempt is terminal once its send has ended.
-Its exact event/provider is not retried; other providers and later independent
-notifications continue. Controlled notifications record the terminal aggregate
-before releasing their ownership barrier. A provider confirmation-write failure
-keeps its uncertain claim and does not abort healthy providers' turns.
+A verified current notification can initialize a genuinely absent notification
+directory under its actual sender and notification locks. Both finite families
+and readiness are published before the current claim. The producer's original
+birth is retained; initialization/restart time does not make an old event fresh.
+Only exclusive creation of that absent directory establishes a fresh namespace.
+An existing empty, legacy, partial, malformed or redirected directory is never
+silently treated as new. Interrupted publication needs controlled forward
+recovery, preserving its original plan and uncertain claims. New current observer
+and native scopes enroll through their exact current claim; damaged existing
+boundaries are refused without blocking an independent healthy scope.
 
-Each exact sender/target has a schema-1 intent under
-`notifications/control-attempts/` and a crash-releasing kernel lease spanning
-prepare, send and receipt commit. After restart, a new holder can reconcile that
-exact saved operation as terminal uncertain without sending or dispatching work.
-Recovery uses bounded point lookups and only still-active reply mappings; closed
-or evicted tickets stay closed. A live lease, missing sender proof, incompatible
-intent or unrelated native-writer barrier remains fenced. Age or timeout alone
-does not prove that a send ended. Legacy unfinished effects lacking this sender
-intent require exact operator diagnosis and approved recovery.
+## Controlled upgrade
 
-Compatible upgrades preserve existing profiles, runtimes, provider receipts,
-credentials and routes. The additive intent does not change provider schemas.
-Keep the current binary and intent evidence until any unfinished send is
-reconciled before returning to an older binary; old versions cannot perform
-the new sender reconciliation.
+Profiles, pairings, routes, grants, unknown compatible settings and credentials
+are reused. Notification compaction does not delete Codex conversations/history,
+modify native queues or export secrets. Existing schema2 reply journals retain
+their bounded compatibility reader; that reader does not implicitly migrate or
+prune another owner's state.
 
-## Rollback to a previous binary
+Existing notification history requires the explicit offline transition in
+[retention and upgrades](NOTIFICATION_RETENTION.md). The operator excludes all
+actual old notification senders and subprocesses, supplies the exact current
+projection and a fresh native receipt, then invokes `notification-retention-prepare`
+on the candidate. A cooperative lock or JSON assertion alone is not OS proof.
+Ordinary polling, observation, Stop handling and startup do not perform historical
+cold import. Genuine running Codex jobs can remain active while senders are
+excluded.
 
-Stop every WatchDog process using the runtime normally, then use the current
-executable with that runtime:
+Readiness and the original cutoff precede retirement of recognized disposable
+notification history. Original source runtimes, provider-authority rollback
+backups and unknown or malformed files remain untouched. Optional cleanup failure
+does not undo readiness or block a later independent event. No default historical
+archive is created. See [session activity and reply expiry](SESSION_ACTIVITY.md).
 
-```text
-codex-watchdog --runtime <existing-runtime> notification-receipts-export
-```
+## Forward recovery and legacy export
 
-This offline support command exports **all current receipts**, including those
-created after migration, atomically into the legacy schema-1 format. It uses the
-existing notification lock, refuses a held foreground or notification lock,
-retains the indexed store and recovery snapshots, and does not load credentials
-or contact either provider. Every process using the runtime must remain stopped
-until rollback is complete.
-Only after a successful export should the previous executable start.
+After finite activation, preserve the compact intent/ready metadata and existing
+claims. An interrupted operation resumes explicitly forward with fresh actual
+sender exclusion. Do not restart an old executable against compacted state or
+restore an old receipt archive as live state. Retained old images do not authorize
+an active downgrade after candidate activity.
 
-An older binary encountering the schema-2 marker refuses dual-provider sends.
-Restoring only the original pre-migration JSON backup is unsafe because it omits
-later receipts. Preserve the indexed store and use the complete export instead.
-On reupgrade, the current version reconciles the readable legacy state, including
-legitimate older-version additions, without losing or downgrading prior evidence.
-Interrupted export or reconciliation preserves recoverable state and permits no
-blind resend.
+The retained `notification-receipts-export` support command applies only to
+supported unconverted legacy stores. It cannot export a prepared finite root
+for old senders, reopen closed tickets, replay old UUIDs or authorize a downgrade.
+Legacy compatibility and finite retention are different formats; a schema label
+alone does not prove safe recovery. Preserve the original evidence on refusal.

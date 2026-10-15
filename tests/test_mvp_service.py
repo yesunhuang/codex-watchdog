@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Dict, List, Optional, Sequence, Union
@@ -14,6 +15,7 @@ from codex_watchdog.mvp_service import MvpWatchdogService
 from codex_watchdog.notifications import NotificationResult
 from codex_watchdog.queue_wake import QueueReceipt
 from codex_watchdog.storage import InstructionStore
+from codex_watchdog.stop_snapshots import StopSnapshots
 from codex_watchdog.workspace_registry import TrackedWorkspace
 
 
@@ -281,9 +283,16 @@ def write_audit(
     }
     if completed:
         value["hook_completed_at"] = completed_at
-    path = runtime / "audit" / name
-    InstructionStore._atomic_json(path, value)
-    return path
+    if (started_at == "2026-09-01T00:00:00Z" and completed_at == "2026-09-01T00:00:02Z"):
+        previous = StopSnapshots(runtime).read(value["session_id"], Path(value["workspace"]))
+        if previous is not None and previous["event"]["turn_id"] != value["turn_id"]:
+            value["hook_started_at"] = (datetime.fromisoformat(previous["event"]["hook_started_at"].replace("Z", "+00:00")) + timedelta(microseconds=1)).isoformat()
+            if completed:
+                value["hook_completed_at"] = (datetime.fromisoformat(previous["event"]["hook_completed_at"].replace("Z", "+00:00")) + timedelta(microseconds=1)).isoformat()
+    # Ordinary publication is exact-scope/current. Historical files belong to
+    # explicit legacy import fixtures, not a normal hook simulation.
+    StopSnapshots(runtime).publish(value, legacy_name=name)
+    return InstructionStore(runtime).record_audit(value)
 
 
 def write_stop_output(
@@ -361,6 +370,10 @@ def write_rollout(
     path.write_text(
         "".join(json.dumps(event) + "\n" for event in events), encoding="utf-8"
     )
+    with sqlite3.connect(codex_home / "state_5.sqlite") as database:
+        database.execute("CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY, cwd TEXT, source TEXT, thread_source TEXT, archived INTEGER, rollout_path TEXT)")
+        database.execute("INSERT OR REPLACE INTO threads VALUES (?, ?, 'vscode', 'user', 0, ?)",
+                         (tracked.session_id, str(tracked.repo_root), str(path)))
     return path
 
 
@@ -487,6 +500,7 @@ def test_new_window_keeps_first_stop_completed_before_discovery(
     service = MvpWatchdogService(
         runtime, registry=registry, git_adapter=adapter, notifier=notifier,
         queue_dispatcher=FakeQueue(), codex_home=runtime / "codex-home",
+        clock=lambda: datetime(2026, 9, 1, 0, 5, tzinfo=timezone.utc),
     )
     if scan_before_completion:
         assert service.run_once().workspaces == ()
@@ -504,6 +518,7 @@ def test_new_window_keeps_first_stop_completed_before_discovery(
     restarted = MvpWatchdogService(
         runtime, registry=registry, git_adapter=adapter, notifier=notifier,
         queue_dispatcher=FakeQueue(), codex_home=runtime / "codex-home",
+        clock=lambda: datetime(2026, 9, 1, 0, 5, tzinfo=timezone.utc),
     )
     assert restarted.run_once().workspaces[0].stop_count == 0
     assert len(notifier.events) == 1
@@ -584,7 +599,7 @@ def test_matching_terminal_output_is_sent_exactly_then_spool_is_deleted(
     invocation_id = "12345678-1234-4234-8234-123456789abc"
     turn_id = "turn-stop-output"
     output = "Exact Codex final output.\nA second line is preserved."
-    write_audit(
+    audit_path = write_audit(
         runtime,
         "a-stop.json",
         tracked,
@@ -612,7 +627,7 @@ def test_matching_terminal_output_is_sent_exactly_then_spool_is_deleted(
         notifier.events[0].message
     )
     assert not spool.exists()
-    durable_audit = (runtime / "audit" / "a-stop.json").read_text(encoding="utf-8")
+    durable_audit = audit_path.read_text(encoding="utf-8")
     assert output not in durable_audit
 
 

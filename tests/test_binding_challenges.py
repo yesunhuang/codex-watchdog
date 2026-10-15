@@ -681,10 +681,14 @@ def test_malformed_challenge_fails_closed_on_pending_and_lookup(tmp_path, provid
         entry["generation"] = "not-an-int"
         journal.put(db, "bind_challenges", key, entry)
 
-    with pytest.raises(ValueError, match="bind_challenge_state_invalid"):
-        challenges.pending()
-    with pytest.raises(ValueError, match="bind_challenge_state_invalid"):
-        challenges.lookup(result["challenge"])
+    assert challenges.pending()==[]
+    assert challenges.lookup(result["challenge"]) is None
+    # Malformed history is never authority, and does not block a healthy
+    # challenge for an independently admitted exact session.
+    other_parent, other_thread=record_ticket(store,cx,2)
+    other=challenges.begin("event:healthy",cx.chat,other_parent,cx.user,"bind",
+                          message_id=cx.mid(2,1),created_at=now+2)
+    assert challenges.lookup(other["challenge"]) is not None
 
 
 # ── uncertain hello never retries ────────────────────────────────────────────

@@ -13,12 +13,13 @@ import os
 from pathlib import Path
 import sqlite3
 import tempfile
+import uuid
 
 from .control_state import ControlError, control_atomic_json, control_read_json
 from .models import utc_now
 from .node_observation import observation_lock
-from .relay_authority_migration import read_snapshot, merge_poll_cursors, merge_records_with_quarantine
-from .reply_tickets import ReplyTickets
+from .relay_authority_migration import (read_snapshot, read_authority_snapshot, write_authority_snapshot,
+                                      merge_poll_cursors, merge_records_with_quarantine)
 from .storage import InstructionStore
 
 _REFUSAL_NAMES = frozenset(("relay-state.json", "poll-relay-state.json", "poll-cursors.json",
@@ -140,6 +141,8 @@ def plan_authority(codex_home):
                         raise ControlError("relay_migration_legacy_or_missing_journal")
                     continue
                 _safe_path(database)
+                if read_authority_snapshot(database)["source_schema"] != 2:
+                    raise ControlError("relay_migration_schema3_requires_exact_session_upgrade")
                 rows, digest = read_snapshot(database)
                 sources.append(dict(path=str(database), node=node.name, runtime=str(runtime),
                                     provider=provider, snapshot_sha256=digest, records=len(rows)))
@@ -293,12 +296,58 @@ def _fence(path, plan_digest):
                                             plan_sha256=plan_digest))
 
 
-def _validate_runtime(root, digest, *, pristine=False):
+def _pristine_session_selectors(root, digest, sessions, *, allow_incomplete=False):
+    """Cold rollback may restore old senders only while every selector is old.
+
+    Exact-session upgrades leave the original shared databases pristine. Check
+    selector points, including later enrollments, rather than reading isolated
+    receipt histories. Caller holds the shared cold migration lock.
+    """
+    if not isinstance(sessions, dict):
+        raise ControlError("relay_migration_installed_runtime_invalid")
+    if allow_incomplete:
+        # Initial whole-cluster recovery can precede its first selector. It is
+        # distinct from rollback of an already published ready authority.
+        intent=_safe_json(root/"migration-intent.json")
+        if ((root/"cluster.json").exists() or type(intent.get("schema_version")) is not int
+                or intent!=dict(schema_version=1,
+                plan_sha256=digest,state="prepared",codex_home=str(root.parent))):
+            raise ControlError("relay_migration_recovery_session_changed")
+    directory=root/"sessions"
+    _safe_path(directory)
+    seen=set()
+    if directory.exists():
+        for path in directory.iterdir():
+            _safe_path(path)
+            try:
+                thread=str(uuid.UUID(path.stem))
+            except (ValueError,AttributeError):
+                raise ControlError("relay_migration_recovery_session_changed") from None
+            if path.name!=thread+".json" or not path.is_file():
+                raise ControlError("relay_migration_recovery_session_changed")
+            value=_safe_json(path)
+            repo=value.get("repo_path")
+            if (type(value.get("schema_version")) is not int or value["schema_version"]!=1
+                    or value.get("thread_id")!=thread or value.get("state")!="ready"
+                    or value.get("storage")!="cluster_provider_journals_v1"
+                    or value.get("plan_sha256")!=digest
+                    or not isinstance(repo,str) or not Path(repo).is_absolute()
+                    or thread in sessions and sessions[thread]!=repo):
+                raise ControlError("relay_migration_recovery_session_changed")
+            seen.add(thread)
+    if not allow_incomplete and not set(sessions).issubset(seen):
+        raise ControlError("relay_migration_recovery_session_changed")
+
+
+def _validate_runtime(root, digest, *, pristine=False, allow_incomplete_selectors=False):
     runtime = root / "runtime"
     _safe_path(runtime)
     manifest = _safe_json(runtime / "migration-import.json")
     if manifest.get("plan_sha256") != digest or manifest.get("schema_version") != 1:
         raise ControlError("relay_migration_installed_runtime_invalid")
+    if pristine:
+        _pristine_session_selectors(root,digest,manifest.get("sessions"),
+                                    allow_incomplete=allow_incomplete_selectors)
     for provider, expected in manifest["provider_sha256"].items():
         path = runtime / provider / "reply-tickets.sqlite3"
         _safe_path(path)
@@ -419,25 +468,15 @@ def apply_authority(codex_home, quiescence, *, clock=None):
                 previous = read_snapshot(staged)[0]
                 if any(expected.get((row["namespace"], row["kind"], row["key"])) != row for row in previous):
                     raise ControlError("relay_migration_unplanned_staged_state")
-            journal = ReplyTickets(stage / provider / "migration-state.json",
-                stage / "locks" / (provider + "-migration.lock"), provider, stage, lambda: {})
-            with journal.transaction() as db:
-                db.execute("CREATE INDEX IF NOT EXISTS session_relay_pending "
-                           "ON records(thread_id,namespace,key) WHERE active=1 AND kind='events'")
-                for row in rows:
-                    values = [row[field] for field in ("namespace", "kind", "key", "value", "fingerprint",
-                                                       "thread_id", "active", "created_at")]
-                    db.execute("INSERT OR REPLACE INTO records VALUES(?,?,?,?,?,?,?,?)", values)
-                    db.execute("INSERT OR IGNORE INTO sources VALUES (?)", (row["namespace"],))
-                for cursor in plan["cursors"]:
-                    if cursor["provider"] != provider:
-                        continue
-                    namespace = provider + "/authority-cursors.json"
-                    db.execute("INSERT OR IGNORE INTO sources VALUES (?)", (namespace,))
-                    db.execute("INSERT OR REPLACE INTO records VALUES(?,?,?, ?,NULL,?,0,NULL)",
-                        (namespace, "relay_cursors", cursor["thread_id"] + ":" + cursor["key"],
-                         json.dumps(dict(thread_id=cursor["thread_id"], value=cursor["value"]), sort_keys=True),
-                         cursor["thread_id"]))
+            # This legacy all-cluster protocol is deliberately version2 only.
+            # Finite schema3 state uses explicit exact-session isolation; never
+            # flatten its recent metadata into the original eight columns.
+            snapshot = dict(schema_version=1, source_schema=2,
+                            namespaces=sorted({row["namespace"] for row in expected.values()}),
+                            records=list(expected.values()), recent_records=[], current_boundaries=[])
+            if staged.exists():
+                staged.unlink()  # Only the verified matching private recovery DB above.
+            write_authority_snapshot(staged, snapshot)
         if not runtime.exists():
             from .relay_notification_migration import apply_notification_migration
             for thread, value in plan["notifications"].items():
@@ -451,7 +490,7 @@ def apply_authority(codex_home, quiescence, *, clock=None):
                 notification_sha256={thread: _notification_digest(stage / "session-notifications" / thread)
                                      for thread in plan["notifications"]}))
         else:
-            _validate_runtime(root, digest, pristine=True)
+            _validate_runtime(root, digest, pristine=True, allow_incomplete_selectors=True)
         # Confirm source consistency and native quiescence once more before
         # installing any refusal marker or publishing portable readiness.
         if plan_authority(home)["summary"]["plan_sha256"] != digest:

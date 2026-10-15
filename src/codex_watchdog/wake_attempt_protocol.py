@@ -218,3 +218,8 @@ def control_adopt_legacy_wake(store, observer):
             adopted.append(dict(state="ineligible", instruction_id=instruction_id, reason=str(exc)))
     return adopted
 '''
+
+# Keep unactivated homes compatible; activated homes use a finite, fenced lane.
+from .wake_retention_protocol import WAKE_RETENTION_SOURCE
+
+WAKE_ATTEMPT_SOURCE += WAKE_RETENTION_SOURCE

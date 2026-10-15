@@ -7,7 +7,7 @@ from .lark_mapping import LarkThreadStore
 from .models import MAX_PROMPT_CHARS, sha256_text
 from .onebot_transport import OneBotConnection, OneBotError, identifier
 from .relay import ExactThreadRelay, ReplyResult, _DELIVERED_STATES
-from .relay_authority import relay_guarded
+from .relay_authority import relay_guarded, sender_guarded
 from .storage import FileLock, StoreBusyError
 
 
@@ -18,8 +18,8 @@ The shared journal enforces the same four-ticket one-shot bound.
 """
     provider = "onebot"
 
-    def __init__(self, runtime, scope):
-        super().__init__(runtime, scope)
+    def __init__(self, runtime, scope, *, clock=None):
+        super().__init__(runtime, scope, clock=clock)
         self.path = Path(runtime) / "onebot" / scope / "relay-state.json"
         self.lock_path = Path(runtime) / "locks" / ("onebot-relay-" + scope + ".lock")
 
@@ -107,18 +107,18 @@ class OneBotReplyRelay(ExactThreadRelay):
 
     def __init__(self, runtime, config, *, queue_dispatcher, remote_ssh_adapter,
                  timeout=10.0, thread_store=None, connection_factory=OneBotConnection,
-                 api=None, clock=time.time, session_acl=None):
+                 api=None, clock=None, session_acl=None):
         if not config.relay_configured:
             raise OneBotError("onebot_relay_configuration_incomplete")
         self.runtime, self.config = Path(runtime), config
         self.queue_dispatcher, self.remote_ssh_adapter = queue_dispatcher, remote_ssh_adapter
-        self.thread_store = thread_store or OneBotThreadStore(runtime, config.scope)
+        self.thread_store = thread_store or OneBotThreadStore(runtime, config.scope, clock=clock)
         self.timeout, self.connection_factory = timeout, connection_factory
         self._connection = self._listener_lock = None
         self.api = api
         self._session_acl = session_acl
         from .destination_binding import DestinationBinding
-        self.binding = DestinationBinding(self, "onebot", self._send_control, clock=clock)
+        self.binding = DestinationBinding(self, "onebot", self._send_control, clock=clock or time.time)
 
     def _send_control(self, text, operation_id, destination, *, reply_to=None):
         from .onebot_transport import OneBotApi
@@ -186,6 +186,9 @@ class OneBotReplyRelay(ExactThreadRelay):
                 return ReplyResult("deferred")
             except Exception:
                 return ReplyResult("rejected_state_or_collision")
+            from .provider_activity import message_is_current
+            if not message_is_current(self.thread_store,self.thread_store._address(value['chat_id'],reply_to),payload.get('time'),resolution=1):
+                return ReplyResult("ignored_stale_message")
             return self._handle_access_command(
                 payload, value, mapping, operation, raw_delegate_id)
 
@@ -223,6 +226,9 @@ class OneBotReplyRelay(ExactThreadRelay):
                 if not is_admin:
                     return ReplyResult("ignored_unauthorized")
                 return ReplyResult("ignored_unknown_thread" if value["chat_id"] == self.config.destination else "ignored_chat")
+            from .provider_activity import message_is_current
+            if not message_is_current(self.thread_store,self.thread_store._address(value['chat_id'],value['reply_to']),payload.get('time'),resolution=1):
+                return ReplyResult("ignored_stale_message")
             if operation is not None:
                 return self.binding.command(operation,
                     event_key="onebot-control:" + value["chat_id"] + ":" + value["message_id"],
@@ -254,6 +260,8 @@ class OneBotReplyRelay(ExactThreadRelay):
         except Exception:
             return ReplyResult("rejected_state_or_collision")
         try:
+            from .provider_activity import record_admitted_activity
+            record_admitted_activity(self.thread_store,mapping.target,payload['time'])
             result = self._controlled_reply(mapping, instruction_id, instruction_id, value["text"],
                                             check_legacy_receipt=False)
             if result is None:
@@ -271,6 +279,7 @@ class OneBotReplyRelay(ExactThreadRelay):
                                result.delivery_status)
         return result
 
+    @sender_guarded
     def _handle_access_command(self, payload, value, mapping, operation, raw_delegate_id):
         """Handle admin add/remove/access with once-only confirmation mapping."""
         chat_id = value["chat_id"]

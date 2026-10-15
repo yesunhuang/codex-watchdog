@@ -1,5 +1,6 @@
 """Product-level ticket bounds, atomic claims, migration and indexed history."""
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime,timezone
 import json
 import sqlite3
 from types import SimpleNamespace
@@ -76,6 +77,7 @@ def reply(relay, provider, n, serial=1):
                 root_id=parent(provider, n), parent_id=parent(provider, n),
                 content=json.dumps(dict(text="reply " + str(serial)))))))
     return relay.handle_event(dict(post_type="message", self_id=12345, message_type="private",
+        time=int(relay.thread_store.journal.clock()),
         user_id=54321, sender=dict(user_id=54321), message_id=serial,
         message=[dict(type="reply", data=dict(id=parent(provider, n))),
                  dict(type="text", data=dict(text="reply " + str(serial)))]))
@@ -113,9 +115,11 @@ def test_equal_timestamps_retire_first_inserted_ticket_after_restart(tmp_path, p
         monkeypatch.setattr("codex_watchdog." + module + ".utc_now",
                             lambda: "2026-09-25T09:00:00Z")
     relay, _ = fixture(tmp_path, provider)
+    relay.thread_store.clock=lambda:datetime(2026,9,25,9,tzinfo=timezone.utc).timestamp()
     for n in range(1, 5):
         record(relay.thread_store, provider, n, session=1)
     relay, calls = fixture(tmp_path, provider)
+    relay.thread_store.clock=lambda:datetime(2026,9,25,9,tzinfo=timezone.utc).timestamp()
     record(relay.thread_store, provider, 1, session=1)  # Refresh keeps original order.
     record(relay.thread_store, provider, 5, session=1)
     reply(relay, provider, 1)
@@ -175,22 +179,24 @@ def test_sqlite_v1_migration_preserves_state_and_backup_idempotently(tmp_path):
         db.execute('PRAGMA user_version=1')
         before=db.execute('SELECT * FROM records ORDER BY namespace,kind,key').fetchall()
     marker=json.loads(store.path.read_text())
+    marker['schema_version']=2  # actual previous marker, not a downgraded v3 marker
     marker.pop('active_scope')
     marker['future_setting']={'preserve': True}
     original=json.dumps(marker).encode()
     store.path.write_bytes(original)
+    journal.migrate_recent_state()
     expected=active(store)
     assert len(expected)==2
-    backup=journal.database.with_name(journal.database.name+'.v1-backup')
-    with sqlite3.connect(backup) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0]==1
-        assert db.execute('SELECT * FROM records ORDER BY namespace,kind,key').fetchall()==before
+    backup=journal.database.with_name(journal.database.name+'.current-v2-backup.json')
+    protected=json.loads(backup.read_bytes())
+    assert protected['source_schema']==1
+    assert sorted(tuple(row) for row in protected['rows'])==before
     with journal.transaction() as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0]==2
-        assert db.execute('SELECT * FROM records ORDER BY namespace,kind,key').fetchall()==[r for r in before if r[1]!='route_poll_cursors']
+        assert db.execute('PRAGMA user_version').fetchone()[0]==3
+        assert db.execute('SELECT * FROM records ORDER BY namespace,kind,key').fetchall()==before
     upgraded=json.loads(store.path.read_text())
-    assert upgraded==dict(marker,active_scope='provider_session')
-    assert store.path.with_name(store.path.name+'.scope-v1-backup').read_bytes()==original
+    assert upgraded['active_scope']=='provider_session' and upgraded['future_setting']==marker['future_setting']
+    assert store.path.with_name(store.path.name+'.current-v2-backup').read_bytes()==original
     saved_backup=backup.read_bytes()
     assert active(SlackPollingThreadStore(tmp_path))==expected
     assert backup.read_bytes()==saved_backup
@@ -218,6 +224,7 @@ def test_new_active_ticket_requires_exact_canonical_session(tmp_path,bad):
 
 def test_uuid_letter_case_cannot_create_an_extra_session_budget(tmp_path):
     store=SlackPollingThreadStore(tmp_path)
+    store.clock=lambda:datetime(2026,9,24,0,0,6,tzinfo=timezone.utc).timestamp()
     journal=store.journal
     tid='aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
     for n in range(5):
@@ -290,9 +297,12 @@ def test_legacy_migration_preserves_backup_and_retires_unknown_history(tmp_path,
     store.path.parent.mkdir(parents=True, exist_ok=True)
     original = json.dumps(legacy).encode()
     store.path.write_bytes(original)
+    store.journal.migrate_recent_state()
     assert not active(store)
-    assert store.path.with_name(store.path.name + ".v1-backup").read_bytes() == original
-    assert store.has_notification_mapping("a" * 64)  # Retain outbound dedup evidence.
+    recovery=json.loads(store.path.with_name(store.path.name+".legacy-current-v1.json").read_bytes())
+    import hashlib
+    assert recovery['source_sha256']==hashlib.sha256(original).hexdigest()
+    assert not store.has_notification_mapping("a" * 64)  # expired history is intentionally retired
     reply(relay, provider, 1)
     assert calls == []
     record(store, provider, 2)
@@ -359,10 +369,11 @@ def test_crash_after_migration_commit_repairs_marker_without_reimport(tmp_path, 
         return write(path, value)
     monkeypatch.setattr(InstructionStore, "_atomic_json", fail_marker)
     with pytest.raises(OSError):
-        active(store)
+        store.journal.migrate_recent_state()
     monkeypatch.setattr(InstructionStore, "_atomic_json", write)
+    store.journal.migrate_recent_state()
     assert active(store) == {}
-    assert json.loads(store.path.read_text())["schema_version"] == 2
+    assert json.loads(store.path.read_text())["schema_version"] == 3
     record(store, "slack-poll", 1)
     assert len(active(store)) == 1
 
@@ -374,7 +385,8 @@ def test_migrated_reply_receipt_stays_terminal(tmp_path):
         text_chars=4, state="uncertain", delivery_status="exception", created_at="2026-01-01T00:00:00Z",
         updated_at=None, error_sha256=None)
     store.path.write_text(json.dumps(dict(schema_version=1, threads={}, events={sha256_text("old"): entry})))
-    assert store.lookup_reply("old") == entry
+    store.journal.migrate_recent_state()
+    assert store.lookup_reply("old") is None  # outside the owner-approved recent horizon
     assert not active(store)
 
 

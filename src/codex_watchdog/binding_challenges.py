@@ -216,16 +216,14 @@ class BindingChallenges:
         return sha256_text(json.dumps(payload, sort_keys=True, separators=(",", ":")))
 
     def _count_pending(self, db, now: float) -> int:
+        return sum(entry["expires_at"] > now for _, entry in self._current_challenges(db))
+
+    def _save_challenge(self, db, key, entry):
         journal = self.thread_store.journal
-        rows = db.execute("SELECT value FROM records WHERE namespace=? AND kind=?",
-                          (journal.namespace, _KIND_CHALLENGES)).fetchall()
-        count = 0
-        for (raw,) in rows:
-            entry = json.loads(raw)
-            self._validate_challenge(entry)
-            if entry["status"] == "pending" and entry["expires_at"] > now:
-                count += 1
-        return count
+        journal.put(db, _KIND_CHALLENGES, key, entry)
+        db.execute("UPDATE records SET active=? WHERE namespace=? AND kind=? AND key=?",
+                   (int(entry.get("status") == "pending" and entry.get("expires_at",0)>self.clock()), journal.namespace,
+                    _KIND_CHALLENGES, key))
 
     def _duplicate_result(self, op_entry: dict, target: RelayTarget) -> dict:
         return {"status": "duplicate", "target": target, "operation_key": op_entry["op_key"]}
@@ -316,7 +314,7 @@ class BindingChallenges:
                 token_hash = sha256_text(token)
                 challenge_start = math.floor(now) if self.provider == "onebot" else now
                 expires_at = challenge_start + self.lifetime
-                journal.put(db, _KIND_CHALLENGES, session_key, dict(
+                self._save_challenge(db, session_key, dict(
                     schema_version=_SCHEMA_VERSION, provider=self.provider, scope=self.scope,
                     thread_id=canonical_tid, target=target.to_dict(), generation=generation,
                     status="pending", token_hash=token_hash, user_id=user_id, chat_id=chat_id,
@@ -324,7 +322,7 @@ class BindingChallenges:
                 result = {"status": "pending", "target": target, "operation_key": op_key,
                           "challenge": token, "expires_at": expires_at}
             else:
-                journal.put(db, _KIND_CHALLENGES, session_key, dict(
+                self._save_challenge(db, session_key, dict(
                     schema_version=_SCHEMA_VERSION, provider=self.provider, scope=self.scope,
                     thread_id=canonical_tid, target=target.to_dict(), generation=generation,
                     status="cleared", token_hash=None, user_id=user_id, chat_id=chat_id,
@@ -359,13 +357,19 @@ class BindingChallenges:
 
     def _current_challenges(self, db):
         journal = self.thread_store.journal
-        rows = db.execute("SELECT key, value FROM records WHERE namespace=? AND kind=?",
-                          (journal.namespace, _KIND_CHALLENGES)).fetchall()
+        rows = db.execute("SELECT key, value FROM records INDEXED BY namespace_pending_bindings "
+                          "WHERE namespace=? AND kind='bind_challenges' AND active=1 "
+                          "ORDER BY key LIMIT ?", (journal.namespace, _MAX_PENDING)).fetchall()
         for key, raw in rows:
-            entry = json.loads(raw)
-            self._validate_challenge(entry)
-            if key != self.routes._route_key(entry["thread_id"]):
-                raise ValueError("bind_challenge_identity_mismatch")
+            try:
+                entry = json.loads(raw)
+                self._validate_challenge(entry)
+                if key != self.routes._route_key(entry["thread_id"]):
+                    continue
+            except (ValueError, TypeError, KeyError):
+                # One malformed action is not authority for another action and
+                # must not starve independent valid challenges.
+                continue
             yield key, entry
 
     def pending(self) -> list:
@@ -464,7 +468,7 @@ class BindingChallenges:
 
             # Consume before any other effect: this exact token can never bind again.
             match_entry.update(status="consumed", token_hash=None, expires_at=None)
-            journal.put(db, _KIND_CHALLENGES, session_key, match_entry)
+            self._save_challenge(db, session_key, match_entry)
 
             route_key = self.routes._route_key(canonical_tid)
             route_entry = dict(schema_version=_SCHEMA_VERSION, provider=self.provider, scope=self.scope,

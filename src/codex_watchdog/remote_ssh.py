@@ -647,6 +647,11 @@ def _dispatch_unretired_wake(request, session):
     except (OSError, subprocess.SubprocessError) as exc:
         record.update(state="uncertain", reason="remote_queue_failed", error_sha256=sha(str(exc)))
     atomic_json(path, record)
+    if record.get("state") == "enqueued":
+        try:
+            control_publish_courier_association(remote_codex_home(), record)
+        except (ControlError, OSError):
+            return dict(record, courier_association_status="unavailable")
     return record
 
 

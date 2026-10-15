@@ -202,6 +202,16 @@ class LinuxAutoWatchdog:
 
     def _cycle(self, item):
         service, target, token = item["service"], item["target"], item["token"]
+        if item.get("relay_authority") is not None:
+            from .linux_retention import prepare_linux_retention
+            try:
+                item["retention_status"] = prepare_linux_retention(item)
+            except Exception as error:
+                item["retention_status"] = dict(status="current_retention_unavailable",reason=type(error).__name__)
+        lifecycle={"status":"UNKNOWN","notifications":()}
+        binding=getattr(item["owner"],"binding",None)
+        if binding is not None and hasattr(service,"_lifecycle_state"):
+            lifecycle=service._lifecycle_state(binding.workspace(binding.load()))
         probe = service.remote_control.probe(target, token)
         if probe.get("status") != "ok":
             raise ControlError(probe.get("reason", "control_probe_failed"))
@@ -213,7 +223,9 @@ class LinuxAutoWatchdog:
         state = dict(state, workspace_id=target.workspace_id, session_id=token["thread_id"])
         service._remote_control_scope = (target, token)
         try:
-            return service._run_remote_owned(target, str(uuid.uuid4()), initial_state=state, initial_probe=probe)
+            options=dict(initial_state=state,initial_probe=probe)
+            if lifecycle.get("status")!="UNKNOWN":options["lifecycle"]=lifecycle
+            return service._run_remote_owned(target, str(uuid.uuid4()), **options)
         finally:
             service._remote_control_scope = None
 
@@ -367,6 +379,8 @@ class LinuxAutoWatchdog:
                         self.stopping = True
                 summary = dict(thread_sha256=sha256_text(thread), epoch=token["epoch"],
                                state=result["owner_state"], thread_status=result["thread_status"])
+                if item.get("retention_status") is not None:
+                    summary["retention"] = item["retention_status"]
                 if "continuation" in result:
                     summary["continuation"] = result["continuation"]
                 if item.get("observation") is not None and item["observation"].reason:
