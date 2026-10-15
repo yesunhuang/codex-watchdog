@@ -144,6 +144,8 @@ class FixtureSenders:
                 matching.append(row)
         live = [r for r in matching if not r["nonexecuting"] and not r["kernel_thread"]]
         return dict(observed_at=time.time(), uid=os.getuid(), inspected=records,
+                    pid_namespace=os.readlink("/proc/self/ns/pid"),
+                    caller_pid=os.getpid(),
                     vanished=vanished, matching=matching, live=live,
                     registered=[row for _, row in self.processes],
                     groups=sorted(groups), images=list(self.images.values()))

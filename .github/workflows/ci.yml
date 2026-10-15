@@ -48,7 +48,17 @@ jobs:
         run: python -m compileall -q src tools tests
 
       - name: Run test suite
+        if: runner.os != 'Linux'
         run: python tools/run_isolated_tests.py --basetemp .pytest-temp-ci
+
+      - name: Run Linux tests with every fixture child visible
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          # Existing hosted-runner sudo enters a disposable PID/mount namespace.
+          # Do not change ptrace/security settings or hide unreadable processes.
+          sudo -n unshare --mount --pid --fork --mount-proc -- env CI=true PYTHONUTF8=1 \
+            "$(command -v python)" tools/run_isolated_tests.py
 
       - name: Smoke test CLI and version
         run: |
