@@ -58,7 +58,7 @@ jobs:
           # Existing hosted-runner sudo enters a disposable PID/mount namespace.
           # Do not change ptrace/security settings or hide unreadable processes.
           sudo -n unshare --mount --pid --fork --mount-proc -- env CI=true PYTHONUTF8=1 \
-            "$(command -v python)" tools/run_isolated_tests.py
+            "$(command -v python)" tools/run_linux_namespace.py tools/run_isolated_tests.py
 
       - name: Smoke test CLI and version
         run: |

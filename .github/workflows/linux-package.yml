@@ -48,7 +48,7 @@ jobs:
           # Keep all owned fixture controllers/backends in one fresh PID domain.
           # Existing runner sudo is used without changing host security settings.
           sudo -n unshare --mount --pid --fork --mount-proc -- env CI=true PYTHONUTF8=1 \
-            "$(command -v python)" tools/run_isolated_tests.py
+            "$(command -v python)" tools/run_linux_namespace.py tools/run_isolated_tests.py
       - name: Build the native ELF package and dependency inventory
         if: matrix.architecture == 'arm64'
         run: python scripts/build_linux_package.py
@@ -68,7 +68,7 @@ jobs:
       - name: Test the package with Python hidden
         run: |
           sudo -n unshare --mount --pid --fork --mount-proc -- env CI=true PYTHONUTF8=1 \
-            "$(command -v python)" scripts/test_linux_package.py --package dist/*-linux-${{ matrix.architecture }}
+            "$(command -v python)" tools/run_linux_namespace.py scripts/test_linux_package.py --package dist/*-linux-${{ matrix.architecture }}
       - name: Repeat x64 package acceptance on glibc 2.28
         if: matrix.architecture == 'x64'
         run: |
