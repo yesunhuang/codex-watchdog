@@ -523,16 +523,18 @@ class CodexSessionResolver:
                 return SessionResolution("unresolved", None, None, "vscode_thread_owner_unverified")
         database_candidates.update(followers)
 
-        # Native logs can discard their earlier routing markers while the same
-        # App Server still owns a thread. A unique loaded/cached exact thread
-        # can instead be proved by this window's actual OS writer PID. Never
-        # use this for a peer owner, ambiguous chat selection, unreadable log,
+        # Native logs and the window cache can both lose their earlier session
+        # evidence while the same App Server still owns a thread. A unique
+        # loaded exact thread can instead be proved by this window's actual OS
+        # writer PID. An empty, readable cache carries no conflicting selection;
+        # an unavailable cache or a different cached selection cannot qualify.
+        # Never use this for a peer owner, ambiguous chat selection, unreadable log,
         # or explicit routing failure/inactivity in the current generation.
         if not database_candidates and len(loaded) == 1 and markers is not None:
             session = next(iter(loaded))
             current = [window for window in live_windows if window.codex_log == codex_log]
             if (session not in markers and window_sessions is not None
-                    and session in window_sessions and len(current) == 1
+                    and (not window_sessions or session in window_sessions) and len(current) == 1
                     and current[0].codex_app_server_pid is not None):
                 lock = self.codex_home / "thread-writer-locks" / f"{session}.lock"
                 if (self.writer_process_probe(lock) == current[0].codex_app_server_pid

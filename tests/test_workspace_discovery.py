@@ -1336,6 +1336,30 @@ def test_native_writer_survives_discarded_routing_log(tmp_path: Path) -> None:
     assert windows["target"].codex_app_server_pid == 101
 
 
+def test_exact_native_owner_survives_empty_cache_and_discarded_log(tmp_path: Path) -> None:
+    discovery, target_log, _other_log, _windows = cross_window_discovery(tmp_path)
+    target_log.write_text("retained log without routing history\n", encoding="utf-8")
+    database = tmp_path / "Code/User/workspaceStorage/target/state.vscdb"
+    with sqlite3.connect(str(database)) as connection:
+        connection.execute(
+            "UPDATE ItemTable SET value=? WHERE key=?",
+            ("[]", "agentSessions.model.cache"),
+        )
+    discovery.session_resolver.writer_process_probe = lambda _path: 101
+
+    snapshot = discovery.snapshot()
+
+    target = next(window for window in snapshot.windows if window.workspace_storage_key == "target")
+    assert target.session_id == SESSION_CURRENT
+    assert target.session_source == "codex_state_vscode_native_writer"
+    assert target.reason is None
+    assert target_log.read_text(encoding="utf-8") == "retained log without routing history\n"
+    with sqlite3.connect(str(database)) as connection:
+        assert connection.execute(
+            "SELECT value FROM ItemTable WHERE key=?", ("agentSessions.model.cache",)
+        ).fetchone() == ("[]",)
+
+
 def test_all_local_windows_survive_discarded_routing_logs(tmp_path: Path) -> None:
     discovery, target_log, other_log, _windows = cross_window_discovery(tmp_path)
     for log in (target_log, other_log):
@@ -1353,15 +1377,25 @@ def test_all_local_windows_survive_discarded_routing_logs(tmp_path: Path) -> Non
     assert snapshot.issues == ()
 
 
+@pytest.mark.parametrize("cache_empty", [False, True], ids=("cached", "empty-cache"))
 @pytest.mark.parametrize("missing_proof", [
-    "other_writer", "no_writer", "released_during_probe", "missing_cache", "unreadable_log",
+    "other_writer", "no_writer", "released_during_probe", "unavailable_cache", "conflicting_cache", "unreadable_log",
     "multiple_threads", "duplicate_window", "resume_failed", "unsubscribed", "inactive", "unknown_role",
 ])
-def test_discarded_log_still_requires_exact_native_owner(tmp_path: Path, missing_proof: str) -> None:
+def test_discarded_log_still_requires_exact_native_owner(
+    tmp_path: Path, missing_proof: str, cache_empty: bool,
+) -> None:
     discovery, target_log, _other_log, windows = cross_window_discovery(tmp_path)
     target_log.write_text("new log without routing markers\n", encoding="utf-8")
     resolver = discovery.session_resolver
     resolver.writer_process_probe = lambda _path: 101
+    if cache_empty:
+        database = tmp_path / "Code/User/workspaceStorage/target/state.vscdb"
+        with sqlite3.connect(str(database)) as connection:
+            connection.execute(
+                "UPDATE ItemTable SET value=? WHERE key=?",
+                ("[]", "agentSessions.model.cache"),
+            )
     if missing_proof == "other_writer":
         resolver.writer_process_probe = lambda _path: 201
     elif missing_proof == "no_writer":
@@ -1371,8 +1405,10 @@ def test_discarded_log_still_requires_exact_native_owner(tmp_path: Path, missing
             resolver.lock_probe = lambda _path: False
             return 101
         resolver.writer_process_probe = release
-    elif missing_proof == "missing_cache":
-        resolver.window_session_candidates = lambda _path: set()
+    elif missing_proof == "unavailable_cache":
+        resolver.window_session_candidates = lambda _path: None
+    elif missing_proof == "conflicting_cache":
+        resolver.window_session_candidates = lambda _path: {SESSION_OTHER}
     elif missing_proof == "unreadable_log":
         target_log.unlink()
     elif missing_proof == "multiple_threads":
