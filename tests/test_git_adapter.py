@@ -296,6 +296,7 @@ def test_git_subprocess_is_noninteractive_and_scrubs_config_injection(
     assert "GIT_ASKPASS" not in environment
     assert "SSH_ASKPASS" not in environment
     assert environment["GIT_TERMINAL_PROMPT"] == "0"
+    assert environment["GIT_OPTIONAL_LOCKS"] == "0"
     assert environment["SSH_ASKPASS_REQUIRE"] == "never"
 
 

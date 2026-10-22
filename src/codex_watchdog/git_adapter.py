@@ -589,8 +589,9 @@ class LocalGitAdapter:
             values = config_result.stdout.splitlines()
             if len(values) != 1 or values[0] not in ("true", "false"):
                 return ["ambiguous_git_config"], config_result
-            if values[0] == "true":
-                blockers.append("sparse_checkout")
+            # Git interprets sparse patterns and expands sparse index entries
+            # for ls-files/status. Their presence does not change ref identity.
+            # Keep malformed/ambiguous configuration fail-closed.
         return list(dict.fromkeys(blockers)), None
 
     def _single_config_value(
@@ -683,6 +684,7 @@ class LocalGitAdapter:
         environment.pop("GIT_ASKPASS", None)
         environment.pop("SSH_ASKPASS", None)
         environment.update(
+            GIT_OPTIONAL_LOCKS="0",
             GIT_TERMINAL_PROMPT="0",
             GCM_INTERACTIVE="Never",
             SSH_ASKPASS_REQUIRE="never",
@@ -744,11 +746,6 @@ class LocalGitAdapter:
             blockers.append("grafts_present")
         if (root / ".gitmodules").exists():
             blockers.append("submodules_present")
-        if any(
-            (directory / "info" / "sparse-checkout").exists()
-            for directory in directories
-        ):
-            blockers.append("sparse_checkout")
         return list(dict.fromkeys(blockers))
 
     @staticmethod

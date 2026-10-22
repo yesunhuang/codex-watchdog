@@ -59,6 +59,9 @@ Manager 可以是人，也可以是 AI；可以集中，也可以分布式。整
 当前原生任务及结果不确定的投递仍保留原有安全检查。已有通知历史通过显式、受控的离线步骤转换；
 详见[保留策略与升级](docs/NOTIFICATION_RETENTION.md)和[会话活动](docs/SESSION_ACTIVITY.md)。
 
+
+Git 观察支持完整检出和稀疏检出（包括稀疏索引及关联工作树），不会展开被排除的文件或改写索引。
+
 ## 架构与设计理念
 
 - **WatchDog 观察，Codex 执行。** WatchDog 通过只读 Git 检查发现更新；Codex 读取指令并

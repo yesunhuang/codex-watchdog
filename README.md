@@ -67,6 +67,9 @@ claims retain their safety checks. Existing notification history uses an explici
 controlled offline transition; see [retention and upgrades](docs/NOTIFICATION_RETENTION.md)
 and [session activity](docs/SESSION_ACTIVITY.md).
 
+
+Git observation supports full and sparse checkouts, including sparse indexes and linked worktrees, without expanding excluded files or rewriting the index.
+
 ## Architecture and philosophy
 
 - **WatchDog observes; Codex acts.** WatchDog uses read-only Git checks to detect

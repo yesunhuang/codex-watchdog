@@ -1,23 +1,23 @@
-# Codex WatchDog 2.3.1
+# Codex WatchDog 2.3.2
 
-Desktop discovery now retains a uniquely verified native Codex owner when VS Code
-has discarded routing markers and its readable session cache is empty. The
-fallback still requires the exact live window's app-server PID to hold that
-thread's native writer lock, a unique loaded user thread and a final held-lock
-check. Unavailable or conflicting caches, multiple owners, explicit inactive or
-failed views and released writer locks continue to fail closed.
+Git-triggered wakes now support cone and non-cone sparse checkouts, sparse indexes,
+and sparse linked worktrees. WatchDog delegates index/pattern interpretation to
+Git and disables optional Git locks so observation does not refresh the index.
+Excluded files remain excluded; patterns, configuration, working files and refs
+are not rewritten. Existing live Git locks, conflicts, ambiguous configuration,
+upstream/identity checks and exact-session targeting still fail closed.
 
-Saved profiles, credentials, pairings, routes, grants, queues and prepared
-notification state are reused. This release changes discovery only; it does not
-replay historical commands or relax authorization, one-shot tickets, UUID
-deduplication, native FIFO or provider/session last-four ticket limits.
+This fixes a blanket sparse-checkout refusal that prevented automatic wakes even
+when the original Codex conversation was tracked and its remote was reachable.
+The same remote-event claim, at-most-once dispatch and native ownership rules apply;
+historical uncertain events are not replayed.
 
-Windows x64, Linux x64, Linux ARM64 and macOS ARM64 preview packages use the same
-canonical source. Windows package acceptance includes the immediately previous
-public 2.3.0 upgrade path and the embedded application icon.
+All four supported packages use the same canonical source. Windows acceptance
+includes upgrading the immediately previous public 2.3.1 profile/runtime without
+re-entering settings and verifying the embedded application icon. Saved credentials,
+pairings, routes, queues, grants and prepared notification state are reused in place.
 
-Existing other-window coverage, stale-boot native recovery and macOS preview
-limitations remain. Provider polling alone does not prove model completion;
-Feishu/Lark retry problems are not claimed fixed by this change. Existing prepared
-notification roots retain forward-only recovery: do not restart an old sender
-against them or restore old journals. See [retention and upgrades](NOTIFICATION_RETENTION.md).
+Existing other-window coverage, stale-boot recovery, provider retry and macOS
+ARM64 preview limitations remain. Prepared notification roots retain forward-only
+recovery; do not restore old journals or restart old senders against them.
+See [retention and upgrades](NOTIFICATION_RETENTION.md).

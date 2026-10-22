@@ -63,6 +63,9 @@ server は必須ではありません。
 既存の通知履歴は明示的な制御されたオフライン手順で移行します。
 [保持とアップグレード](docs/NOTIFICATION_RETENTION.md)および[セッション活動](docs/SESSION_ACTIVITY.md)を参照してください。
 
+
+Git の監視は通常のチェックアウトと sparse checkout（sparse index・linked worktree を含む）に対応し、除外ファイルの展開やインデックスの書き換えは行いません。
+
 ## アーキテクチャと設計思想
 
 - **WatchDog は監視し、Codex が実行します。** WatchDog は読み取り専用 Git チェックで更新を検出し、
