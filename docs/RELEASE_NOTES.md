@@ -1,4 +1,4 @@
-# Codex WatchDog 2.3.4 - Windows discovery hotfix
+# Codex WatchDog 2.3.5 - Windows discovery hotfix
 
 Windows automatic discovery can now recover when VS Code's `--status`
 diagnostic returns empty or malformed output, fails in its process formatter,
@@ -10,7 +10,7 @@ Codex app-server identities, exact workspace/thread qualification, fresh owner
 selection and the original held writer PID and creation identity. It preserves
 the existing native conversation. Collection and completion use finite budgets
 and fair ordering; historical log/storage/thread growth does not add hot-path
-scans. Ambiguous or incomplete evidence remains unresolved.
+scans. Ambiguous or incomplete evidence remains unresolved. Global-window and saved-workspace JSON inputs are bounded before parsing, including file growth, malformed/deep JSON and decimal-integer conversion; independent diagnostic latency does not expire the saved-workspace phase.
 
 This is a **Windows x64-only** immutable hotfix. All changed application behavior
 is Windows-guarded. The existing **2.3.3** macOS ARM64 preview and Linux ARM64/x64

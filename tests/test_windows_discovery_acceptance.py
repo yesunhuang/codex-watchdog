@@ -131,6 +131,11 @@ def test_incomplete_domain_never_accepts_first_seen_match(tmp_path, monkeypatch)
     duplicate = fixture.session_dir / "window99/exthost/exthost.log"
     duplicate.parent.mkdir(parents=True)
     duplicate.write_bytes(item["exthost_log"].read_bytes())
+    # Keep the entry document within its independent allowance so this fixture
+    # exercises mapping exhaustion, rather than stopping at the earlier C1 gate.
+    (fixture.user / "globalStorage/storage.json").write_text(json.dumps({
+        "windowsState": {"openedWindows": [{"folder": item["repo"].as_uri()}]}
+    }), encoding="utf-8")
     monkeypatch.setattr(win, "TOTAL_LOG_BYTES", 350)
     snapshot = fixture.discovery().snapshot()
     assert not tracked(snapshot)

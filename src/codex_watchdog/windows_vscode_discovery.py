@@ -68,6 +68,7 @@ CODEX_LOG_BYTES = 16 * 1024 * 1024
 TOTAL_LOG_BYTES = 48 * 1024 * 1024
 WORKSPACE_JSON_BYTES = 65536
 CACHE_VALUE_BYTES = 4 * 1024 * 1024
+METADATA_JSON_BYTES = 4 * 1024 * 1024
 LOG_LINE_LIMIT = 262144
 SESSION_LOOKUP_LIMIT = 256
 SQL_STEP_BUDGET = 2_000_000
@@ -144,6 +145,40 @@ class WorkBudget:
             return 0 if self.live() else 1
 
         connection.set_progress_handler(progress, SQL_PROGRESS_STEPS)
+
+
+def _metadata_integer(token: str) -> int:
+    # Match modern Python's decimal conversion ceiling even on older supported
+    # Python 3.9 builds, before their quadratic unbounded int conversion runs.
+    if len(token.lstrip("-")) > 4300:
+        raise ValueError("metadata integer exceeds conversion bound")
+    return int(token)
+
+
+def read_metadata_json(path: Path, budget: WorkBudget, sleep) -> Optional[object]:
+    """Bound input before parsing global-window or saved-workspace documents.
+
+    This Windows-only reader starts before native-index collection. All retry
+    bytes share one snapshot allowance. Oversized/unsafe targets refuse unread;
+    concurrent growth can consume at most the cap plus one byte, never read(-1).
+    """
+    for attempt in range(3):
+        if not budget.live():
+            return None
+        try:
+            with path.open("rb") as handle:
+                status = os.fstat(handle.fileno())
+                if not stat.S_ISREG(status.st_mode) or status.st_size > METADATA_JSON_BYTES:
+                    return None
+                data = handle.read(min(METADATA_JSON_BYTES, max(0, budget.bytes)) + 1)
+            if not budget.charge(len(data)) or len(data) > METADATA_JSON_BYTES:
+                return None
+            result = json.loads(data.decode("utf-8"), parse_int=_metadata_integer)
+            return result if budget.live() else None
+        except (OSError, UnicodeError, ValueError, RecursionError):
+            if attempt < 2 and budget.live():
+                sleep(0.02)
+    return None
 
 
 @dataclass(frozen=True)

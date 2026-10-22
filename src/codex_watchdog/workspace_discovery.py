@@ -813,6 +813,7 @@ class VSCodeWorkspaceDiscovery:
         self.git_root_resolver = git_root_resolver
         self.exclude = tuple(item.casefold() for item in exclude if item)
         self.sleep = sleep
+        self._windows_json_budget = None
 
     def _windows_live_window_index(self) -> VSCodeLiveWindowIndex:
         from .windows_vscode_discovery import WindowsVSCodeLiveWindowIndex
@@ -837,6 +838,10 @@ class VSCodeWorkspaceDiscovery:
 
     def snapshot(self) -> DiscoverySnapshot:
         discovered_at = utc_now()
+        if self.platform_adapter.system == "windows" and os.name == "nt":
+            from .windows_vscode_discovery import WorkBudget
+
+            self._windows_json_budget = WorkBudget()
         explicit = tuple(self.registry.list_workspaces())
         effective: List[TrackedWorkspace] = list(explicit)
         explicit_by_repo = {
@@ -893,6 +898,14 @@ class VSCodeWorkspaceDiscovery:
         if current_storage_keys is not None:
             # Windows reads storage only for exact current live keys.
             storage_keys = current_storage_keys(live_windows, self.sleep)
+        if self.platform_adapter.system == "windows" and os.name == "nt":
+            from .windows_vscode_discovery import COLLECTION_SECONDS
+
+            # Independent CLI/native work may have taken longer than the JSON
+            # phase deadline. Renew time once for saved workspace documents,
+            # retaining all charged bytes and retries; never renew per target.
+            budget = self._windows_json_budget
+            budget.deadline = budget.clock() + COLLECTION_SECONDS
 
         windows: List[DiscoveredWindow] = []
         candidates: List[Tuple[int, TrackedWorkspace]] = []
@@ -1322,6 +1335,12 @@ class VSCodeWorkspaceDiscovery:
             issues.append(resolution.reason)
 
     def _read_json_retry(self, path: Path) -> Optional[Any]:
+        if self.platform_adapter.system == "windows" and os.name == "nt":
+            from .windows_vscode_discovery import WorkBudget, read_metadata_json
+
+            if self._windows_json_budget is None:
+                self._windows_json_budget = WorkBudget()
+            return read_metadata_json(path, self._windows_json_budget, self.sleep)
         for attempt in range(3):
             try:
                 with path.open("r", encoding="utf-8") as handle:
