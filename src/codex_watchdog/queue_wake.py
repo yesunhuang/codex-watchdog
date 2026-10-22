@@ -18,10 +18,12 @@ from .linux_binding import LinuxBindingError, sender_guard
 from .control_context import current_control, effect_guard
 from .control_state import (
     ControlBusy, ControlError, control_wake_attempt_lock, control_wake_attempt_claim,
+    control_wake_attempt_read,
 )
 from .platform_adapters import detect_platform_adapter
 from .process_environment import codex_process_environment
 from .native_rollout import find_native_rollout
+from .git_wake_queue import GitQueueUnknown, pending_git_wake
 from .storage import InstructionCollisionError, InstructionStore, StoreBusyError
 
 
@@ -230,6 +232,23 @@ class QueueWakeDispatcher:
             return self._dispatch(thread_id, instruction_id, prompt, source, timeout_seconds)
         try:
             with sender_guard(self.codex_home, self.runtime, thread_id):
+                # Only new automatic Git effects participate. An old claimed
+                # effect remains terminal; historical uncertainty is never a
+                # session-wide gate. dispatch() holds the owner queue lock
+                # across this live check and the single external attempt.
+                if (source == "remote_git" and prompt == REMOTE_UPDATE_PROMPT
+                        and control_wake_attempt_read(
+                            self.codex_home, instruction_id, thread_id,
+                            sha256_text(prompt)) is None):
+                    try:
+                        queued = pending_git_wake(
+                            self._select_queue_database(), thread_id, sha256_text(prompt))
+                    except GitQueueUnknown as exc:
+                        return QueueReceipt(instruction_id, thread_id, "deferred", "", str(exc), 0)
+                    if queued is not None:
+                        return QueueReceipt(instruction_id, thread_id, "coalesced", "",
+                                            "git_wake_already_queued", 0,
+                                            queue_message_id=queued)
                 return self._dispatch(thread_id, instruction_id, prompt, source, timeout_seconds)
         except (LinuxBindingError, StoreBusyError):
             return QueueReceipt(instruction_id, thread_id, "rejected", "",

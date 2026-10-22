@@ -1,21 +1,24 @@
-# Codex WatchDog 2.3.2
+# Codex WatchDog 2.3.3
 
-Git-triggered wakes now support cone and non-cone sparse checkouts, sparse indexes,
-and sparse linked worktrees. WatchDog delegates index/pattern interpretation to
-Git and disables optional Git locks so observation does not refresh the index.
-Excluded files remain excluded; patterns, configuration, working files and refs
-are not rewritten. Existing live Git locks, conflicts, ambiguous configuration,
-upstream/identity checks and exact-session targeting still fail closed.
+Automatic Git updates now share one pending native queue wake per exact Codex
+session. If another Git wake is already queued while Codex is busy, WatchDog
+keeps the latest remote tip pending instead of appending a wake for every commit.
+After native consumption, the latest still-unsynchronized tip can queue one
+follow-up; if Codex already caught up, no follow-up is needed.
 
-This fixes a blanket sparse-checkout refusal that prevented automatic wakes even
-when the original Codex conversation was tracked and its remote was reachable.
-The same remote-event claim, at-most-once dispatch and native ownership rules apply;
-historical uncertain events are not replayed.
+The same bounded, indexed, read-only queue check covers local and Remote-SSH
+observers. It runs under the existing owner/sender fences, before claiming the
+new event. Unknown current queue evidence defers only that Git action. Historical
+uncertainty remains terminal for its own effect and does not block independent
+work. Existing queued messages are not removed or rewritten. Human commands,
+provider replies, temporal prompts, exact authorization, native FIFO, one-shot
+tickets and UUID deduplication retain their existing behavior.
 
-All four supported packages use the same canonical source. Windows acceptance
-includes upgrading the immediately previous public 2.3.1 profile/runtime without
-re-entering settings and verifying the embedded application icon. Saved credentials,
-pairings, routes, queues, grants and prepared notification state are reused in place.
+All four packages use the same canonical source. Windows acceptance includes the
+immediately previous public 2.3.2 upgrade path and the embedded application icon.
+Existing saved settings, credentials, pairings, queues, grants and prepared
+notification state remain in place; no persistent schema migration is introduced.
+Sparse-checkout support from 2.3.2 is retained.
 
 Existing other-window coverage, stale-boot recovery, provider retry and macOS
 ARM64 preview limitations remain. Prepared notification roots retain forward-only

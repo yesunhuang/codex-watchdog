@@ -70,6 +70,9 @@ and [session activity](docs/SESSION_ACTIVITY.md).
 
 Git observation supports full and sparse checkouts, including sparse indexes and linked worktrees, without expanding excluded files or rewriting the index.
 
+
+Automatic Git updates share one pending wake per Codex session; the latest remote tip is retained while a wake is queued. Human commands and other wake types remain independent.
+
 ## Architecture and philosophy
 
 - **WatchDog observes; Codex acts.** WatchDog uses read-only Git checks to detect

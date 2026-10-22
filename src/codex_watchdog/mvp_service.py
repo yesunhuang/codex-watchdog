@@ -45,7 +45,7 @@ from .stop_snapshots import StopSnapshots, STOP_RETENTION, PARKED_STOP_OUTCOMES
 
 
 MVP_STATE_SCHEMA_VERSION = 2
-_NON_ERROR_WAKE_STATES = frozenset({"enqueued", "consumed_or_started", "started"})
+_NON_ERROR_WAKE_STATES = frozenset({"enqueued", "consumed_or_started", "started", "coalesced"})
 _COMPLETED_WAKE_STATES = frozenset({"consumed_or_started", "started"})
 _TRANSIENT_GIT_BLOCKER = "state_changed_during_observation"
 _GIT_ATTENTION_PROMPT = (
@@ -810,7 +810,8 @@ class MvpWatchdogService:
                     if isinstance(probe.get("wake"), dict)
                     else {"state": "uncertain"}
                 )
-                state["last_attempted_remote_oid"] = remote_oid
+                if wake.get("state") not in ("coalesced", "deferred"):
+                    state["last_attempted_remote_oid"] = remote_oid
                 state["pending_remote_oid"] = remote_oid
                 state["pending_instruction_id"] = instruction_id
                 if attention_id:
@@ -1423,7 +1424,10 @@ class MvpWatchdogService:
                 allow_resume=not resume_is_ambiguous,
             )
             if wake is not None and wake.get("kind") == "remote_update":
-                state["last_attempted_remote_oid"] = remote_trigger
+                # Coalescing/defer precedes claiming this tip. Keep the latest
+                # observation eligible after consumption unless Codex caught up.
+                if wake.get("status") not in ("coalesced", "deferred"):
+                    state["last_attempted_remote_oid"] = remote_trigger
                 if wake.get("status") in _COMPLETED_WAKE_STATES:
                     state["last_remote_oid"] = remote_trigger
                     state["pending_remote_oid"] = None

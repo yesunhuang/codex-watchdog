@@ -261,6 +261,11 @@ def test_remote_git_source_uses_fixed_mechanical_prompt_and_safe_record_name(
 ) -> None:
     runner = FakeRunner()
     dispatcher = QueueWakeDispatcher(tmp_path, runner=runner)
+    database = dispatcher.codex_home / "queue_1.sqlite"
+    database.parent.mkdir(parents=True, exist_ok=True)
+    create_queue_database(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE INDEX queue_by_thread ON queued_items(thread_id)")
 
     receipt = dispatcher.dispatch_remote_update(THREAD_ID, "a" * 40)
 

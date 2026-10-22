@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, Mapping, Optional
 from .notifications import notification_workspace_label
 from .control_state import CONTROL_SOURCE
 from .remote_control import REMOTE_CONTROL_SOURCE
+from .git_wake_queue import GIT_QUEUE_SOURCE
 
 
 _REMOTE_AUTHORITY_PREFIX = "ssh-remote+"
@@ -23,7 +24,7 @@ _PLINK_TARGET = re.compile(
 _PRIMARY_TRANSPORT_FAILURES = frozenset(
     {"remote_ssh_failed", "remote_ssh_auth_or_transport_failed"}
 )
-_REMOTE_SCRIPT = CONTROL_SOURCE + r"""
+_REMOTE_SCRIPT = CONTROL_SOURCE + GIT_QUEUE_SOURCE + r"""
 import glob
 import hashlib
 import json
@@ -549,6 +550,16 @@ def _dispatch_claimed_wake(request, session):
             if prior is not None:
                 return dict(state="suppressed", instruction_id=instruction_id, thread_id=session,
                             prompt_sha256=digest, reason="wake_attempt_already_claimed")
+            if re.fullmatch(r"git:[0-9a-f]{16}:[0-9a-f]{7,64}", instruction_id):
+                try:
+                    queued = pending_git_wake(queue_database(), session, digest)
+                except GitQueueUnknown as exc:
+                    return dict(state="deferred", instruction_id=instruction_id,
+                                thread_id=session, reason=str(exc))
+                if queued is not None:
+                    return dict(state="coalesced", instruction_id=instruction_id,
+                                thread_id=session, queue_message_id=queued,
+                                reason="git_wake_already_queued")
             control_wake_attempt_claim(remote_codex_home(), instruction_id, session, digest)
             return _dispatch_unretired_wake(request, session)
 
