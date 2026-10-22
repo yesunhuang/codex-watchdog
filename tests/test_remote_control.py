@@ -360,6 +360,7 @@ def test_remote_update_uses_one_journal_across_desktop_and_remote_epoch(helper, 
     codex = store.directory.parent.parent
     with sqlite3.connect(codex / "queue_1.sqlite") as db:
         db.execute("CREATE TABLE queued_items(id,thread_id,payload_json)")
+        db.execute("CREATE INDEX queued_items_by_thread ON queued_items(thread_id)")
         db.execute("CREATE TABLE queued_thread_revisions(thread_id,revision)")
     ns["codex_executable"] = lambda: "fixture-codex"
     ns["rollout_path"] = lambda _: None
