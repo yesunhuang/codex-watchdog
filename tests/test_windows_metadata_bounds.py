@@ -60,9 +60,19 @@ def test_concurrent_growth_reads_at_most_cap_plus_one_before_refusal(tmp_path, m
     assert budget.bytes_charged == 129
 
 
-def test_deep_and_malformed_documents_have_bounded_retry_work(tmp_path, monkeypatch):
+@pytest.mark.parametrize("parser_failure", ["recursion", "malformed"])
+def test_deep_and_malformed_documents_have_bounded_retry_work(tmp_path, monkeypatch, parser_failure):
     path = tmp_path / "metadata.json"
-    path.write_bytes(b"[" * 2000 + b"]" * 2000)
+    if parser_failure == "recursion":
+        path.write_bytes(b"[" * 2000 + b"]" * 2000)
+        # JSON's recursion cutoff varies by interpreter. Exercise the handler
+        # deterministically without imposing a new product depth policy.
+        def reject_deep_document(document, **kwargs):
+            assert len(document) == 4000
+            raise RecursionError("fixture parser recursion limit")
+        monkeypatch.setattr(win.json, "loads", reject_deep_document)
+    else:
+        path.write_bytes(b"[")
     budget = win.WorkBudget()
     sleeps = []
     assert win.read_metadata_json(path, budget, sleeps.append) is None
