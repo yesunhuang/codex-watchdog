@@ -73,6 +73,8 @@ Git observation supports full and sparse checkouts, including sparse indexes and
 
 Automatic Git updates share one pending wake per Codex session; the latest remote tip is retained while a wake is queued. Human commands and other wake types remain independent.
 
+On Windows, automatic discovery can use verified native process and held-writer evidence when VS Code's `--status` diagnostic is empty, malformed or unavailable. Ambiguous targets stay unmonitored; see [Windows discovery and recovery](docs/WINDOWS_DISCOVERY.md) for evidence requirements and coverage limits.
+
 ## Architecture and philosophy
 
 - **WatchDog observes; Codex acts.** WatchDog uses read-only Git checks to detect

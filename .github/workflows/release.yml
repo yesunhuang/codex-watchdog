@@ -23,6 +23,7 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
       previous_tag: ${{ steps.version.outputs.previous_tag }}
       previous_version: ${{ steps.version.outputs.previous_version }}
+      release_scope: ${{ steps.version.outputs.release_scope }}
     steps:
     - uses: actions/checkout@v4
       with:
@@ -140,11 +141,11 @@ jobs:
         retention-days: 14
   macos:
     needs: version
-    if: needs.version.outputs.should_release == 'true'
+    if: needs.version.outputs.should_release == 'true' && needs.version.outputs.release_scope == 'all'
     uses: ./.github/workflows/macos-package.yml
   linux:
     needs: version
-    if: needs.version.outputs.should_release == 'true'
+    if: needs.version.outputs.should_release == 'true' && needs.version.outputs.release_scope == 'all'
     uses: ./.github/workflows/linux-package.yml
   publish:
     needs:
@@ -153,13 +154,18 @@ jobs:
     - windows
     - macos
     - linux
-    if: needs.version.outputs.should_release == 'true'
+    if: >-
+      always() && needs.version.outputs.should_release == 'true' &&
+      needs.tests.result == 'success' && needs.windows.result == 'success' &&
+      ((needs.version.outputs.release_scope == 'windows-x64' && needs.macos.result == 'skipped' && needs.linux.result == 'skipped') ||
+       (needs.version.outputs.release_scope == 'all' && needs.macos.result == 'success' && needs.linux.result == 'success'))
     runs-on: ubuntu-latest
     permissions:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ needs.version.outputs.tag }}
+      RELEASE_SCOPE: ${{ needs.version.outputs.release_scope }}
       RELEASE_VERSION: ${{ needs.version.outputs.version }}
       PREVIOUS_TAG: ${{ needs.version.outputs.previous_tag }}
     steps:
@@ -169,30 +175,38 @@ jobs:
         name: windows-release-candidate
         path: incoming/windows
     - uses: actions/download-artifact@v4
+      if: needs.version.outputs.release_scope == 'all'
       with:
         name: macos-release-candidate
         path: incoming/macos
     - name: Download both tested Linux candidates
+      if: needs.version.outputs.release_scope == 'all'
       uses: actions/download-artifact@v4
       with:
         pattern: linux-*-release-candidate
         path: incoming/linux
         merge-multiple: true
-    - name: Verify and assemble all four tested release assets
+    - name: Verify and assemble every platform in the declared release scope
       shell: bash
       run: |
         set -euo pipefail
         mkdir release-assets
-        python scripts/verify_linux_release_assets.py --directory incoming/linux --version "$RELEASE_VERSION" --commit "$GITHUB_SHA"
         cp "incoming/windows/codex-watchdog-v$RELEASE_VERSION-windows-x64.zip" release-assets/
-        cp "incoming/macos/codex-watchdog-v$RELEASE_VERSION-macos-arm64-preview.zip" release-assets/
-        cp "incoming/linux/codex-watchdog-v$RELEASE_VERSION-linux-arm64.zip" release-assets/
-        cp "incoming/linux/codex-watchdog-v$RELEASE_VERSION-linux-x64.zip" release-assets/
-        cat incoming/windows/SHA256SUMS.txt "incoming/macos/codex-watchdog-v$RELEASE_VERSION-macos-arm64-preview.zip.sha256" > release-assets/SHA256SUMS.txt
-        cat "incoming/linux/codex-watchdog-v$RELEASE_VERSION-linux-arm64.zip.sha256" "incoming/linux/codex-watchdog-v$RELEASE_VERSION-linux-x64.zip.sha256" >> release-assets/SHA256SUMS.txt
+        cp incoming/windows/SHA256SUMS.txt release-assets/SHA256SUMS.txt
+        cp incoming/windows/*package-acceptance.json release-assets/
+        if [ "$RELEASE_SCOPE" = "all" ]; then
+          python scripts/verify_linux_release_assets.py --directory incoming/linux --version "$RELEASE_VERSION" --commit "$GITHUB_SHA"
+          cp "incoming/macos/codex-watchdog-v$RELEASE_VERSION-macos-arm64-preview.zip" release-assets/
+          cp "incoming/linux/codex-watchdog-v$RELEASE_VERSION-linux-arm64.zip" release-assets/
+          cp "incoming/linux/codex-watchdog-v$RELEASE_VERSION-linux-x64.zip" release-assets/
+          cat "incoming/macos/codex-watchdog-v$RELEASE_VERSION-macos-arm64-preview.zip.sha256" >> release-assets/SHA256SUMS.txt
+          cat "incoming/linux/codex-watchdog-v$RELEASE_VERSION-linux-arm64.zip.sha256" "incoming/linux/codex-watchdog-v$RELEASE_VERSION-linux-x64.zip.sha256" >> release-assets/SHA256SUMS.txt
+          cp incoming/macos/*package-acceptance.json incoming/linux/*package-acceptance.json release-assets/
+        elif [ "$RELEASE_SCOPE" != "windows-x64" ]; then
+          echo "Unsupported release scope" >&2
+          exit 1
+        fi
         (cd release-assets && sha256sum --check SHA256SUMS.txt)
-        cp incoming/windows/*package-acceptance.json incoming/macos/*package-acceptance.json release-assets/
-        cp incoming/linux/*package-acceptance.json release-assets/
         cp LICENSE THIRD_PARTY_NOTICES.md ASSETS.md release-assets/
     - name: Retain all verified assets for publication review
       uses: actions/upload-artifact@v4

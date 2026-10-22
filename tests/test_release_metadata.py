@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.release_metadata import project_version, release_plan
+from scripts.release_metadata import project_version, release_plan, release_scope
 
 
 def test_only_canonical_project_version_drives_release():
@@ -33,3 +33,20 @@ def test_version_regression_cannot_publish():
 def test_missing_upgrade_predecessor_fails_closed():
     with pytest.raises(ValueError, match="previous public release"):
         release_plan("0.2.3", None, [], [])
+
+
+def test_default_release_keeps_all_platforms():
+    assert release_scope('[project]\nversion = "2.3.4"\n') == "all"
+    assert release_scope('[tool.other]\nplatform_scope = "windows-x64"\n') == "all"
+
+
+@pytest.mark.parametrize("scope", ["all", "windows-x64"])
+def test_explicit_release_scope(scope):
+    assert release_scope('[tool.codex-watchdog.release]\nplatform_scope = "' + scope + '"\n') == scope
+
+
+@pytest.mark.parametrize("body", ['', 'platform_scope = "linux"',
+                                      'platform_scope = "all"\nplatform_scope = "windows-x64"'])
+def test_unknown_or_ambiguous_scope_fails_closed(body):
+    with pytest.raises(ValueError, match="platform_scope"):
+        release_scope('[tool.codex-watchdog.release]\n' + body + '\n')

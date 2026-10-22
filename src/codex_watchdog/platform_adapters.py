@@ -7,6 +7,8 @@ import platform as platform_module
 import re
 import shutil
 import subprocess
+import threading
+import time
 from typing import Callable, Mapping, Optional, Tuple
 
 
@@ -279,6 +281,8 @@ def run_vscode_status(
         for key, value in selected.environment.items()
         if not key.upper().startswith("CODEX_WATCHDOG_")
     }
+    if selected.system == "windows":
+        return _run_windows_vscode_status(commands, environment, runner, timeout_seconds)
     for candidate in commands:
         try:
             completed = runner(
@@ -302,6 +306,232 @@ def run_vscode_status(
                 output=completed.stdout,
             )
     return VSCodeStatusProbe("error", "vscode_status_failed")
+
+
+_WINDOWS_STATUS_BYTES = 4 * 1024 * 1024
+_WINDOWS_STDERR_BYTES = 65536
+_WINDOWS_PIPE_CHUNK = 65536
+_WINDOWS_STATUS_HEADER = ("CPU %", "Mem MB", "PID", "Process")
+_WINDOWS_FORMATTER_FAILURES = (
+    "maximum call stack size exceeded", "too much recursion", "rangeerror",
+)
+_WINDOWS_STATUS_HOST = re.compile(r"extension-host \[[0-9]+\]")
+
+
+def _classify_windows_status(
+    completed: subprocess.CompletedProcess[str], source: str,
+) -> VSCodeStatusProbe:
+    """Return compact safe reasons; never retain raw stderr or environment."""
+    stdout = completed.stdout if isinstance(completed.stdout, str) else ""
+    stderr = completed.stderr if isinstance(completed.stderr, str) else ""
+    if len(stdout) > _WINDOWS_STATUS_BYTES:
+        return VSCodeStatusProbe("error", "vscode_status_oversized", source)
+    diagnostic = (stdout + "\n" + stderr[:65536]).casefold()
+    if any(marker in diagnostic for marker in _WINDOWS_FORMATTER_FAILURES):
+        return VSCodeStatusProbe("error", "vscode_status_formatter_failed", source)
+    if completed.returncode != 0:
+        return VSCodeStatusProbe("error", "vscode_status_failed", source)
+    if not stdout.strip():
+        return VSCodeStatusProbe("error", "vscode_status_empty", source)
+    header = rows = hosts = False
+    for line in stdout.splitlines():
+        fields = line.split("\t", 3)
+        if tuple(field.strip() for field in fields) == _WINDOWS_STATUS_HEADER:
+            header = True
+        elif len(fields) == 4 and fields[2].strip().isdigit():
+            rows = True
+            hosts = hosts or _WINDOWS_STATUS_HOST.fullmatch(fields[3].rstrip()) is not None
+    if not header and not rows:
+        return VSCodeStatusProbe("error", "vscode_status_malformed", source)
+    return VSCodeStatusProbe(
+        "available",
+        "vscode_status_available" if hosts else "vscode_status_no_extension_hosts",
+        source=source,
+        output=stdout,
+    )
+
+
+_WINDOWS_PROBE_LOCK = threading.Lock()
+_WINDOWS_PROBE_READERS = ()
+
+
+class _StatusProbePending(subprocess.SubprocessError):
+    """One previous owned probe still has inherited pipe readers draining."""
+
+
+class _StatusOutputExceeded(subprocess.SubprocessError):
+    """The diagnostic exceeded its byte budget while it was being read."""
+
+
+def _drain_pipe(stream, keep: int, hard: int, state: dict) -> None:
+    """Retain at most ``keep`` bytes; stop reading once ``hard`` is exceeded."""
+    kept = []
+    size = total = 0
+    try:
+        while True:
+            chunk = stream.read(_WINDOWS_PIPE_CHUNK)
+            if not chunk:
+                break
+            total += len(chunk)
+            if size < keep:
+                kept.append(chunk[:keep - size])
+                size += len(kept[-1])
+            if total > hard:
+                state["exceeded"] = True
+                break
+    except (OSError, ValueError):
+        pass
+    state["data"] = b"".join(kept)
+    try:
+        stream.close()
+    except (OSError, ValueError):
+        pass
+
+
+def _decode_status(data: bytes) -> str:
+    # Match text=True universal-newline decoding of the previous runner.
+    return data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _stop_owned_child(process) -> None:
+    """Terminate only the exact child handle this probe created; never a tree."""
+    try:
+        if process.poll() is None:
+            process.kill()
+    except OSError:
+        pass
+    try:
+        process.wait(0.5)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+
+def _run_owned_windows_probe(
+    argv: Tuple[str, ...],
+    *,
+    env: Mapping[str, str],
+    timeout: float,
+    popen=None,
+    clock: Callable[[], float] = time.monotonic,
+) -> subprocess.CompletedProcess[str]:
+    """Collect ``--status`` with byte and time budgets enforced while reading.
+
+    Output is never buffered beyond its budget. On overflow or timeout only the
+    owned child handle is terminated. A grandchild that inherited the pipe is
+    not signalled: an idle pipe is closed (broken pipe for its writer), while a
+    pipe with a still-blocked reader is left to its daemon thread.
+    """
+    global _WINDOWS_PROBE_READERS
+    deadline = clock() + timeout
+    process = (subprocess.Popen if popen is None else popen)(
+        list(argv), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, bufsize=0, env=dict(env),
+    )
+    states: Tuple[dict, dict] = ({}, {})
+    readers = (
+        threading.Thread(target=_drain_pipe, daemon=True, args=(
+            process.stdout, _WINDOWS_STATUS_BYTES, _WINDOWS_STATUS_BYTES, states[0])),
+        threading.Thread(target=_drain_pipe, daemon=True, args=(
+            process.stderr, _WINDOWS_STDERR_BYTES, _WINDOWS_STATUS_BYTES, states[1])),
+    )
+    _WINDOWS_PROBE_READERS = readers
+    for reader in readers:
+        reader.start()
+    failure: Optional[subprocess.SubprocessError] = None
+    returncode = None
+    try:
+        while True:
+            if any(state.get("exceeded") for state in states):
+                failure = _StatusOutputExceeded()
+                break
+            alive = [reader for reader in readers if reader.is_alive()]
+            if not alive:
+                break
+            remaining = deadline - clock()
+            if remaining <= 0:
+                failure = subprocess.TimeoutExpired(list(argv), timeout)
+                break
+            alive[0].join(min(remaining, 0.05))
+        if failure is None:
+            try:
+                returncode = process.wait(max(0.0, deadline - clock()))
+            except subprocess.TimeoutExpired:
+                failure = subprocess.TimeoutExpired(list(argv), timeout)
+    finally:
+        if failure is not None:
+            _stop_owned_child(process)
+        for stream, reader in zip((process.stdout, process.stderr), readers):
+            if not reader.is_alive():
+                try:
+                    stream.close()
+                except (OSError, ValueError):
+                    pass
+    if failure is not None:
+        raise failure
+    return subprocess.CompletedProcess(
+        list(argv), returncode, _decode_status(states[0].get("data", b"")),
+        _decode_status(states[1].get("data", b"")),
+    )
+
+
+def _bounded_windows_run(argv, *, env, timeout, popen=None, clock=time.monotonic):
+    # At most one owned diagnostic and two pipe readers per process, even if a
+    # descendant retains a pipe after its exact owned wrapper has been killed.
+    # Never kill an ancestry tree to recover a diagnostic: PID edges may be stale.
+    if not _WINDOWS_PROBE_LOCK.acquire(blocking=False):
+        raise _StatusProbePending()
+    try:
+        if any(reader.is_alive() for reader in _WINDOWS_PROBE_READERS):
+            raise _StatusProbePending()
+        return _run_owned_windows_probe(argv, env=env, timeout=timeout, popen=popen, clock=clock)
+    finally:
+        _WINDOWS_PROBE_LOCK.release()
+
+
+def _run_windows_vscode_status(
+    commands: Tuple[VSCodeStatusCommand, ...],
+    environment: Mapping[str, str],
+    runner: Runner,
+    timeout_seconds: float,
+) -> VSCodeStatusProbe:
+    failure = VSCodeStatusProbe("error", "vscode_status_failed")
+    # The default runner would buffer unbounded output before any size check.
+    bounded = runner is subprocess.run
+    for candidate in commands:
+        try:
+            if bounded:
+                completed = _bounded_windows_run(
+                    candidate.argv, env=environment, timeout=timeout_seconds,
+                )
+            else:
+                completed = runner(
+                    list(candidate.argv),
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=timeout_seconds,
+                    check=False,
+                    env=environment,
+                )
+        except _StatusProbePending:
+            return VSCodeStatusProbe("error", "vscode_status_probe_pending", candidate.source)
+        except subprocess.TimeoutExpired:
+            # A hung diagnostic is not retried or re-run verbosely in the hot path.
+            return VSCodeStatusProbe("error", "vscode_status_timeout", candidate.source)
+        except _StatusOutputExceeded:
+            if failure.reason == "vscode_status_failed":
+                failure = VSCodeStatusProbe("error", "vscode_status_oversized", candidate.source)
+            continue
+        except (OSError, subprocess.SubprocessError):
+            continue
+        probe = _classify_windows_status(completed, candidate.source)
+        if probe.status == "available":
+            return probe
+        if failure.reason == "vscode_status_failed":
+            failure = probe
+    return failure
 
 
 _CODEX_BINARY = re.compile(r"(?:^|/)codex(?:\.exe)?(?:\s|$)", re.IGNORECASE)

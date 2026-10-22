@@ -81,11 +81,12 @@ def test_windows_code_status_uses_cmd_and_scrubs_watchdog_environment(
     code.parent.mkdir(parents=True)
     code.write_text("@echo off\n", encoding="utf-8")
     captured = {}
+    status_output = "CPU %\tMem MB\t   PID\tProcess\n    0\t   10\t  1000\textension-host [1]\n"
 
     def runner(argv, **kwargs):
         captured["argv"] = argv
         captured["env"] = kwargs["env"]
-        return subprocess.CompletedProcess(argv, 0, "status-output", "")
+        return subprocess.CompletedProcess(argv, 0, status_output, "")
 
     adapter = detect_platform_adapter(
         system_name="nt",
@@ -103,7 +104,7 @@ def test_windows_code_status_uses_cmd_and_scrubs_watchdog_environment(
 
     assert result.status == "available"
     assert result.source == "windows_user_install"
-    assert result.output == "status-output"
+    assert result.output == status_output
     assert captured["argv"][-2:] == [str(code.resolve()), "--status"]
     assert captured["argv"][1:4] == ["/d", "/c", "call"]
     assert captured["env"]["SAFE_VALUE"] == "retained"

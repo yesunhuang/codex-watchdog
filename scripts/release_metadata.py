@@ -24,6 +24,17 @@ def project_version(text: str) -> str:
     return match[1]
 
 
+def release_scope(text: str) -> str:
+    """Optional per-release platform closure; ordinary releases include all platforms."""
+    table = re.search(r"(?ms)^\[tool\.codex-watchdog\.release\]\s*(.*?)(?=^\[|\Z)", text)
+    if table is None:
+        return "all"
+    values = re.findall(r'(?m)^platform_scope\s*=\s*"([^"]+)"\s*$', table[1])
+    if len(values) != 1 or values[0] not in ("all", "windows-x64"):
+        raise ValueError("release platform_scope must be exactly all or windows-x64")
+    return values[0]
+
+
 def release_plan(current: str, before: Optional[str], release_tags: Sequence[str],
                  existing_tags: Sequence[str]) -> dict:
     if before == current:
@@ -43,7 +54,9 @@ def release_plan(current: str, before: Optional[str], release_tags: Sequence[str
 
 
 def main() -> None:
-    current = project_version(Path("pyproject.toml").read_text(encoding="utf-8"))
+    project_text = Path("pyproject.toml").read_text(encoding="utf-8")
+    current = project_version(project_text)
+    scope = release_scope(project_text)
     before = None
     before_sha = os.environ.get("BEFORE_SHA", "")
     if before_sha and not re.fullmatch(r"0+", before_sha):
@@ -67,6 +80,7 @@ def main() -> None:
         tags = subprocess.check_output(["git", "tag", "--list"], text=True).splitlines()
         tags.extend(item["tagName"] for item in all_releases)
         plan = release_plan(current, before, [item["tagName"] for item in releases], tags)
+    plan["release_scope"] = scope
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
         for key, value in plan.items():
             output.write(key + "=" + value + "\n")

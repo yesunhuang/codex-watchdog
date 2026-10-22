@@ -798,6 +798,9 @@ class VSCodeWorkspaceDiscovery:
         self.live_window_index = (
             live_window_index
             if live_window_index is not None
+            else self._windows_live_window_index()
+            if self.user_data_root is not None
+            and self.platform_adapter.system == "windows" and os.name == "nt"
             else VSCodeLiveWindowIndex(
                 self.user_data_root,
                 status_runner=lambda: run_vscode_status(
@@ -810,6 +813,27 @@ class VSCodeWorkspaceDiscovery:
         self.git_root_resolver = git_root_resolver
         self.exclude = tuple(item.casefold() for item in exclude if item)
         self.sleep = sleep
+
+    def _windows_live_window_index(self) -> VSCodeLiveWindowIndex:
+        from .windows_vscode_discovery import WindowsVSCodeLiveWindowIndex
+
+        assert self.user_data_root is not None
+        return WindowsVSCodeLiveWindowIndex(
+            self.user_data_root,
+            status_probe=lambda: run_vscode_status(self.platform_adapter),
+        )
+
+    def _windows_hook(self, name: str):
+        # Strict closure: Windows evidence hooks dispatch only on an actual
+        # Windows host, even for an injected or custom live-window index.
+        if self.platform_adapter.system != "windows" or os.name != "nt":
+            return None
+        return getattr(self.live_window_index, name, None)
+
+    def _windows_live_issues(self) -> Tuple[str, ...]:
+        # Only the Windows evidence adapter exposes this; other indexes add nothing.
+        issues = self._windows_hook("windows_discovery_issues")
+        return tuple(issues()) if issues is not None else ()
 
     def snapshot(self) -> DiscoverySnapshot:
         discovered_at = utc_now()
@@ -849,7 +873,10 @@ class VSCodeWorkspaceDiscovery:
                 tuple(sorted(effective, key=lambda item: item.workspace_id)),
                 ("vscode_window_state_malformed",),
             )
-        storage_keys = self._workspace_storage_keys()
+        current_storage_keys = self._windows_hook("windows_storage_keys")
+        storage_keys = (
+            self._workspace_storage_keys() if current_storage_keys is None else {}
+        )
         live_windows = (
             self.live_window_index.snapshot()
             if self.live_window_index is not None
@@ -861,13 +888,19 @@ class VSCodeWorkspaceDiscovery:
                 discovered_at,
                 (),
                 tuple(sorted(effective, key=lambda item: item.workspace_id)),
-                ("vscode_live_status_unavailable",),
+                tuple(sorted({"vscode_live_status_unavailable", *self._windows_live_issues()})),
             )
+        if current_storage_keys is not None:
+            # Windows reads storage only for exact current live keys.
+            storage_keys = current_storage_keys(live_windows, self.sleep)
 
         windows: List[DiscoveredWindow] = []
         candidates: List[Tuple[int, TrackedWorkspace]] = []
-        issues: List[str] = []
+        issues: List[str] = list(self._windows_live_issues())
         matched_live_keys = set()
+        windows_order = self._windows_hook("windows_order_entries")
+        if windows_order is not None:
+            entries = windows_order(entries)
         for entry in entries:
             uri = entry["uri"]
             matching_keys = storage_keys.get(uri, ())
@@ -882,7 +915,7 @@ class VSCodeWorkspaceDiscovery:
                     "workspace_storage_ambiguous"
                     if len(live_matching) > 1
                     else "workspace_storage_missing"
-                    if not matching_keys
+                    if not matching_keys and current_storage_keys is None
                     else "vscode_live_window_unmapped"
                 )
                 if live_matching:
@@ -1196,14 +1229,40 @@ class VSCodeWorkspaceDiscovery:
                 )
             )
             return
-        resolution = self.session_resolver.resolve(
-            (local_path, repo_root),
-            codex_log=codex_log,
-            window_state_database=(
-                self.user_data_root / "workspaceStorage" / storage_key / "state.vscdb"
-            ),
-            live_windows=live_windows,
+        window_state_database = (
+            self.user_data_root / "workspaceStorage" / storage_key / "state.vscdb"
         )
+        windows_resolve = self._windows_hook("windows_resolve")
+        resolution = (
+            # Windows resolves only current routed candidates by exact indexed ID.
+            windows_resolve(
+                (local_path, repo_root),
+                codex_log=codex_log,
+                window_state_database=window_state_database,
+                live_windows=live_windows,
+                session_resolver=self.session_resolver,
+            )
+            if windows_resolve is not None
+            else None
+        )
+        if resolution is None:
+            resolution = self.session_resolver.resolve(
+                (local_path, repo_root),
+                codex_log=codex_log,
+                window_state_database=window_state_database,
+                live_windows=live_windows,
+            )
+        admit = self._windows_hook("windows_fallback_admission")
+        if admit is not None and resolution.session_id is not None:
+            # Windows native-only windows need their own held-writer proof.
+            resolution = admit(
+                storage_key,
+                resolution,
+                codex_home=self.codex_home,
+                window_state_database=window_state_database,
+                live_windows=live_windows,
+                session_resolver=self.session_resolver,
+            )
         if resolution.session_id is None:
             windows.append(
                 DiscoveredWindow(

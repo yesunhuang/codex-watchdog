@@ -1,0 +1,15 @@
+# Windows automatic discovery
+
+An unusable VS Code `--status` diagnostic does not establish that native Codex sessions have stopped. Windows discovery reports empty output, malformed output, formatter failures, timeouts and outstanding diagnostic readers separately, then attempts a read-only native fallback. A diagnostic process tree is never killed to recover discovery.
+
+The fallback requires a current-user GUI process, extension host and unique Codex app-server with verified process creation identities. It locates the GUI's log generation, verifies current workspace and routing metadata, qualifies exact thread IDs through the indexed state database, and requires the original held thread writer to match the live app-server PID and creation identity. Final checks repeat current owner selection, process topology and writer attribution. Followers, explicitly inactive views, conflicting ownership and changed process generations remain unresolved.
+
+VS Code output-channel timestamps can arrive after process creation. They reject pre-host historical evidence but do not prove the child's creation time. A valid empty session cache is an absent hint; it does not replace the explicit owner and held-writer proof. Malformed, unavailable or nonempty conflicting caches refuse automatic admission.
+
+Discovery does not enumerate accumulated log homes, workspace-storage history or all thread rows. It probes a fixed interval of local log-home names during the first 64 seconds after the verified GUI process's birth, then inspects bounded current-window metadata. Mapping, Codex-generation proof collection and final completion each have a separate 48 MiB byte allowance and a five-second deadline, with finite directory and SQL-step budgets. Native API calls have bounded counts but can finish after a deadline. Completion order rotates under resource pressure. These work batches are not a permanent active-session cap.
+
+Coverage remains best effort. Slow GUI initialization outside that locator interval, inaccessible process identities, oversized or unreadable required logs, and ambiguous mappings may leave a target unresolved. If an exthost log needed to prove uniqueness cannot be fully checked, its GUI-main domain is excluded; unrelated complete GUI domains can proceed. A small prefix or tail cannot prove an unreadable generation unrelated. Existing supported explicit registrations remain usable while an automatic target is unresolved.
+
+Use the normal `workspace-discover` diagnostic to inspect current evidence. Keep an existing exact registration until normal automatic discovery independently resolves the same workspace and session. Remove temporary entries one at a time and verify a normal monitor cycle after each. Do not replace the native conversation, clear owner stamps, reset queues, replay commands or alter grants to recover discovery. Historical uncertain effects remain terminal for automatic replay and do not block later independent work.
+
+The native fallback changes Windows behavior only. macOS and Linux retain their existing discovery paths and documented stale-boot and other-window coverage limitations.
