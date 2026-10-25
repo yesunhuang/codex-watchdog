@@ -112,12 +112,14 @@ def _file_revision(info):
 
 
 class StopSnapshots:
-    def __init__(self, runtime: Path, *, writer: Callable = InstructionStore._atomic_json):
+    def __init__(self, runtime: Path, *, writer: Callable = InstructionStore._atomic_json,
+                 reader: Optional[Callable] = None):
         self.runtime = Path(runtime)
         self.directory = self.runtime / "stop-current"
         self.audit = self.runtime / "audit"
         self.retired = self.runtime / "audit-retired"
         self.writer = writer
+        self.reader = reader
         self._cleanup_entries = None
         self._cleanup_identity = None
 
@@ -128,7 +130,7 @@ class StopSnapshots:
         key, session, root = stop_scope(session_id, workspace)
         if self.directory.is_symlink():
             return None
-        value = _read(self.directory / (key + ".json"))
+        value = (self.reader or _read)(self.directory / (key + ".json"))
         if (value is None or type(value.get("schema_version")) is not int
                 or value["schema_version"] != STOP_SCHEMA_VERSION
                 or value.get("kind") != "current_stop"
@@ -156,7 +158,7 @@ class StopSnapshots:
         key, session, root = stop_scope(session_id, workspace)
         if self.directory.is_symlink():
             return None
-        value = _read(self.directory / (key + ".floor.json"))
+        value = (self.reader or _read)(self.directory / (key + ".floor.json"))
         if (value is None or type(value.get("schema_version")) is not int
                 or value["schema_version"] != 1 or value.get("kind") != "stop_boundary"
                 or value.get("session_id") != session or value.get("workspace") != root

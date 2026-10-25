@@ -15,6 +15,7 @@ from .linux_binding import LinuxBinding, exact_thread, locality_identity, reserv
 from .linux_owner import LinuxThreadOwner, writer_pid, vscode_writer, pending_count
 from .linux_health import owner_failure_reason
 from .models import sha256_text
+from .native_rollout import find_native_rollout
 from .mvp_service import MvpWatchdogService
 from .remote_ssh import RemoteSshTarget, _REMOTE_SCRIPT
 from .storage import FileLock, StoreBusyError, InstructionStore
@@ -49,7 +50,24 @@ class HostRemoteAdapter:
     """The same helper and journals, called by the observer on the thread's host."""
     supports_control = True
 
-    def __init__(self, codex_home):
+    def current_stop_runtime(self, target, probe, runtime):
+        """Only this host's exact existing controlled execution runtime."""
+        if self.current_runtime is None:
+            return None
+        control = probe.get("control", {})
+        if Path(runtime) != self.current_runtime or control.get("runtime_path") != str(runtime):
+            raise ControlError("control_runtime_mismatch")
+        thread = probe.get("session_id")
+        if target.expected_session_ids != (thread,):
+            raise ControlError("control_exact_thread_unavailable")
+        store = self.namespace["ControlStore"](self.namespace["remote_codex_home"](), thread, target.repo_path)
+        with store.guard(control.get("token")) as value:
+            if value.get("runtime_path") != str(runtime) or value.get("repo_path") != target.repo_path:
+                raise ControlError("control_runtime_mismatch")
+        return Path(runtime)
+
+    def __init__(self, codex_home, *, current_runtime=None):
+        self.current_runtime = Path(current_runtime).resolve() if current_runtime is not None else None
         self.namespace = {}
         self.probe_lock = threading.Lock()
         exec(compile(_REMOTE_SCRIPT, "<watchdog-host-helper>", "exec"), self.namespace)
@@ -88,7 +106,17 @@ class HostRemoteAdapter:
             request.update(action="wake", **wake)
         results = []
         self.namespace["emit"] = results.append
-        self.namespace["run"](request)
+        previous_lookup = self.namespace["rollout_path"]
+        if self.current_runtime is not None:
+            # This host already has an exact controlled target. Never walk
+            # native history before reading its compact Stop or fallback tail.
+            self.namespace["rollout_path"] = lambda session: (
+                find_native_rollout(self.namespace["remote_codex_home"](), session, Path(target.repo_path))
+                if target.expected_session_ids == (session,) else None)
+        try:
+            self.namespace["run"](request)
+        finally:
+            self.namespace["rollout_path"] = previous_lookup
         if len(results) != 1 or not isinstance(results[0], dict):
             raise ControlError("control_helper_result_invalid")
         return results[0]
@@ -158,7 +186,7 @@ class LinuxAutoWatchdog:
             target = value["remote_target"]
             target = RemoteSshTarget(target["authority"], target["repo_path"], target["storage_key"],
                                      (store.thread_id,), canonical_id)
-            adapter = HostRemoteAdapter(self.codex_home)
+            adapter = HostRemoteAdapter(self.codex_home, current_runtime=runtime)
             service = self.service_factory(runtime, codex_home=self.codex_home,
                                             registry=WorkspaceRegistry(runtime), remote_ssh_adapter=adapter,
                                             auto_discovery=False)

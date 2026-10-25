@@ -1,37 +1,32 @@
-# Codex WatchDog 2.3.7
+# Codex WatchDog 2.3.8
 
-An already trusted Linux `Stop` or `PermissionRequest` hook can recover an
-existing opted-in node service when its user systemd manager reports the original
-enabled unit missing and inactive. The helper verifies the exact native writer,
-thread and repository, retained unit/environment, selected image hash and typed
-effective `ExecStart` argument array before starting the original service.
-Typed C-escaped strings are decoded to their exact UTF-8 bytes, keeping literal
-backslashes distinct from control characters; malformed or ambiguous strings refuse. Active,
-deliberately stopped, failed or ambiguous services are not restarted.
+Linux host monitoring can report a freshly completed turn while later native
+work is already active. It reads the existing compact Stop and matching bounded
+output from the exact controlled runtime, retaining the original completion time,
+outcome and notification identity. This corrects a selection gap that could leave
+an already-finished reply without a notification attempt.
 
-Recovery has a five-second work budget and bounded configuration/output reads.
-It reuses the node installation lock, refuses a competing controller and retains
-one versioned receipt. It does not adopt ownership, dispatch a model command,
-change authorization or replay uncertain effects. The original owner guard still
-runs after optional recovery.
+The opted-in host cycle uses the existing indexed native thread lookup, with
+no recursive session-history search. The existing tail fallback has an explicit
+one-MiB read cap, including when its file grows after the size check.
 
-The hook-selected executable must receive the upgrade as well as the daemon
-image. Existing `/usr/bin/systemctl` and `/usr/bin/busctl` are required. This is
-recovery on renewed native use, **not an unattended-startup guarantee before a
-genuine callback after reboot**. See [Linux recovery](LINUX_STARTUP_RECOVERY.md)
-for prerequisites, shared-home installation boundaries and refusal behavior.
+The versioned host completion cursor starts with a forward-only baseline.
+Preexisting completions are not sent on upgrade. Malformed or unavailable current
+evidence is refused without blocking later independent observation. Existing
+claims, uncertain deliveries, one-shot tickets and queues are preserved; no old
+request or missed historical notification is replayed. Current/latest-only
+observation remains best effort rather than a journal of every intervening turn.
 
-The package set covers Windows x64, Linux x64/ARM64 and macOS ARM64 preview from
-one canonical source. It retains the Windows discovery fix from 2.3.5. On Windows
-and macOS, the Linux-only hook path is not imported; normal owner enforcement is
-unchanged. Saved profiles, runtime, settings, secure credentials, pairings,
-grants, routes, claims and queues are reused without a persistent schema change.
-Windows acceptance uses the immediately previous public 2.3.5 upgrade path and
-verifies the embedded application icon; Linux/macOS deployed-profile acceptance
-must also preserve the existing 2.3.3 baseline.
+Windows x64, Linux x64/ARM64 and macOS ARM64 preview are built from one canonical
+source. Saved profiles, routes, credentials, registrations, native owners and
+workloads are reused. Windows acceptance includes the previous public 2.3.5
+profile; native deployment also checks the installed 2.3.7 baseline. The embedded
+Windows icon and existing package/privacy gates remain required.
 
-Existing stale-boot, other-window coverage, provider uncertainty and macOS preview
-limitations remain. Do not restore old journals or replay uncertain work. No
-antivirus exclusion, trust change or security-product clearance is implied by
-this release. Release history and prior Windows detection disclosures remain in
-[GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases).
+The Linux startup recovery and Windows discovery corrections from earlier
+versions are retained. Existing Linux recovery prerequisites and macOS preview
+limitations remain documented. No security exclusion, trust change or
+security-product clearance is implied by this release.
+
+See [host completion behavior](HOST_COMPLETION.md) and the retained
+[Linux startup recovery](LINUX_STARTUP_RECOVERY.md) prerequisites.

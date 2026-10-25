@@ -671,7 +671,9 @@ def test_attached_completion_is_sent_by_host_once_without_resuming_vscode(scenar
     from codex_watchdog.mvp_service import MvpWatchdogService
     from codex_watchdog.control_state import ControlError
     from datetime import datetime, timedelta, timezone
-    completed_at = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
+    now = [datetime.now(timezone.utc)]
+    completed_at = [(now[0] - timedelta(minutes=1)).isoformat()]
+    completed_turn = ["77777777-1111-4333-8444-555555555555"]
     store, local, writer, clock, clients, make_agent = scenario
     agent = make_agent()
     sent = []
@@ -684,21 +686,27 @@ def test_attached_completion_is_sent_by_host_once_without_resuming_vscode(scenar
         ns["git_observation"] = lambda repo: dict(status="observed", topology="equal", blockers=[],
                                                   head_oid="a" * 40, upstream_oid="a" * 40)
         ns["rollout_completion"] = lambda thread: dict(
-            turn_id="five-minute-turn", completed_at=completed_at, final_output="yes",
+            turn_id=completed_turn[0], completed_at=completed_at[0], final_output="yes",
             final_output_sha256="8a798890fe93817163b10b5f7bd2ca4d25d84c52739a645a889c173eee7d9d3d",
             final_output_chars=3,
         )
         notifier = EnvironmentNotifier(runtime,
             config=NotificationConfig(slack_webhook_url="https://hooks.slack.invalid/host"),
-            http_post=lambda url, payload, timeout: sent.append(json.loads(payload)["text"]) or 200)
-        return MvpWatchdogService(runtime, notifier=notifier, **kwargs)
+            http_post=lambda url, payload, timeout: sent.append(json.loads(payload)["text"]) or 200,
+            clock=lambda: now[0].timestamp())
+        return MvpWatchdogService(runtime, notifier=notifier, clock=lambda: now[0], **kwargs)
 
     agent.service_factory = service_factory
     result = agent.step()[0]
     assert result["state"] == "observing", result
+    assert sent == []  # Upgrade baselines preexisting completion without backfill.
+    now[0] += timedelta(minutes=2)
+    completed_at[0] = (now[0] - timedelta(minutes=1)).isoformat()
+    completed_turn[0] = "88888888-1111-4333-8444-555555555555"
+    assert agent.step()[0]["state"] == "observing"
     assert len(sent) == 1 and sent[0].rstrip().endswith("yes")
     assert store.read()["owner"]["instance"] == agent.instance
-    assert store.read()["remote_state"]["last_completion_turn"] == "five-minute-turn"
+    assert store.read()["remote_state"]["last_completion_turn"] == completed_turn[0]
     assert writer[0] == 777 and clients == []
     assert agent.step()[0]["state"] == "observing"
     assert len(sent) == 1
@@ -1112,7 +1120,9 @@ def test_large_frame_recovers_exact_owner_and_notifies_completion_once(scenario,
     from codex_watchdog.mvp_service import MvpWatchdogService
     from codex_watchdog.control_state import ControlError
     from datetime import datetime, timedelta, timezone
-    completed_at = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
+    now = [datetime.now(timezone.utc)]
+    completed_at = [(now[0] - timedelta(minutes=1)).isoformat()]
+    completed_turn = "77777777-1111-4333-8444-555555555555"
     store, local, writer, clock, clients, make_agent = scenario
     events, sent, requests = [], [], []
     script = tmp_path / "server.py"
@@ -1160,21 +1170,24 @@ for line in sys.stdin:
         ns["ControlError"] = ControlError
         ns["control_exact_thread"] = lambda repo, thread: repo == store.repo_path and thread == THREAD
         ns["git_observation"] = lambda repo: dict(status="observed", topology="equal", blockers=[], head_oid="a"*40, upstream_oid="a"*40)
-        ns["rollout_completion"] = lambda thread: (dict(turn_id="large-frame-turn", completed_at=completed_at, final_output="yes",
+        ns["rollout_completion"] = lambda thread: (dict(turn_id=completed_turn, completed_at=completed_at[0], final_output="yes",
             final_output_sha256="8a798890fe93817163b10b5f7bd2ca4d25d84c52739a645a889c173eee7d9d3d", final_output_chars=3)
             if any(e.get("method") == "turn/completed" for e in events) else None)
         notifier = EnvironmentNotifier(runtime, config=NotificationConfig(slack_webhook_url="https://hooks.slack.invalid/host"),
-            http_post=lambda url, payload, timeout: sent.append(json.loads(payload)["text"]) or 200)
-        return MvpWatchdogService(runtime, notifier=notifier, **kwargs)
+            http_post=lambda url, payload, timeout: sent.append(json.loads(payload)["text"]) or 200,
+            clock=lambda: now[0].timestamp())
+        return MvpWatchdogService(runtime, notifier=notifier, clock=lambda: now[0], **kwargs)
     agent.service_factory = factory
     store.detach(local); writer[0] = None
-    assert agent.step(observe=False)[0]["state"] == "owned"
+    assert agent.step()[0]["state"] == "owned"  # Baseline before the new terminal event.
     client = clients[0]
+    now[0] += timedelta(minutes=2)
+    completed_at[0] = (now[0] - timedelta(minutes=1)).isoformat()
     client.request("thread/read", {"threadId": THREAD, "includeTurns": False})
     assert client.recovery_snapshot()[1] == "app_server_frame_discarded"
     assert agent.step()[0]["state"] == "owned"
     assert client.recovery_snapshot()[1] is None
-    assert store.read()["remote_state"]["last_completion_turn"] == "large-frame-turn"
+    assert store.read()["remote_state"]["last_completion_turn"] == completed_turn
     assert len([s for s in sent if s.rstrip().endswith("yes")]) == 1
     assert agent.step()[0]["state"] == "owned"
     assert len([s for s in sent if s.rstrip().endswith("yes")]) == 1

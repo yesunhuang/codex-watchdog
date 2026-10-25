@@ -231,6 +231,8 @@ class MvpWatchdogService:
         )
         self.store = InstructionStore(runtime)
         self.stop_snapshots = StopSnapshots(runtime)
+        from .host_completion import HostCompletions
+        self.host_completions = HostCompletions(self.runtime)
         self.remote_control = (
             RemoteControlClient(self.remote_ssh_adapter, runtime)
             if getattr(self.remote_ssh_adapter, "supports_control", False) else None
@@ -688,9 +690,16 @@ class MvpWatchdogService:
         state["session_id"] = session_id
 
         completion = probe.get("completion")
+        host_current = False
+        host_runtime = getattr(self.remote_ssh_adapter, "current_stop_runtime", None)
+        if callable(host_runtime) and host_runtime(target, probe, self.runtime) is not None:
+            completion = self.host_completions.observe(state, session_id, target.repo_path,
+                completion, self.clock(), _ROLLOUT_STOP_FALLBACK_DELAY_SECONDS)
+            host_current = True
+            probe = {**probe, "completion": completion}
         stop_count = 0
         stop_audit_id = None
-        if self._remote_completion_is_ready(completion) and completion.get(
+        if (completion is not None if host_current else self._remote_completion_is_ready(completion)) and completion.get(
             "turn_id"
         ) != state.get("last_completion_turn"):
             turn_id = str(completion["turn_id"])
@@ -712,7 +721,7 @@ class MvpWatchdogService:
                             f"Repository: {target.label}\n"
                             f"Workspace ID: {workspace_id}\n"
                             f"Session: {session_id}\n"
-                            "Outcome: remote_rollout_task_complete_fallback\n\n"
+                            f"Outcome: {completion.get('hook_outcome', 'remote_rollout_task_complete_fallback')}\n\n"
                             + output
                         ),
                         relay_target=self._remote_relay_target(target, session_id),
@@ -1188,6 +1197,8 @@ class MvpWatchdogService:
                     "completed_at",
                     "final_output_sha256",
                     "final_output_chars",
+                    "source",
+                    "invocation_id",
                 )
             }
         safe_probe = {

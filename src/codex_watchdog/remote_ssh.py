@@ -241,7 +241,7 @@ def rollout_completion(session):
         size = path.stat().st_size
         with path.open("rb") as handle:
             handle.seek(max(0, size - 1048576))
-            content = handle.read()
+            content = handle.read(min(size, 1048576))
     except OSError:
         return None
     events = []
