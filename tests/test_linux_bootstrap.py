@@ -334,6 +334,37 @@ def test_typed_command_policy_or_missing_tool_refuses_start(configured, fault):
     assert s.manager.effects() == [['daemon-reload']]
 
 
+@pytest.mark.parametrize('escape,control', [('n', '\n'), ('t', '\t'), ('r', '\r')])
+def test_c_escaped_control_cannot_match_a_literal_backslash_path(configured, escape, control):
+    s = configured
+    old_parent = s.exe.parent
+    new_parent = old_parent.with_name('accepted\\' + escape + 'ame')
+    old_parent.rename(new_parent)
+    exe = new_parent / 'codex-watchdog'
+    s.unit.write_text(node_unit_contents(NODE, exe, s.root / 'runtime', s.home, s.env, 30))
+    args = s.manager.arguments()
+    args[2] = args[2].replace('\\' + escape, control)
+    s.manager.cached_arguments = args
+    # A newline may already invalidate the human property record. Either
+    # boundary must refuse; a tab also exercises the typed-string comparison.
+    assert ensure(s)['status'] == 'refused'
+    assert s.manager.effects() == [['daemon-reload']]
+
+
+@pytest.mark.parametrize('token,expected', [
+    ('"line\\nfeed"', 'line\nfeed'), ('"tab\\ttext"', 'tab\ttext'),
+    ('"literal\\\\name"', r'literal\name'), ('"\\xc3\\xa9"', 'é'),
+    ('"é"', 'é'), ('"\\040"', ' '), ('"a\\\"b"', 'a"b')])
+def test_bus_c_string_decoding_preserves_exact_utf8_bytes(token, expected):
+    assert b._bus_string(token) == expected
+
+
+@pytest.mark.parametrize('token', ['"\\q"', '"\\x0"', '"\\777"', '"\\000"', 'unquoted'])
+def test_unknown_or_invalid_bus_string_escapes_refuse(token):
+    with pytest.raises((ValueError, UnicodeError)):
+        b._bus_string(token)
+
+
 @pytest.mark.parametrize('command', ['daemon-reload', 'start'])
 def test_failed_effect_does_not_reset_state_or_loop(configured, command):
     s = configured

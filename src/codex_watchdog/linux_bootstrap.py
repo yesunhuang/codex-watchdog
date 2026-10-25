@@ -140,17 +140,57 @@ def _busctl(unit, deadline, clock):
                             'org.freedesktop.systemd1.Service', 'ExecStart'], deadline, clock)
 
 
+def _bus_tokens(raw):
+    fields, position = [], 0
+    for match in re.finditer(r'"(?:[^"\\\x00-\x1f]|\\[^\r\n])*"|[^\s"]+', raw):
+        gap = raw[position:match.start()]
+        _need(gap.isspace() or not fields and not gap, 'effective_exec_unverified')
+        fields.append(match.group())
+        _need(len(fields) <= 64, 'effective_exec_unverified')
+        position = match.end()
+    _need(position == len(raw) or raw[position:].isspace(), 'effective_exec_unverified')
+    return fields
+
+
+def _bus_string(token):
+    _need(len(token) >= 2 and token[0] == token[-1] == '"', 'effective_exec_unverified')
+    raw, result, position = token[1:-1].encode('utf-8'), bytearray(), 0
+    escapes = {ord(a): ord(b) for a, b in zip('abfnrtv\\\"\'', '\a\b\f\n\r\t\v\\\"\'')}
+    while position < len(raw):
+        char = raw[position]
+        position += 1
+        if char == 92:
+            _need(position < len(raw), 'effective_exec_unverified')
+            char = raw[position]
+            position += 1
+            if char in escapes:
+                char = escapes[char]
+            elif char == ord('x'):
+                digits = raw[position:position + 2]
+                _need(re.fullmatch(b'[0-9a-fA-F]{2}', digits), 'effective_exec_unverified')
+                char, position = int(digits, 16), position + 2
+            elif ord('0') <= char <= ord('7'):
+                digits = bytes([char]) + raw[position:position + 2]
+                _need(re.fullmatch(b'[0-7]{3}', digits), 'effective_exec_unverified')
+                char, position = int(digits, 8), position + 2
+            else:
+                _need(False, 'effective_exec_unverified')
+        _need(0 < char <= 255, 'effective_exec_unverified')
+        result.append(char)
+    return result.decode('utf-8', errors='strict')
+
+
 def _effective_exec(unit, expected, deadline, clock):
     _tick(deadline, clock)
     raw = _busctl(unit, deadline, clock)
     _need(len(raw.encode()) <= OUTPUT_BYTES, 'effective_exec_oversized')
     # Typed D-Bus output retains argv cardinality and quoted string boundaries;
     # systemctl's human-readable argv[] joins strings and loses that distinction.
-    fields = shlex.split(raw)
+    fields = _bus_tokens(raw)
     end = 4 + len(expected)
-    _need(len(fields) == end + 8 and fields[:4] == [
-              'a(sasbttttuii)', '1', '/usr/bin/env', str(len(expected))]
-          and fields[4:end] == expected and fields[end] == 'false'
+    _need(len(fields) == end + 8 and fields[:2] == ['a(sasbttttuii)', '1']
+          and _bus_string(fields[2]) == '/usr/bin/env' and fields[3] == str(len(expected))
+          and [_bus_string(field) for field in fields[4:end]] == expected and fields[end] == 'false'
           and fields[end + 1:] == ['0'] * 7, 'effective_exec_unverified')
     return fields
 

@@ -28,7 +28,9 @@ Only a missing, inactive unit with no running process or pending job is eligible
 The helper may reload the user manager, verify the resulting unit and start that
 original service once. It validates the typed D-Bus `ExecStart` executable and
 complete argument array, including never-started command metadata, and repeats
-the checks immediately before activation. Active services are left alone;
+the checks immediately before activation. Typed C-escaped strings are decoded to
+exact UTF-8 bytes; literal backslashes and control characters remain distinct,
+and malformed or ambiguous strings refuse recovery. Active services are left alone;
 loaded services deliberately stopped or failed are not restarted.
 
 The helper shares the per-node installation lock. A competing controller prevents

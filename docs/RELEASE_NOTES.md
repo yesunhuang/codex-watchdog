@@ -1,10 +1,12 @@
-# Codex WatchDog 2.3.6
+# Codex WatchDog 2.3.7
 
 An already trusted Linux `Stop` or `PermissionRequest` hook can recover an
 existing opted-in node service when its user systemd manager reports the original
 enabled unit missing and inactive. The helper verifies the exact native writer,
 thread and repository, retained unit/environment, selected image hash and typed
-effective `ExecStart` argument array before starting the original service. Active,
+effective `ExecStart` argument array before starting the original service.
+Typed C-escaped strings are decoded to their exact UTF-8 bytes, keeping literal
+backslashes distinct from control characters; malformed or ambiguous strings refuse. Active,
 deliberately stopped, failed or ambiguous services are not restarted.
 
 Recovery has a five-second work budget and bounded configuration/output reads.
