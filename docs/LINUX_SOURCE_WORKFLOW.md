@@ -127,3 +127,9 @@ Do not force-stop the user unit to perform ordinary handback: systemd can kill
 the in-flight Codex child. Source upgrades should similarly release first,
 replace only application/venv files, and reuse the original runtime, Codex home,
 credentials, hooks, binding, and queue journals.
+
+An existing opted-in node can also recover a missing unit-manager entry on a
+genuine trusted native callback. The hook must execute the upgraded package;
+changing only a separate service image is insufficient. See
+[bounded node-service recovery and prerequisites](LINUX_STARTUP_RECOVERY.md).
+This does not provide unattended startup before a native callback after reboot.

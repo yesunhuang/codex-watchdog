@@ -1,36 +1,35 @@
-# Codex WatchDog 2.3.5 - Windows discovery hotfix
+# Codex WatchDog 2.3.6
 
-Windows automatic discovery can now recover when VS Code's `--status`
-diagnostic returns empty or malformed output, fails in its process formatter,
-or times out. Newer CLI-only log directories no longer hide the running GUI
-generation. Diagnostic output, work and outstanding pipe readers are bounded.
+An already trusted Linux `Stop` or `PermissionRequest` hook can recover an
+existing opted-in node service when its user systemd manager reports the original
+enabled unit missing and inactive. The helper verifies the exact native writer,
+thread and repository, retained unit/environment, selected image hash and typed
+effective `ExecStart` argument array before starting the original service. Active,
+deliberately stopped, failed or ambiguous services are not restarted.
 
-The read-only fallback verifies current-user native GUI, extension-host and
-Codex app-server identities, exact workspace/thread qualification, fresh owner
-selection and the original held writer PID and creation identity. It preserves
-the existing native conversation. Collection and completion use finite budgets
-and fair ordering; historical log/storage/thread growth does not add hot-path
-scans. Ambiguous or incomplete evidence remains unresolved. Global-window and saved-workspace JSON inputs are bounded before parsing, including file growth, malformed/deep JSON and decimal-integer conversion; independent diagnostic latency does not expire the saved-workspace phase.
+Recovery has a five-second work budget and bounded configuration/output reads.
+It reuses the node installation lock, refuses a competing controller and retains
+one versioned receipt. It does not adopt ownership, dispatch a model command,
+change authorization or replay uncertain effects. The original owner guard still
+runs after optional recovery.
 
-This is a **Windows x64-only** immutable hotfix. All changed application behavior
-is Windows-guarded. The existing **2.3.3** macOS ARM64 preview and Linux ARM64/x64
-packages remain applicable for those platforms in the
-[2.3.3 release](https://github.com/yesunhuang/codex-watchdog/releases/tag/v2.3.3).
-The full-platform release remains marked Latest. No existing release is replaced.
+The hook-selected executable must receive the upgrade as well as the daemon
+image. Existing `/usr/bin/systemctl` and `/usr/bin/busctl` are required. This is
+recovery on renewed native use, **not an unattended-startup guarantee before a
+genuine callback after reboot**. See [Linux recovery](LINUX_STARTUP_RECOVERY.md)
+for prerequisites, shared-home installation boundaries and refusal behavior.
 
-Upgrade the existing current-user Windows installation normally. Saved settings,
-secure credentials, pairings, grants, queues, claims and prepared notification
-state are reused in place; no persistent schema migration or reconfiguration is
-introduced. Windows package acceptance includes the immediately previous public
-2.3.3 upgrade path, startup without Python and the embedded application icon.
+The package set covers Windows x64, Linux x64/ARM64 and macOS ARM64 preview from
+one canonical source. It retains the Windows discovery fix from 2.3.5. On Windows
+and macOS, the Linux-only hook path is not imported; normal owner enforcement is
+unchanged. Saved profiles, runtime, settings, secure credentials, pairings,
+grants, routes, claims and queues are reused without a persistent schema change.
+Windows acceptance uses the immediately previous public 2.3.5 upgrade path and
+verifies the embedded application icon; Linux/macOS deployed-profile acceptance
+must also preserve the existing 2.3.3 baseline.
 
-Coverage remains best effort. A GUI startup outside the bounded locator interval,
-inaccessible native identity or an unreadable log needed to prove same-main
-uniqueness can leave that GUI domain unmonitored. Existing explicit registrations
-remain supported. See [Windows discovery and recovery](WINDOWS_DISCOVERY.md).
-
-Existing stale-boot recovery, other-window coverage, provider retry and macOS
-preview limitations remain. Prepared notification roots retain forward-only
-recovery; do not restore old journals, replay uncertain effects or restart old
-senders against them. Git wake coalescing and sparse-checkout support are retained.
-See [retention and upgrades](NOTIFICATION_RETENTION.md).
+Existing stale-boot, other-window coverage, provider uncertainty and macOS preview
+limitations remain. Do not restore old journals or replay uncertain work. No
+antivirus exclusion, trust change or security-product clearance is implied by
+this release. Release history and prior Windows detection disclosures remain in
+[GitHub Releases](https://github.com/yesunhuang/codex-watchdog/releases).

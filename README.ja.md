@@ -391,7 +391,7 @@ Feishu/Lark の polling では、有効な WatchDog 通知で **Reply in thread*
 - Messaging: [Feishu/Lark](docs/FEISHU_LARK.md)、[OneBot 11 / QQ](docs/ONEBOT_QQ.md)、
   [OneBot reuse audit](docs/ONEBOT_REUSE.md)。
 - Linux: [handoff](docs/AUTOMATIC_REMOTE_HANDOFF.md)、[login nodes](docs/LINUX_NODE_SETUP.md)、
-  [source workflow](docs/LINUX_SOURCE_WORKFLOW.md)。
+  [source workflow](docs/LINUX_SOURCE_WORKFLOW.md)、[信頼済み native callback による node service の復旧](docs/LINUX_STARTUP_RECOVERY.md)。
 - [Platform status and doctor](docs/PLATFORM_SUPPORT.md)。
 - [Architecture](doc/architecture.md) と [security boundaries](SECURITY.md)。
 - [Build and release](docs/MANUAL_RELEASE.md) と

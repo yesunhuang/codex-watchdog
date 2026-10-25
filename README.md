@@ -414,7 +414,8 @@ On configured Linux nodes sharing one current-user Codex home, messaging grants,
 - Messaging: [Feishu/Lark](docs/FEISHU_LARK.md),
   [OneBot 11 / QQ](docs/ONEBOT_QQ.md), and [OneBot reuse audit](docs/ONEBOT_REUSE.md).
 - Linux: [handoff](docs/AUTOMATIC_REMOTE_HANDOFF.md),
-  [login nodes](docs/LINUX_NODE_SETUP.md), [source workflow](docs/LINUX_SOURCE_WORKFLOW.md).
+  [login nodes](docs/LINUX_NODE_SETUP.md), [source workflow](docs/LINUX_SOURCE_WORKFLOW.md),
+  [node-service recovery on a trusted native callback](docs/LINUX_STARTUP_RECOVERY.md).
 - [Platform status and doctor](docs/PLATFORM_SUPPORT.md).
 - [Architecture](doc/architecture.md) and [security boundaries](SECURITY.md).
 - [Builds and releases](docs/MANUAL_RELEASE.md) and

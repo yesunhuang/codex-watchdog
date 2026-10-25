@@ -21,6 +21,22 @@ def _unit_quote(value, *, argument=False):
     return '"' + (text.replace("$", "$$") if argument else text) + '"'
 
 
+def node_unit_contents(node, executable, runtime, home, environment, interval):
+    """Canonical retained unit, shared with the read-only recovery validator."""
+    args = ["/usr/bin/env", "CODEX_WATCHDOG_SLACK_REPLY_MODE=poll",
+            executable, "--runtime", runtime, "--codex-home", home, "linux-auto-run",
+            "--interval", str(interval), "--renew-lease", "--continue-interrupted"]
+    return (
+        "# Managed by Codex WatchDog linux-node-install; schema_version=1\n"
+        "[Unit]\nDescription=Codex WatchDog on " + node + "\nConditionHost=" + node + "\n\n"
+        "[Service]\nType=simple\nUMask=0077\n"
+        "EnvironmentFile=" + str(environment).replace("%", "%%") + "\n"
+        "ExecStart=" + " ".join(_unit_quote(value, argument=True) for value in args) + "\n"
+        "Restart=no\nKillMode=mixed\nTimeoutStopSec=infinity\n\n"
+        "[Install]\nWantedBy=default.target\n"
+    )
+
+
 def prepare_node(executable, codex_home, environment_file, *, interval=30, install=False):
     if sys.platform != "linux":
         raise ControlError("linux_required")
@@ -59,18 +75,7 @@ def prepare_node(executable, codex_home, environment_file, *, interval=30, insta
         raise ControlError("linux_node_config_not_absolute")
     unit = config / "systemd/user" / name
     runtime = root / "runtime"
-    args = ["/usr/bin/env", "CODEX_WATCHDOG_SLACK_REPLY_MODE=poll",
-            executable, "--runtime", runtime, "--codex-home", home, "linux-auto-run",
-            "--interval", str(interval), "--renew-lease", "--continue-interrupted"]
-    contents = (
-        "# Managed by Codex WatchDog linux-node-install; schema_version=1\n"
-        "[Unit]\nDescription=Codex WatchDog on " + node + "\nConditionHost=" + node + "\n\n"
-        "[Service]\nType=simple\nUMask=0077\n"
-        "EnvironmentFile=" + str(environment).replace("%", "%%") + "\n"
-        "ExecStart=" + " ".join(_unit_quote(value, argument=True) for value in args) + "\n"
-        "Restart=no\nKillMode=mixed\nTimeoutStopSec=infinity\n\n"
-        "[Install]\nWantedBy=default.target\n"
-    )
+    contents = node_unit_contents(node, executable, runtime, home, environment, interval)
     marker = root / "node.json"
     result = dict(schema_version=1, node=node, service=name, runtime=str(runtime),
                   status="preview", unit=contents)

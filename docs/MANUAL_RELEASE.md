@@ -1,8 +1,10 @@
 # Manual testing and releases
 
-GitHub Actions is disabled for this project. Do not dispatch or re-enable a
-workflow. The workflow files remain as historical descriptions of acceptance
-checks; they are not the release mechanism.
+The versioned release workflow runs when `pyproject.toml` changes on `main`, or
+by an explicitly coordinated manual dispatch. It performs source, package,
+privacy and upgrade checks and assembles an unpublished draft. Do not dispatch
+a duplicate build after a version push. Verify the artifacts and required native
+acceptance before publishing; a successful build alone is not release acceptance.
 
 Use `pyproject.toml` as the version source. On an approved machine, install the
 appropriate pinned release dependencies and run `python tools/run_isolated_tests.py` and
@@ -64,9 +66,10 @@ Keep platform acceptance JSON files with the release assets. Already completed
 artifacts may be reused only after their source revision, hashes and acceptance
 receipts have been verified; downloading them does not run Actions.
 
-Create a new tag/release manually with `gh release create`, specifying the tested
-source commit, release notes and verified assets. A draft may be used while
-checking the uploaded hashes; publish it with `gh release edit --draft=false`
-once complete. Never replace an existing published version to hide an error.
+Use the workflow's existing draft when it has assembled the tested source and
+verified assets. For a separately authorized manual build, create one new draft
+with `gh release create`, specifying that source commit and release notes. Verify
+uploaded identities and publish with `gh release edit --draft=false` only after
+acceptance. Never replace an existing published version to hide an error.
 Record manual test evidence and deployment results in the development progress
 report. Do not reconfigure unrelated user state during installation.

@@ -365,7 +365,7 @@ Remote-SSH/分离运行应通过独立于 SSH 连接的持久用户服务启动 
 - 消息通信：[飞书/Lark](docs/FEISHU_LARK.md)、[OneBot 11 / QQ](docs/ONEBOT_QQ.md)、
   [OneBot 复用审计](docs/ONEBOT_REUSE.md)。
 - Linux：[交接](docs/AUTOMATIC_REMOTE_HANDOFF.md)、[登录节点](docs/LINUX_NODE_SETUP.md)、
-  [source workflow](docs/LINUX_SOURCE_WORKFLOW.md)。
+  [source workflow](docs/LINUX_SOURCE_WORKFLOW.md)、[可信原生回调触发的节点服务恢复](docs/LINUX_STARTUP_RECOVERY.md)。
 - [平台状态与 doctor](docs/PLATFORM_SUPPORT.md)。
 - [架构](doc/architecture.md)与[安全边界](SECURITY.md)。
 - [构建与发布](docs/MANUAL_RELEASE.md)与

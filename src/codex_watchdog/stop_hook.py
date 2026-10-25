@@ -119,6 +119,15 @@ def run_hook(
     except (ValueError, TypeError):
         return _run_hook(settings, io.StringIO(raw), stdout, stderr, monotonic, sleep)
     codex_home = settings.codex_home or Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    if sys.platform == "linux":
+        try:
+            from .linux_bootstrap import ensure_node_service
+            bootstrap = ensure_node_service(codex_home, payload)
+            if bootstrap.get("status") == "refused" and bootstrap.get("attempted"):
+                stderr.write("codex-watchdog service bootstrap: " + bootstrap["reason"] + "\n")
+        except Exception:
+            # Recovery must not replace the existing native-owner/effect guard.
+            stderr.write("codex-watchdog service bootstrap unavailable\n")
     try:
         with hook_owner(settings.runtime, codex_home, payload, monotonic=monotonic, sleep=sleep) as runtime:
             return _run_hook(replace(settings, runtime=runtime), io.StringIO(raw),
