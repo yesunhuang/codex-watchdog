@@ -14,6 +14,7 @@ from .notifications import NotificationEvent, notification_workspace_label
 from .notification_context import source_time
 from .remote_control import notify_local_control
 from .storage import FileLock, InstructionStore
+from .linux_git_queue import LinuxGitQueueStart
 
 
 CONTINUATION_PROMPT = (
@@ -33,6 +34,7 @@ class LinuxContinuation:
         self.notifier = notifier
         self.path = binding.runtime / "linux" / "continuation.json"
         self.lock = binding.runtime / "locks" / "linux-continuation.lock"
+        self.git_queue = LinuxGitQueueStart(binding)
 
     @staticmethod
     def _instruction(thread, turn):
@@ -298,6 +300,9 @@ class LinuxContinuation:
         from .linux_owner import pending_count, writer_pid
 
         with FileLock(self.lock):
+            queued_git = self.git_queue.step(owner, workspace, self._latest)
+            if queued_git is not None:
+                return {"status": "watching", "git_queue": queued_git}
             value = self._read(owner.thread)
             self._observe_receipt(value, owner.thread)
             if value is not None and value["status"] == "enqueued":
