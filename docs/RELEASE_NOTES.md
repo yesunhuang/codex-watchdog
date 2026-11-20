@@ -1,20 +1,19 @@
-# Codex WatchDog 2.3.9
+# Codex WatchDog 2.3.10
 
-Linux automatic interruption recovery can start an already-admitted automatic Git
-wake left at the native queue head. Previously, an interrupted turn could leave
-the same conversation idle while the waiting Git item prevented both continuation
-and idle handback.
+Restore automatic discovery of existing local VS Code Codex conversations after
+the extension changed its routing metadata and began leaving the session cache
+empty. WatchDog recognizes the new successful history-attachment marker while
+independently verifying the active window and its held native writer. The marker
+alone never grants ownership or creates a conversation.
 
-Recovery uses the existing owned native client and exact queued submission ID.
-The current owner, native idle state, FIFO head, prompt identity, current-node
-courier receipt and Git retirement are rechecked. A durable versioned claim is
-written before the single native start attempt. Lost or uncertain outcomes are
-never retried automatically. Human and foreign queue heads are preserved; no
-replacement prompt, session, grant or historical notification replay is added.
+The shared parser preserves legacy owner/follower behavior. Failed, malformed,
+conflicting, inactive and stale-generation evidence refuses selection. Windows
+retains exact process-generation, same-user, writer-lock and finite-work checks.
+An explicitly inactive previous chat does not hide the active conversation.
 
-The existing opt-in automatic interruption-continuation setting is reused.
-Saved profiles, credentials, routes, registrations, native work, queues, tickets
-and delivery records are preserved. Windows upgrade acceptance uses the previous
-public 2.3.8 package. Windows x64, Linux x64/ARM64 and macOS ARM64 preview are
-rebuilt from the same canonical source with the existing package, icon, privacy
-and native acceptance checks. Existing preview and startup prerequisites remain.
+Saved profiles, secure credentials, routes, registrations, grants, queues and
+delivery records are preserved. Existing headless node monitoring and the legacy
+Remote-SSH inspection mechanism are unchanged. Windows x64, Linux x64/ARM64 and
+macOS ARM64 preview are rebuilt from the same source. Upgrade acceptance uses
+previous public version 2.3.9, with existing package, icon, privacy and native
+checks. macOS remains a preview with its documented startup prerequisites.

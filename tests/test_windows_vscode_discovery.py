@@ -30,6 +30,7 @@ from codex_watchdog.windows_vscode_discovery import (
     WindowsVSCodeLiveWindowIndex,
 )
 from codex_watchdog.workspace_discovery import (
+    HISTORY_ATTACHED_SOURCE,
     CodexSessionResolver,
     EffectiveWorkspaceCatalog,
     LiveVSCodeWindow,
@@ -517,6 +518,112 @@ def test_admission_rejects_shared_process_follower_and_ignores_cli_windows(tmp_p
                                  "vscode_thread_owned_by_another_window")
     assert admit(follower, tuple(live.values())).reason == "windows_native_follower_rejected"
     assert admit(accepted, tuple(live.values()), key="cli-only-key") is accepted
+
+
+def write_new_format(fixture, number, *, fields="assignedHistoryAttachment=true",
+                     activity=True, extra=""):
+    """Current extension routing: no legacy role, valid empty window cache."""
+    item = fixture.windows[number]
+    sid, at = item["session"], item["spawn_ms"]
+    lines = []
+    if activity:
+        lines.append(f"{stamp(at + 50)} [info] [extension-app-server-manager] "
+                     f"thread_stream_view_activity_changed active=true conversationId={sid} "
+                     "historyAttached=false resumeState=needs_resume\n")
+    lines.append(f"{stamp(at + 60)} [info] [extension-app-server-manager] maybe_resume_success "
+                 f"{fields} conversationId={sid} threadId={sid}\n")
+    fixture.write_codex_log(number, role="", active="", extra="".join(lines) + extra)
+    fixture.set_cache(number, [])
+
+
+@windows_host
+@pytest.mark.parametrize("cli", [False, True], ids=("native-fallback", "valid-cli"))
+def test_new_format_history_attachment_recovers_exact_session(tmp_path, cli):
+    fixture = Fixture(tmp_path)
+    write_new_format(fixture, 1)
+    probe = (VSCodeStatusProbe("available", "vscode_status_available", "windows_user_install",
+                               fixture.status((1, 2, 3))) if cli else None)
+
+    snapshot = fixture.discovery(probe).snapshot()
+
+    item = fixture.windows[1]
+    assert tracked(snapshot)[item["repo"].name] == (
+        item["session"], HISTORY_ATTACHED_SOURCE if cli else FALLBACK_SOURCE)
+    assert_healthy(snapshot, fixture, (2, 3),
+                   "codex_state_vscode_window_cache_owner" if cli else FALLBACK_SOURCE)
+
+
+def _break_new_format(fixture, case):
+    item = fixture.windows[1]
+    sid, reader = item["session"], fixture.reader
+    extra = {
+        "inactive": f"thread_stream_view_activity_changed active=false conversationId={sid}\n",
+        "revoked_by_activity": (f"thread_stream_view_activity_changed active=true "
+                                f"conversationId={sid} historyAttached=false\n"),
+        "resume_failed": f"maybe_resume_failed conversationId={sid}\n",
+        "generation_reset": (f"{stamp(item['app_ms'] + 10)} [info] [CodexMcpConnection] "
+                             "Spawning codex app-server\n"
+                             f"thread_stream_view_activity_changed active=true "
+                             f"conversationId={sid} historyAttached=false\n"),
+    }.get(case, "")
+    fields = {
+        "attachment_false": "assignedHistoryAttachment=false",
+        "attachment_malformed": "assignedHistoryAttachment=1",
+        "legacy_follower_with_attachment": "assignedStreamRole=follower assignedHistoryAttachment=true",
+    }.get(case, "assignedHistoryAttachment=true")
+    write_new_format(fixture, 1, fields=fields, extra=extra)
+    if case == "peer_writer":
+        other = fixture.windows[2]
+        reader.writers[sid] = (other["app"], filetime(other["app_ms"]))
+    elif case == "conflicting_cache":
+        fixture.set_cache(1, [str(uuid.uuid4())])
+    elif case == "competing_attached":
+        competitor = str(uuid.uuid4())
+        fixture.add_thread(1, competitor)
+        reader.held.add(competitor)
+        reader.writers[competitor] = reader.writers[sid]
+        with item["codex_log"].open("a", encoding="utf-8") as handle:
+            handle.write(f"maybe_resume_success assignedHistoryAttachment=true "
+                         f"conversationId={competitor} threadId={competitor}\n")
+
+
+@windows_host
+@pytest.mark.parametrize("cli", [False, True], ids=("native-fallback", "valid-cli"))
+@pytest.mark.parametrize("case", [
+    "attachment_false", "attachment_malformed", "legacy_follower_with_attachment", "inactive",
+    "revoked_by_activity", "resume_failed", "generation_reset", "peer_writer",
+    "conflicting_cache", "competing_attached",
+])
+def test_new_format_history_attachment_refusals_stay_local(tmp_path, case, cli):
+    fixture = Fixture(tmp_path)
+    _break_new_format(fixture, case)
+    probe = (VSCodeStatusProbe("available", "vscode_status_available", "windows_user_install",
+                               fixture.status((1, 2, 3))) if cli else None)
+
+    snapshot = fixture.discovery(probe).snapshot()
+
+    assert "repo1" not in tracked(snapshot)
+    assert fixture.windows[1]["session"] not in {
+        item.session_id for item in snapshot.effective_workspaces}
+    assert_healthy(snapshot, fixture, (2, 3),
+                   "codex_state_vscode_window_cache_owner" if cli else FALLBACK_SOURCE)
+
+
+def test_fallback_admission_never_treats_bare_attachment_as_owner(tmp_path):
+    fixture = Fixture(tmp_path)
+    write_new_format(fixture, 1, activity=False)  # Attached but never explicitly active.
+    index = fixture.index()
+    live = index.snapshot()
+    item = fixture.windows[1]
+    database = fixture.user / "workspaceStorage" / item["key"] / "state.vscdb"
+    accepted = SessionResolution("resolved", item["session"], HISTORY_ATTACHED_SOURCE, None)
+
+    refused = index.windows_fallback_admission(
+        item["key"], accepted, codex_home=fixture.codex_home, window_state_database=database,
+        live_windows=tuple(live.values()), session_resolver=fixture.resolver())
+
+    assert refused.session_id is None
+    assert refused.reason == "windows_native_owner_unverified"
 
 
 @windows_host

@@ -11,6 +11,7 @@ import pytest
 
 from codex_watchdog.workspace_discovery import (
     _posix_writer_lock_is_held,
+    HISTORY_ATTACHED_SOURCE,
     CodexSessionResolver,
     EffectiveWorkspaceCatalog,
     LiveVSCodeWindow,
@@ -1615,3 +1616,174 @@ def test_malformed_window_session_cache_fails_closed(tmp_path: Path) -> None:
 
     assert snapshot.effective_workspaces == ()
     assert snapshot.windows[0].reason == "vscode_session_cache_unavailable"
+
+
+NEW_FORMAT_ACTIVITY = (
+    "[extension-app-server-manager] thread_stream_view_activity_changed active=true "
+    "conversationId={sid} historyAttached=false resumeState=needs_resume\n"
+)
+NEW_FORMAT_RESUME = (
+    "[extension-app-server-manager] maybe_resume_success {fields} "
+    "conversationId={sid} threadId={thread}\n"
+)
+
+
+def new_format_discovery(tmp_path: Path, *, fields: str = "assignedHistoryAttachment=true",
+                         thread: str = SESSION_CURRENT, prefix: str = "", extra: str = ""):
+    """Current extension format: no legacy role and a valid empty window cache."""
+    discovery, target_log, other_log, windows = cross_window_discovery(tmp_path)
+    target_log.write_text(
+        "[CodexMcpConnection] Spawning codex app-server\n" + prefix
+        + NEW_FORMAT_ACTIVITY.format(sid=SESSION_CURRENT)
+        + NEW_FORMAT_RESUME.format(fields=fields, sid=SESSION_CURRENT, thread=thread)
+        + extra,
+        encoding="utf-8",
+    )
+    other_log.write_text(f"thread_stream_role_changed conversationId={SESSION_OTHER} role=owner\n")
+    database = tmp_path / "Code/User/workspaceStorage/target/state.vscdb"
+    with sqlite3.connect(str(database)) as connection:
+        connection.execute("UPDATE ItemTable SET value=? WHERE key=?",
+                           ("[]", "agentSessions.model.cache"))
+    discovery.session_resolver.writer_process_probe = lambda path: (
+        201 if path.stem == SESSION_OTHER else 101)
+    return discovery, target_log, windows
+
+
+def target_window(snapshot):
+    return next(window for window in snapshot.windows if window.workspace_storage_key == "target")
+
+
+def test_new_format_history_attachment_selects_exact_writer_with_empty_cache(tmp_path: Path) -> None:
+    discovery, target_log, _windows = new_format_discovery(tmp_path)
+
+    snapshot = discovery.snapshot()
+
+    target = target_window(snapshot)
+    assert target.session_id == SESSION_CURRENT
+    assert target.session_source == HISTORY_ATTACHED_SOURCE
+    assert target.reason is None
+    assert {item.repo_root.name: item.session_id for item in snapshot.effective_workspaces} == {
+        "target": SESSION_CURRENT, "other": SESSION_OTHER,
+    }
+    # The attachment is never reinterpreted as a legacy owner role.
+    assert codex_log_owns_session(target_log, SESSION_CURRENT) is False
+
+
+def test_consistent_legacy_owner_and_attachment_keeps_legacy_owner_path(tmp_path: Path) -> None:
+    discovery, _log, _windows = new_format_discovery(
+        tmp_path, fields="assignedStreamRole=owner assignedHistoryAttachment=true")
+
+    target = target_window(discovery.snapshot())
+
+    assert target.session_id == SESSION_CURRENT
+    assert target.session_source == "codex_state_vscode_live_owner"
+
+
+def test_explicitly_inactive_other_thread_does_not_block_attachment(tmp_path: Path) -> None:
+    discovery, _log, _windows = new_format_discovery(
+        tmp_path,
+        prefix=f"thread_stream_view_activity_changed active=false conversationId={SESSION_OLD}\n")
+    with sqlite3.connect(str(tmp_path / ".codex/state_5.sqlite")) as db:
+        db.execute("INSERT INTO threads VALUES (?, ?, 'vscode', 'user', 0)",
+                   (SESSION_OLD, str(tmp_path / "target")))
+
+    target = target_window(discovery.snapshot())
+
+    assert target.session_id == SESSION_CURRENT
+    assert target.session_source == HISTORY_ATTACHED_SOURCE
+
+
+_NEW_FORMAT_REFUSALS = {
+    "duplicate_legacy_role": dict(
+        fields="assignedStreamRole=owner assignedStreamRole=follower assignedHistoryAttachment=true"),
+    "duplicate_activity": dict(
+        extra=f"thread_stream_view_activity_changed active=true active=false conversationId={SESSION_CURRENT} historyAttached=true\n"),
+    "attachment_false": dict(fields="assignedHistoryAttachment=false"),
+    "attachment_malformed": dict(fields="assignedHistoryAttachment=yes"),
+    "attachment_duplicate": dict(
+        fields="assignedHistoryAttachment=true assignedHistoryAttachment=true"),
+    "conflicting_thread_id": dict(thread=SESSION_OTHER),
+    "owner_with_false": dict(fields="assignedStreamRole=owner assignedHistoryAttachment=false"),
+    "legacy_follower_with_attachment": dict(
+        fields="assignedStreamRole=follower assignedHistoryAttachment=true"),
+    "follower_before_resume": dict(
+        prefix=f"thread_stream_role_changed conversationId={SESSION_CURRENT} role=follower\n"),
+    "inactive": dict(
+        extra=f"thread_stream_view_activity_changed active=false conversationId={SESSION_CURRENT}\n"),
+    "revoked_by_activity": dict(extra=NEW_FORMAT_ACTIVITY.format(sid=SESSION_CURRENT)),
+    "resume_failed": dict(extra=f"maybe_resume_failed conversationId={SESSION_CURRENT}\n"),
+    "unsubscribed": dict(extra=f"inactive_thread_unsubscribed conversationId={SESSION_CURRENT}\n"),
+    "generation_reset": dict(extra="[CodexMcpConnection] Spawning codex app-server\n"
+                                   + NEW_FORMAT_ACTIVITY.format(sid=SESSION_CURRENT)),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_NEW_FORMAT_REFUSALS) + [
+    "activity_only_true", "peer_writer", "no_writer", "lock_released_during_probe",
+    "unavailable_cache", "conflicting_cache", "duplicate_window", "competing_attached",
+    "competing_unmarked_same_writer",
+])
+def test_new_format_history_attachment_fails_closed(tmp_path: Path, case: str) -> None:
+    discovery, target_log, windows = new_format_discovery(
+        tmp_path, **_NEW_FORMAT_REFUSALS.get(case, {}))
+    resolver = discovery.session_resolver
+    if case == "activity_only_true":
+        target_log.write_text(
+            "[CodexMcpConnection] Spawning codex app-server\n"
+            "thread_stream_view_activity_changed active=true "
+            f"conversationId={SESSION_CURRENT} historyAttached=true\n")
+    elif case == "peer_writer":
+        resolver.writer_process_probe = lambda _path: 201
+    elif case == "no_writer":
+        resolver.writer_process_probe = lambda _path: None
+    elif case == "lock_released_during_probe":
+        held = [True]
+        resolver.lock_probe = lambda _path: held[0]
+        def release(_path):
+            held[0] = False
+            return 101
+        resolver.writer_process_probe = release
+    elif case == "unavailable_cache":
+        resolver.window_session_candidates = lambda _path: None
+    elif case == "conflicting_cache":
+        resolver.window_session_candidates = lambda _path: {SESSION_OTHER}
+    elif case == "duplicate_window":
+        windows["duplicate"] = LiveVSCodeWindow("3", 300, 101, target_log)
+    elif case in {"competing_attached", "competing_unmarked_same_writer"}:
+        with sqlite3.connect(str(tmp_path / ".codex/state_5.sqlite")) as db:
+            db.execute("INSERT INTO threads VALUES (?, ?, 'vscode', 'user', 0)",
+                       (SESSION_OLD, str(tmp_path / "target")))
+        if case == "competing_attached":
+            with target_log.open("a") as handle:
+                handle.write(NEW_FORMAT_RESUME.format(
+                    fields="assignedHistoryAttachment=true", sid=SESSION_OLD, thread=SESSION_OLD))
+
+    target = target_window(discovery.snapshot())
+
+    assert target.session_id is None
+    assert target.tracking_status == "unresolved"
+
+
+def test_new_format_chat_switch_ignores_explicitly_inactive_attachment(tmp_path: Path) -> None:
+    old = (NEW_FORMAT_RESUME.format(fields="assignedHistoryAttachment=true",
+                                   sid=SESSION_OLD, thread=SESSION_OLD)
+           + f"thread_stream_view_activity_changed active=false conversationId={SESSION_OLD} historyAttached=true\n")
+    discovery, _log, _windows = new_format_discovery(tmp_path, prefix=old)
+    with sqlite3.connect(str(tmp_path / ".codex/state_5.sqlite")) as db:
+        db.execute("INSERT INTO threads VALUES (?, ?, 'vscode', 'user', 0)",
+                   (SESSION_OLD, str(tmp_path / "target")))
+    assert target_window(discovery.snapshot()).session_id == SESSION_CURRENT
+
+
+def test_new_format_writer_probe_cannot_outlive_work_budget(tmp_path: Path) -> None:
+    from codex_watchdog.workspace_discovery import _history_attached_resolution
+    live = [True]
+    def writer(_path):
+        live[0] = False
+        return 101
+    resolution = _history_attached_resolution(
+        {SESSION_CURRENT}, {SESSION_CURRENT: (None, True)}, {SESSION_CURRENT}, set(),
+        [LiveVSCodeWindow("1", 100, 101, tmp_path / "Codex.log")], tmp_path,
+        writer, lambda _path: True, lambda: live[0],
+    )
+    assert resolution.status == "unresolved"

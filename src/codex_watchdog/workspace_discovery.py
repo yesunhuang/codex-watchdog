@@ -210,11 +210,146 @@ def codex_log_session_states(
     return _codex_log_session_evidence(path, session_ids)[0]
 
 
+_ROLE_FIELD = re.compile(rb"(?:^|\s)role=([^\s]+)(?=\s|$)")
+_ASSIGNED_ROLE_FIELD = re.compile(rb"(?:^|\s)assignedStreamRole=([^\s]+)(?=\s|$)")
+_ACTIVE_FIELD = re.compile(rb"(?:^|\s)active=(true|false)(?=\s|$)")
+_ACTIVE_VALUE_FIELD = re.compile(rb"(?:^|\s)active=([^\s]*)(?=\s|$)")
+_ATTACHMENT_KEY = b"assignedHistoryAttachment"
+_ATTACHMENT_FIELD = re.compile(rb"(?:^|\s)assignedHistoryAttachment=([^\s]*)(?=\s|$)")
+_VIEW_HISTORY_KEY = b"historyAttached"
+_VIEW_HISTORY_FIELD = re.compile(rb"(?:^|\s)historyAttached=([^\s]*)(?=\s|$)")
+_CONVERSATION_FIELD = re.compile(rb"(?:^|\s)conversationId=([^\s]*)(?=\s|$)")
+_THREAD_FIELD = re.compile(rb"(?:^|\s)threadId=([^\s]*)(?=\s|$)")
+
+HISTORY_ATTACHED_SOURCE = "codex_state_vscode_history_attached_writer"
+
+# (legacy stream role, view active, new-format history attachment)
+RoutingState = Tuple[Optional[str], Optional[bool], bool]
+
+
+def _explicit_flag(line: bytes, key: bytes, field) -> Tuple[bool, Optional[bool]]:
+    """``(present, value)``; a duplicated or non-boolean value is ``None``."""
+    if key not in line:
+        return False, None
+    values = field.findall(line)
+    if len(values) != 1 or line.count(key) != 1 or values[0] not in (b"true", b"false"):
+        return True, None
+    return True, values[0] == b"true"
+
+
+def _single_thread_identity(line: bytes) -> bool:
+    conversations = _CONVERSATION_FIELD.findall(line)
+    threads = _THREAD_FIELD.findall(line)
+    return (len(conversations) == 1 and len(threads) <= 1
+            and all(thread == conversations[0] for thread in threads))
+
+
+def _routing_transition(line: bytes, state: RoutingState) -> Optional[RoutingState]:
+    """Apply one exact-conversation routing line; ``None`` if it is not one.
+
+    Legacy role/activity semantics are unchanged. Current extensions instead
+    report ``assignedHistoryAttachment`` on a successful resume. That boolean
+    is only a necessary local-history gate, never a legacy owner role: it is
+    kept separately and only an explicit, single, consistent ``true`` sets it.
+    A new-format activity line whose ``historyAttached`` is not ``true``
+    revokes it; ``true`` there merely keeps an earlier attachment. Explicit
+    follower/unknown roles are never overridden by an attachment.
+    """
+    role, active, attached = state
+    if b"thread_stream_role_changed" in line:
+        match = _ROLE_FIELD.search(line)
+        role = match.group(1).decode("ascii", errors="ignore") if match else None
+        return role, active, False
+    if b"maybe_resume_success" in line:
+        match = _ASSIGNED_ROLE_FIELD.search(line)
+        assigned = match.group(1).decode("ascii", errors="ignore") if match else None
+        present, value = _explicit_flag(line, _ATTACHMENT_KEY, _ATTACHMENT_FIELD)
+        if not present:
+            return assigned, active, False
+        if b"assignedStreamRole" in line and (
+                line.count(b"assignedStreamRole") != 1
+                or len(_ASSIGNED_ROLE_FIELD.findall(line)) != 1):
+            return None, active, False
+        prior = role if assigned is None else assigned
+        if value is True and prior in (None, "owner") and _single_thread_identity(line):
+            return assigned, active, True
+        # Explicit false, malformed or conflicting fields: reject both.
+        return None, active, False
+    if b"maybe_resume_failed" in line or b"inactive_thread_unsubscribed" in line:
+        return None, None, False
+    if b"thread_stream_view_activity_changed" in line:
+        match = _ACTIVE_FIELD.search(line)
+        active = match.group(1) == b"true" if match is not None else None
+        present, value = _explicit_flag(line, _VIEW_HISTORY_KEY, _VIEW_HISTORY_FIELD)
+        if attached or present:
+            values = _ACTIVE_VALUE_FIELD.findall(line)
+            if (len(values) != 1 or values[0] not in (b"true", b"false")
+                    or not _single_thread_identity(line)):
+                return None, None, False
+        if present and value is not True:
+            attached = False
+        return role, active, attached
+    return None
+
+
+def _history_attached_resolution(
+    loaded: Iterable[str],
+    states: Dict[str, Tuple[Optional[str], Optional[bool]]],
+    attached: Iterable[str],
+    window_sessions: Optional[set],
+    current: Sequence["LiveVSCodeWindow"],
+    codex_home: Path,
+    writer_process_probe: Callable[[Path], Optional[int]],
+    lock_probe: WriterLockProbe,
+    work_live: Optional[Callable[[], bool]] = None,
+) -> Optional["SessionResolution"]:
+    """Select a new-format attached thread only with exact OS writer proof.
+
+    ``None`` means no loaded thread carries attachment evidence. Otherwise the
+    attachment must be unique, explicitly active, without a legacy role, in a
+    readable non-conflicting window cache, in exactly one live window whose
+    app-server PID is the actual writer of a held lock, with no other loaded
+    thread that may belong to this same app-server and is not explicitly inactive.
+    """
+    loaded = set(loaded)
+    evidence = sorted(session for session in loaded.intersection(attached)
+                      if states.get(session, (None, None))[1] is not False)
+    if not evidence:
+        return None
+    refused = SessionResolution(
+        "unresolved", None, None, "vscode_history_attachment_unverified")
+    if (len(evidence) != 1 or window_sessions is None or len(current) != 1
+            or (work_live is not None and not work_live())):
+        return refused
+    session = evidence[0]
+    pid = current[0].codex_app_server_pid
+    if (states.get(session) != (None, True) or pid is None
+            or (window_sessions and session not in window_sessions)):
+        return refused
+    locks = Path(codex_home) / "thread-writer-locks"
+    for other in sorted(loaded - {session}):
+        if states.get(other, (None, None))[1] is False:
+            continue
+        if work_live is not None and not work_live():
+            return refused
+        other_pid = writer_process_probe(locks / f"{other}.lock")
+        if other_pid is None or other_pid == pid:
+            return refused
+    lock = locks / f"{session}.lock"
+    if work_live is not None and not work_live():
+        return refused
+    if (writer_process_probe(lock) != pid or not lock_probe(lock)
+            or (work_live is not None and not work_live())):
+        return refused
+    return SessionResolution("resolved", session, HISTORY_ATTACHED_SOURCE, None)
+
+
 def _codex_log_session_evidence(path: Path, session_ids: Iterable[str]):
     states = {session: (None, None) for session in session_ids
               if _canonical_session_id(session) == session}
+    attached: set = set()
     if not states or not path.is_file():
-        return states, None
+        return states, None, attached
     markers = set()
     conversation = re.compile(
         rb"(?:^|\s)conversationId=(" + b"|".join(
@@ -227,41 +362,25 @@ def _codex_log_session_evidence(path: Path, session_ids: Iterable[str]):
                 if b"[CodexMcpConnection] Spawning codex app-server" in line:
                     states = dict.fromkeys(states, (None, None))
                     markers.clear()
+                    attached.clear()
                     continue
                 matched = conversation.search(line)
                 if matched is None:
                     continue
                 session = matched.group(1).decode("ascii")
                 role, active = states[session]
-                if b"thread_stream_role_changed" in line:
+                step = _routing_transition(line, (role, active, session in attached))
+                if step is not None:
                     markers.add(session)
-                    role = None
-                    match = re.search(rb"(?:^|\s)role=([^\s]+)(?=\s|$)", line)
-                    if match is not None:
-                        role = match.group(1).decode("ascii", errors="ignore")
-                elif b"maybe_resume_success" in line:
-                    markers.add(session)
-                    role = None
-                    match = re.search(
-                        rb"(?:^|\s)assignedStreamRole=([^\s]+)(?=\s|$)", line
-                    )
-                    if match is not None:
-                        role = match.group(1).decode("ascii", errors="ignore")
-                elif (
-                    b"maybe_resume_failed" in line
-                    or b"inactive_thread_unsubscribed" in line
-                ):
-                    markers.add(session)
-                    role = None
-                    active = None
-                elif b"thread_stream_view_activity_changed" in line:
-                    markers.add(session)
-                    match = re.search(rb"(?:^|\s)active=(true|false)(?=\s|$)", line)
-                    active = match.group(1) == b"true" if match is not None else None
+                    role, active, is_attached = step
+                    if is_attached:
+                        attached.add(session)
+                    else:
+                        attached.discard(session)
                 states[session] = (role, active)
     except OSError:
-        return dict.fromkeys(states, (None, None)), None
-    return states, markers
+        return dict.fromkeys(states, (None, None)), None, set()
+    return states, markers, attached
 
 
 @dataclass(frozen=True)
@@ -491,7 +610,7 @@ class CodexSessionResolver:
         )
         identities = {_path_identity(path) for path in paths}
         loaded, database_status = self._database_candidates(identities)
-        states, markers = _codex_log_session_evidence(codex_log, loaded)
+        states, markers, attached = _codex_log_session_evidence(codex_log, loaded)
         database_candidates = {
             session for session in loaded if self.owner_probe(codex_log, session)
         }
@@ -522,6 +641,18 @@ class CodexSessionResolver:
             if not self.lock_probe(lock):
                 return SessionResolution("unresolved", None, None, "vscode_thread_owner_unverified")
         database_candidates.update(followers)
+
+        # Current extensions omit legacy roles and report only a local history
+        # attachment. It never becomes an owner role; the exact live window's
+        # OS writer must independently prove the association.
+        if not database_candidates:
+            attachment = _history_attached_resolution(
+                loaded, states, attached, window_sessions,
+                [window for window in live_windows if window.codex_log == codex_log],
+                self.codex_home, self.writer_process_probe, self.lock_probe,
+            )
+            if attachment is not None:
+                return attachment
 
         # Native logs and the window cache can both lose their earlier session
         # evidence while the same App Server still owns a thread. A unique

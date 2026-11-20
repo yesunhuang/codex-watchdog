@@ -48,7 +48,9 @@ from .workspace_discovery import (
     SessionResolution,
     VSCodeLiveWindowIndex,
     _canonical_session_id,
+    _history_attached_resolution,
     _path_identity,
+    _routing_transition,
 )
 
 
@@ -96,9 +98,6 @@ _HOST_TERMINATING = re.compile(rb"Extension host terminating:", re.IGNORECASE)
 _STORAGE = re.compile(rb"workspaceStorage[\\/]([^\\/\s.]+)", re.IGNORECASE)
 _SPAWN = b"[CodexMcpConnection] Spawning codex app-server"
 _CONVERSATION = re.compile(rb"(?:^|\s)conversationId=([^\s]+)(?=\s|$)")
-_ROLE = re.compile(rb"(?:^|\s)role=([^\s]+)(?=\s|$)")
-_ASSIGNED_ROLE = re.compile(rb"(?:^|\s)assignedStreamRole=([^\s]+)(?=\s|$)")
-_ACTIVE = re.compile(rb"(?:^|\s)active=(true|false)(?=\s|$)")
 _USER_DATA_DIR = re.compile(r'--user-data-dir=(?:"([^"]*)"|(\S+))')
 _UTILITY_HOST = re.compile(r"(?:^|\s)--type=utility(?:\s|$)")
 _LEGACY_HOST = re.compile(r"(?:^|\s)--type=extensionHost(?:\s|$)")
@@ -225,6 +224,8 @@ class CodexLogGeneration:
     spawn_line: bytes
     states: Dict[str, Tuple[Optional[str], Optional[bool]]]
     markers: FrozenSet[str]
+    # New-format history attachments; never a legacy owner role.
+    attached: FrozenSet[str] = frozenset()
 
 
 def _lines(data: bytes, base: int) -> Iterator[Tuple[int, bytes]]:
@@ -774,36 +775,32 @@ class WindowsNativeCollector:
         """Same routing-marker rules as the shared resolver, for all thread IDs."""
         states: Dict[str, Tuple[Optional[str], Optional[bool]]] = {}
         markers = set()
+        attached = set()
         spawn: Optional[Tuple[int, bytes]] = None
         for offset, line in _lines(data, base):
             if _SPAWN in line:
-                states, markers = {}, set()
+                states, markers, attached = {}, set(), set()
                 spawn = (offset, line.rstrip(b"\r\n"))
                 continue
             session = _conversation(line)
             if session is None:
                 continue
             role, active = states.get(session, (None, None))
-            if b"thread_stream_role_changed" in line:
-                match = _ROLE.search(line)
-                role = match.group(1).decode("ascii", errors="ignore") if match else None
-            elif b"maybe_resume_success" in line:
-                match = _ASSIGNED_ROLE.search(line)
-                role = match.group(1).decode("ascii", errors="ignore") if match else None
-            elif b"maybe_resume_failed" in line or b"inactive_thread_unsubscribed" in line:
-                role = active = None
-            elif b"thread_stream_view_activity_changed" in line:
-                match = _ACTIVE.search(line)
-                active = match.group(1) == b"true" if match is not None else None
-            else:
+            step = _routing_transition(line, (role, active, session in attached))
+            if step is None:
                 continue
+            role, active, is_attached = step
+            if is_attached:
+                attached.add(session)
+            else:
+                attached.discard(session)
             markers.add(session)
             states[session] = (role, active)
         return CodexLogGeneration(
             self._stamp(spawn[1]) if spawn is not None else None,
             spawn[0] if spawn is not None else None,
             spawn[1] if spawn is not None else b"",
-            states, frozenset(markers),
+            states, frozenset(markers), frozenset(attached),
         )
 
     def codex_generation(self, codex_log: Path, budget: WorkBudget) -> Optional[CodexLogGeneration]:
@@ -966,6 +963,12 @@ class WindowsNativeCollector:
         generation = self.codex_generation(
             codex_log, WorkBudget(self.clock) if budget is None else budget)
         return generation.spawn_ms if generation is not None else None
+
+
+def _attached_view(generation: CodexLogGeneration, session: str) -> bool:
+    """Explicitly active new-format attachment without any legacy role."""
+    return (session in generation.attached
+            and generation.states.get(session) == (None, True))
 
 
 def _windows_identity(value: str) -> str:
@@ -1280,6 +1283,7 @@ class WindowsVSCodeLiveWindowIndex(VSCodeLiveWindowIndex):
             return unresolved(_DEFERRED if budget.reason else "vscode_codex_log_unavailable")
         relevant = {session for session, state in evidence.states.items()
                     if state[0] == "owner" or state == ("follower", True)}
+        relevant |= evidence.attached
         if len(relevant) > SESSION_LOOKUP_LIMIT:
             return unresolved("ambiguous_loaded_threads")
         # A cache too large to check exactly cannot support marker-less selection.
@@ -1310,9 +1314,21 @@ class WindowsVSCodeLiveWindowIndex(VSCodeLiveWindowIndex):
                 return unresolved("vscode_thread_owner_unverified")
         candidates |= followers
 
+        # The shared new-format history-attachment rule; never an owner role.
+        if not candidates:
+            attachment = _history_attached_resolution(
+                loaded, states, evidence.attached, window_sessions if complete else None,
+                [window for window in live_windows if window.codex_log == codex_log],
+                resolver.codex_home, resolver.writer_process_probe, resolver.lock_probe,
+                budget.live,
+            )
+            if attachment is not None:
+                return attachment
+
         # The shared resolver's unique exact OS-writer rule, restricted to a
         # cached thread; admission of a native-only window still requires an
-        # explicit owner marker, so this never selects a fallback owner.
+        # explicit owner marker or active attachment, so this never selects a
+        # fallback owner.
         if not candidates and complete and len(loaded) == 1:
             session = next(iter(loaded))
             current = [window for window in live_windows if window.codex_log == codex_log]
@@ -1399,7 +1415,10 @@ class WindowsVSCodeLiveWindowIndex(VSCodeLiveWindowIndex):
             return refuse("follower_rejected")
         if active is False:
             return refuse("inactive_rejected")
-        if role != "owner":
+        # A new-format attachment substitutes for the legacy owner marker only
+        # when explicitly active; the exact writer/generation/selection proofs
+        # below remain mandatory and are never relaxed for it.
+        if role != "owner" and not _attached_view(evidence, session):
             return refuse("owner_unverified")
         # Recent VS Code exposes a valid empty cache for live Codex views.
         # It is absence, not contradiction; explicit role plus exact held writer
@@ -1451,7 +1470,7 @@ class WindowsVSCodeLiveWindowIndex(VSCodeLiveWindowIndex):
                 or (fresh.spawn_offset, fresh.spawn_ms) != (proof.codex_offset, proof.spawn_ms)):
             return "stale_app_server_generation"
         role, active = fresh.states.get(session, (None, None))
-        if role != "owner" or active is False:
+        if not ((role == "owner" and active is not False) or _attached_view(fresh, session)):
             return "selection_changed"
         cached = self._cache_sessions(database, budget)
         if cached is None or (cached and session not in cached):
