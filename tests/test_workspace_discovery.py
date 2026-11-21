@@ -1787,3 +1787,184 @@ def test_new_format_writer_probe_cannot_outlive_work_budget(tmp_path: Path) -> N
         writer, lambda _path: True, lambda: live[0],
     )
     assert resolution.status == "unresolved"
+
+
+# A genuinely new conversation: same generation, no maybe_resume_success.
+FRESH_ACTIVITY = (
+    "[extension-app-server-manager] thread_stream_view_activity_changed active={active} "
+    "conversationId={sid} historyAttached={history} resumeState=resumed\n"
+)
+FRESH_CREATED = (
+    "[extension-app-server-manager] Conversation created beforeConversationAddedDurationMs=104 "
+    "conversationId={sid} durationMs=442 threadId={thread} threadStartKind=default "
+    "usedPrewarmedThread=false vmEvent={event} vmProduct=unknown\n"
+)
+SPAWN_LINE = "[CodexMcpConnection] Spawning codex app-server\n"
+
+
+def fresh_activity(sid=SESSION_CURRENT, active="true", history="true"):
+    return FRESH_ACTIVITY.format(sid=sid, active=active, history=history)
+
+
+def fresh_created(sid=SESSION_CURRENT, thread=None, event="thread_created"):
+    return FRESH_CREATED.format(sid=sid, thread=thread or sid, event=event)
+
+
+def fresh_creation_discovery(tmp_path: Path, body: str = None):
+    """Valid empty cache and exact sole writer, as in ``new_format_discovery``."""
+    discovery, target_log, windows = new_format_discovery(tmp_path)
+    if body is None:
+        body = fresh_activity() + fresh_created()
+    target_log.write_text(SPAWN_LINE + body, encoding="utf-8")
+    return discovery, target_log, windows
+
+
+def test_fresh_conversation_creation_selects_exact_writer_with_empty_cache(tmp_path: Path) -> None:
+    discovery, target_log, _windows = fresh_creation_discovery(tmp_path)
+
+    snapshot = discovery.snapshot()
+
+    target = target_window(snapshot)
+    assert target.session_id == SESSION_CURRENT
+    assert target.session_source == HISTORY_ATTACHED_SOURCE
+    assert target.reason is None
+    assert {item.repo_root.name: item.session_id for item in snapshot.effective_workspaces} == {
+        "target": SESSION_CURRENT, "other": SESSION_OTHER,
+    }
+    # Creation is an attachment, never a legacy owner role.
+    assert codex_log_owns_session(target_log, SESSION_CURRENT) is False
+
+
+def test_fresh_conversation_is_not_poisoned_by_prior_failed_thread(tmp_path: Path) -> None:
+    from codex_watchdog.workspace_discovery import _codex_log_session_evidence
+    # The old thread is armed and then fails in the same window/generation.
+    prior = (fresh_activity(SESSION_OLD)
+             + f"maybe_resume_failed conversationId={SESSION_OLD}\n"
+             + f"thread_stream_view_activity_changed active=false conversationId={SESSION_OLD}\n")
+    discovery, target_log, _windows = fresh_creation_discovery(
+        tmp_path, prior + fresh_activity() + fresh_created())
+    with sqlite3.connect(str(tmp_path / ".codex/state_5.sqlite")) as db:
+        db.execute("INSERT INTO threads VALUES (?, ?, 'vscode', 'user', 0)",
+                   (SESSION_OLD, str(tmp_path / "target")))
+
+    _states, _markers, attached = _codex_log_session_evidence(
+        target_log, (SESSION_CURRENT, SESSION_OLD))
+    target = target_window(discovery.snapshot())
+
+    assert attached == {SESSION_CURRENT}
+    assert target.session_id == SESSION_CURRENT
+    assert target.session_source == HISTORY_ATTACHED_SOURCE
+
+
+def test_fresh_creation_state_is_per_exact_session(tmp_path: Path) -> None:
+    from codex_watchdog.workspace_discovery import _codex_log_session_evidence
+    log = tmp_path / "Codex.log"
+    # Another SID's activity never arms this SID, and vice versa.
+    log.write_text(SPAWN_LINE + fresh_activity(SESSION_OLD) + fresh_created(SESSION_CURRENT)
+                   + fresh_activity(SESSION_CURRENT) + fresh_created(SESSION_OLD, SESSION_CURRENT),
+                   encoding="utf-8")
+
+    assert _codex_log_session_evidence(log, (SESSION_CURRENT, SESSION_OLD))[2] == set()
+
+
+def _embedded_creation(sid=SESSION_CURRENT):
+    return ("[extension-app-server-manager] request_logged message=[extension-app-server-manager] "
+            f"Conversation created conversationId={sid} threadId={sid} vmEvent=thread_created\n")
+
+
+_FRESH_REFUSALS = {
+    "bare_activity": fresh_activity(),
+    "bare_creation": fresh_created(),
+    "creation_before_activity": fresh_created() + fresh_activity(),
+    "mismatched_thread": fresh_activity() + fresh_created(thread=SESSION_OTHER),
+    "missing_thread": fresh_activity() + fresh_created().replace(
+        f"threadId={SESSION_CURRENT} ", ""),
+    "duplicate_conversation": fresh_activity() + fresh_created().replace(
+        "durationMs=442", f"durationMs=442 conversationId={SESSION_CURRENT}"),
+    "duplicate_thread": fresh_activity() + fresh_created().replace(
+        "durationMs=442", f"durationMs=442 threadId={SESSION_CURRENT}"),
+    "wrong_vm_event": fresh_activity() + fresh_created(event="thread_resumed"),
+    "duplicate_vm_event": fresh_activity() + fresh_created().replace(
+        "vmProduct=unknown", "vmEvent=thread_created vmProduct=unknown"),
+    "embedded_phrase": fresh_activity() + _embedded_creation(),
+    "history_false": fresh_activity(history="false") + fresh_created(),
+    "history_malformed": fresh_activity(history="yes") + fresh_created(),
+    "history_duplicate": fresh_activity(history="true historyAttached=true") + fresh_created(),
+    "active_false": fresh_activity(active="false") + fresh_created(),
+    "active_malformed": fresh_activity(active="yes") + fresh_created(),
+    "active_duplicate": fresh_activity(active="true active=true") + fresh_created(),
+    "activity_conflicting_thread": fresh_activity().replace(
+        "resumeState", f"threadId={SESSION_OTHER} resumeState") + fresh_created(),
+    "follower_before": (f"thread_stream_role_changed conversationId={SESSION_CURRENT} role=follower\n"
+                        + fresh_activity() + fresh_created()),
+    "unknown_role_before": (f"thread_stream_role_changed conversationId={SESSION_CURRENT} role=unknown\n"
+                            + fresh_activity() + fresh_created()),
+    "follower_between": (fresh_activity()
+                         + f"thread_stream_role_changed conversationId={SESSION_CURRENT} role=follower\n"
+                         + fresh_created()),
+    "inactive_between": (fresh_activity()
+                         + f"thread_stream_view_activity_changed active=false conversationId={SESSION_CURRENT}\n"
+                         + fresh_created()),
+    "history_false_between": fresh_activity() + fresh_activity(history="false") + fresh_created(),
+    "resume_failed_between": (fresh_activity() + f"maybe_resume_failed conversationId={SESSION_CURRENT}\n"
+                              + fresh_created()),
+    "unsubscribed_between": (fresh_activity()
+                             + f"inactive_thread_unsubscribed conversationId={SESSION_CURRENT}\n"
+                             + fresh_created()),
+    "failure_not_resurrected_by_unrelated_line": (
+        fresh_activity() + f"maybe_resume_failed conversationId={SESSION_CURRENT}\n"
+        + f"[extension-app-server-manager] unrelated_event conversationId={SESSION_CURRENT}\n"
+        + fresh_created()),
+    "resume_failed_after": (fresh_activity() + fresh_created()
+                            + f"maybe_resume_failed conversationId={SESSION_CURRENT}\n"),
+    "unsubscribed_after": (fresh_activity() + fresh_created()
+                           + f"inactive_thread_unsubscribed conversationId={SESSION_CURRENT}\n"),
+    "revoked_by_activity_after": fresh_activity() + fresh_created() + fresh_activity(history="false"),
+    "generation_split": fresh_activity() + SPAWN_LINE + fresh_created(),
+    "generation_reset_then_unattached_activity": (
+        fresh_activity() + fresh_created() + SPAWN_LINE + fresh_activity(history="false")),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_FRESH_REFUSALS) + [
+    "peer_writer", "no_writer", "unavailable_cache", "conflicting_cache", "duplicate_window",
+])
+def test_fresh_conversation_creation_fails_closed(tmp_path: Path, case: str) -> None:
+    discovery, target_log, windows = fresh_creation_discovery(tmp_path, _FRESH_REFUSALS.get(case))
+    resolver = discovery.session_resolver
+    if case == "peer_writer":
+        resolver.writer_process_probe = lambda _path: 201
+    elif case == "no_writer":
+        resolver.writer_process_probe = lambda _path: None
+    elif case == "unavailable_cache":
+        resolver.window_session_candidates = lambda _path: None
+    elif case == "conflicting_cache":
+        resolver.window_session_candidates = lambda _path: {SESSION_OTHER}
+    elif case == "duplicate_window":
+        windows["duplicate"] = LiveVSCodeWindow("3", 300, 101, target_log)
+
+    snapshot = discovery.snapshot()
+
+    target = target_window(snapshot)
+    assert target.session_id is None
+    assert target.tracking_status == "unresolved"
+    if case in _FRESH_REFUSALS:  # Log-only refusals stay local to the refused window.
+        assert {item.repo_root.name: item.session_id
+                for item in snapshot.effective_workspaces}.get("other") == SESSION_OTHER
+
+
+def test_fresh_creation_generation_reset_does_not_reuse_attachment(tmp_path: Path) -> None:
+    from codex_watchdog.workspace_discovery import _codex_log_session_evidence
+    discovery, log, _windows = fresh_creation_discovery(
+        tmp_path, fresh_activity() + fresh_created() + SPAWN_LINE)
+
+    states, markers, attached = _codex_log_session_evidence(log, (SESSION_CURRENT,))
+
+    assert states[SESSION_CURRENT] == (None, None)
+    assert markers == set()
+    assert attached == set()
+    # Existing marker-less recovery still independently proves the actual OS
+    # writer; it must not be mislabeled as an earlier generation's attachment.
+    target = target_window(discovery.snapshot())
+    assert target.session_id == SESSION_CURRENT
+    assert target.session_source == "codex_state_vscode_native_writer"

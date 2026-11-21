@@ -292,6 +292,79 @@ def _routing_transition(line: bytes, state: RoutingState) -> Optional[RoutingSta
     return None
 
 
+# Typed fresh-creation event: the manager tag must open the log message (after
+# only a timestamp and bracketed level/tags), so the phrase quoted inside some
+# other line's field or message text is never a creation event.
+_CREATED_EVENT = re.compile(
+    rb"^[0-9TZ:+\-., ]*(?:\[[^\]\s=]*\]\s+)*"
+    rb"\[extension-app-server-manager\] Conversation created(?=\s)"
+)
+_VM_EVENT_FIELD = re.compile(rb"(?:^|\s)vmEvent=([^\s]*)(?=\s|$)")
+_ROUTING_MARKERS = (
+    b"thread_stream_role_changed", b"maybe_resume_success", b"maybe_resume_failed",
+    b"inactive_thread_unsubscribed", b"thread_stream_view_activity_changed",
+)
+
+
+def _fresh_creation_identity(line: bytes) -> bool:
+    """One ``vmEvent=thread_created`` for one conversationId == one threadId."""
+    conversations = _CONVERSATION_FIELD.findall(line)
+    threads = _THREAD_FIELD.findall(line)
+    return (line.count(b"Conversation created") == 1
+            and line.count(b"conversationId") == 1 and line.count(b"threadId") == 1
+            and len(conversations) == 1 and threads == conversations
+            and line.count(b"vmEvent") == 1
+            and _VM_EVENT_FIELD.findall(line) == [b"thread_created"])
+
+
+def _arms_fresh_creation(line: bytes, step: RoutingState) -> bool:
+    """A single explicit ``active=true historyAttached=true`` activity line."""
+    role, active, _attached = step
+    if (role is not None or active is not True
+            or line.count(b"thread_stream_view_activity_changed") != 1
+            or any(marker in line for marker in _ROUTING_MARKERS[:4])):
+        return False
+    present, value = _explicit_flag(line, _VIEW_HISTORY_KEY, _VIEW_HISTORY_FIELD)
+    # With historyAttached present, _routing_transition already required one
+    # boolean active field and a single nonconflicting conversation identity.
+    return present and value is True
+
+
+def _session_routing_step(
+    line: bytes, state: RoutingState, armed: bool,
+) -> Tuple[Optional[RoutingState], bool]:
+    """Generation-local routing step for one exact SID: ``(step, armed)``.
+
+    ``armed`` is the only extra state: the SID's most recent routing line in
+    this App Server generation was an explicit single ``active=true
+    historyAttached=true`` view with no legacy role. A genuinely new
+    conversation has no ``maybe_resume_success``; only the typed
+    ``Conversation created ... vmEvent=thread_created`` event for that same
+    SID, with an identical threadId, then sets the history attachment. Any
+    other routing line re-derives ``armed`` (so false, inactive, failed,
+    unsubscribed, role and malformed evidence disarm it), creation consumes
+    it, and callers reset it with every other state at each spawn. Unrelated
+    non-routing lines leave it unchanged but can never arm it.
+    """
+    if _CREATED_EVENT.match(line) is not None:
+        role, active, _attached = state
+        if any(marker in line for marker in _ROUTING_MARKERS):
+            return (None, None, False), False
+        if not armed:
+            # Keep this explicit routing marker even when it cannot initialize
+            # an attachment. Otherwise a bare creation (including one after a
+            # spawn reset) could fall through to marker-less native recovery.
+            return state, False
+        if role is None and active is True and _fresh_creation_identity(line):
+            # A history attachment only; never a legacy owner role.
+            return (None, True, True), False
+        return (None, None, False), False
+    step = _routing_transition(line, state)
+    if step is None:
+        return None, armed
+    return step, _arms_fresh_creation(line, step)
+
+
 def _history_attached_resolution(
     loaded: Iterable[str],
     states: Dict[str, Tuple[Optional[str], Optional[bool]]],
@@ -351,6 +424,7 @@ def _codex_log_session_evidence(path: Path, session_ids: Iterable[str]):
     if not states or not path.is_file():
         return states, None, attached
     markers = set()
+    armed: set = set()  # Generation-local fresh-creation precondition per SID.
     conversation = re.compile(
         rb"(?:^|\s)conversationId=(" + b"|".join(
             re.escape(session.encode("ascii")) for session in states
@@ -363,13 +437,19 @@ def _codex_log_session_evidence(path: Path, session_ids: Iterable[str]):
                     states = dict.fromkeys(states, (None, None))
                     markers.clear()
                     attached.clear()
+                    armed.clear()
                     continue
                 matched = conversation.search(line)
                 if matched is None:
                     continue
                 session = matched.group(1).decode("ascii")
                 role, active = states[session]
-                step = _routing_transition(line, (role, active, session in attached))
+                step, is_armed = _session_routing_step(
+                    line, (role, active, session in attached), session in armed)
+                if is_armed:
+                    armed.add(session)
+                else:
+                    armed.discard(session)
                 if step is not None:
                     markers.add(session)
                     role, active, is_attached = step

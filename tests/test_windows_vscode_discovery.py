@@ -626,6 +626,109 @@ def test_fallback_admission_never_treats_bare_attachment_as_owner(tmp_path):
     assert refused.reason == "windows_native_owner_unverified"
 
 
+def write_fresh_creation(fixture, number, *, role="", history="true", thread=None,
+                         activity=True, created=True, between="", extra=""):
+    """A genuinely new conversation: no maybe_resume_success, valid empty cache."""
+    item = fixture.windows[number]
+    sid, at = item["session"], item["spawn_ms"]
+    lines = []
+    if activity:
+        lines.append(f"{stamp(at + 70)} [info] [extension-app-server-manager] "
+                     f"thread_stream_view_activity_changed active=true conversationId={sid} "
+                     f"historyAttached={history} resumeState=resumed\n")
+    lines.append(between)
+    if created:
+        lines.append(f"{stamp(at + 80)} [info] [extension-app-server-manager] Conversation created "
+                     f"beforeConversationAddedDurationMs=104 conversationId={sid} durationMs=442 "
+                     f"threadId={thread or sid} threadStartKind=default "
+                     "usedPrewarmedThread=false vmEvent=thread_created vmProduct=unknown\n")
+    fixture.write_codex_log(number, role=role, active="", extra="".join(lines) + extra)
+    fixture.set_cache(number, [])
+
+
+@windows_host
+@pytest.mark.parametrize("cli", [False, True], ids=("native-fallback", "valid-cli"))
+def test_fresh_conversation_creation_recovers_exact_session(tmp_path, cli):
+    fixture = Fixture(tmp_path)
+    write_fresh_creation(fixture, 1)
+    probe = (VSCodeStatusProbe("available", "vscode_status_available", "windows_user_install",
+                               fixture.status((1, 2, 3))) if cli else None)
+
+    snapshot = fixture.discovery(probe).snapshot()
+
+    item = fixture.windows[1]
+    assert tracked(snapshot)[item["repo"].name] == (
+        item["session"], HISTORY_ATTACHED_SOURCE if cli else FALLBACK_SOURCE)
+    assert_healthy(snapshot, fixture, (2, 3),
+                   "codex_state_vscode_window_cache_owner" if cli else FALLBACK_SOURCE)
+
+
+def test_fresh_creation_generation_matches_shared_parser(tmp_path):
+    fixture = Fixture(tmp_path)
+    write_fresh_creation(fixture, 1)
+    item = fixture.windows[1]
+    data = item["codex_log"].read_bytes()
+
+    generation = fixture.index().collector.codex_log_generation(data)
+
+    assert generation.attached == frozenset({item["session"]})
+    assert generation.states[item["session"]] == (None, True)
+    assert workspace_discovery._codex_log_session_evidence(
+        item["codex_log"], (item["session"],))[2] == {item["session"]}
+
+
+def _break_fresh_creation(fixture, case):
+    item = fixture.windows[1]
+    sid, reader = item["session"], fixture.reader
+    spawn = (f"{stamp(item['app_ms'] + 10)} [info] [CodexMcpConnection] "
+             "Spawning codex app-server\n")
+    options = {
+        "bare_activity": dict(created=False),
+        "bare_creation": dict(activity=False),
+        "mismatched_thread": dict(thread=str(uuid.uuid4())),
+        "history_false": dict(history="false"),
+        "history_malformed": dict(history="1"),
+        "follower": dict(role="follower"),
+        "unknown_role": dict(role="unknown"),
+        "resume_failed_between": dict(between=f"maybe_resume_failed conversationId={sid}\n"),
+        "unsubscribed_after": dict(extra=f"inactive_thread_unsubscribed conversationId={sid}\n"),
+        "inactive_after": dict(
+            extra=f"thread_stream_view_activity_changed active=false conversationId={sid}\n"),
+        "generation_split": dict(between=spawn),
+    }.get(case, {})
+    write_fresh_creation(fixture, 1, **options)
+    if case == "peer_writer":
+        other = fixture.windows[2]
+        reader.writers[sid] = (other["app"], filetime(other["app_ms"]))
+    elif case == "lock_not_held":
+        reader.held.discard(sid)
+    elif case == "conflicting_cache":
+        fixture.set_cache(1, [str(uuid.uuid4())])
+
+
+@windows_host
+@pytest.mark.parametrize("cli", [False, True], ids=("native-fallback", "valid-cli"))
+@pytest.mark.parametrize("case", [
+    "bare_activity", "bare_creation", "mismatched_thread", "history_false",
+    "history_malformed", "follower", "unknown_role", "resume_failed_between",
+    "unsubscribed_after", "inactive_after", "generation_split", "peer_writer",
+    "lock_not_held", "conflicting_cache",
+])
+def test_fresh_conversation_creation_refusals_stay_local(tmp_path, case, cli):
+    fixture = Fixture(tmp_path)
+    _break_fresh_creation(fixture, case)
+    probe = (VSCodeStatusProbe("available", "vscode_status_available", "windows_user_install",
+                               fixture.status((1, 2, 3))) if cli else None)
+
+    snapshot = fixture.discovery(probe).snapshot()
+
+    assert "repo1" not in tracked(snapshot)
+    assert fixture.windows[1]["session"] not in {
+        item.session_id for item in snapshot.effective_workspaces}
+    assert_healthy(snapshot, fixture, (2, 3),
+                   "codex_state_vscode_window_cache_owner" if cli else FALLBACK_SOURCE)
+
+
 @windows_host
 def test_historical_logs_and_sessions_are_not_read(tmp_path):
     fixture = Fixture(tmp_path)

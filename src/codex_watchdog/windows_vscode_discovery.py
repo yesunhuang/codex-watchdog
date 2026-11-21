@@ -50,7 +50,7 @@ from .workspace_discovery import (
     _canonical_session_id,
     _history_attached_resolution,
     _path_identity,
-    _routing_transition,
+    _session_routing_step,
 )
 
 
@@ -776,17 +776,23 @@ class WindowsNativeCollector:
         states: Dict[str, Tuple[Optional[str], Optional[bool]]] = {}
         markers = set()
         attached = set()
+        armed = set()  # Generation-local fresh-creation precondition per SID.
         spawn: Optional[Tuple[int, bytes]] = None
         for offset, line in _lines(data, base):
             if _SPAWN in line:
-                states, markers, attached = {}, set(), set()
+                states, markers, attached, armed = {}, set(), set(), set()
                 spawn = (offset, line.rstrip(b"\r\n"))
                 continue
             session = _conversation(line)
             if session is None:
                 continue
             role, active = states.get(session, (None, None))
-            step = _routing_transition(line, (role, active, session in attached))
+            step, is_armed = _session_routing_step(
+                line, (role, active, session in attached), session in armed)
+            if is_armed:
+                armed.add(session)
+            else:
+                armed.discard(session)
             if step is None:
                 continue
             role, active, is_attached = step

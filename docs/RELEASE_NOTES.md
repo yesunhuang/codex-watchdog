@@ -1,22 +1,16 @@
-# Codex WatchDog 2.3.11
+# Codex WatchDog 2.3.12
 
-Restore automatic discovery of existing local VS Code Codex conversations after
-the extension changed its routing metadata and began leaving the session cache
-empty. New history-attachment evidence is accepted only with an active view,
-one matching live app-server window and its independently held native writer.
-It never grants ownership or creates a conversation on its own.
+Fix automatic discovery of newly created VS Code Codex conversations when the
+extension emits fresh-creation metadata instead of a resume-success event.
+Current-generation active history attachment and matching typed creation
+evidence remain separate from ownership. Selection still requires one exact
+live window and its independently verified same-user held native writer.
 
-macOS now supplies the missing read-only writer association using supported
-exact-file lsof queries, a shared two-second query deadline and a 64 KiB input
-cap. File identity, sole same-user opener, held lock and exact live process
-generation are resampled. Ambiguity, failures, stale generations, released locks
-and malformed evidence refuse. Legacy Windows/Linux writer branches and
-owner/follower behavior remain intact. Only the helper's inspection child may
-be terminated; native Codex writers are never controlled by this query.
+Existing resume and legacy owner/follower paths are preserved. Bare activity,
+ambiguous or malformed identities, follower evidence, stale generations and
+released or different writers remain rejected. Saved settings, secure stores,
+routes, grants, queues and delivery reservations are preserved without replay.
 
-Saved profiles, secure credentials, routes, registrations, grants, queues and
-delivery records are preserved. Existing headless node monitoring and legacy
-Remote-SSH inspection are unchanged. Windows x64, Linux x64/ARM64 and macOS
-ARM64 preview are rebuilt from the same source. The upgrade predecessor is
-previous public version 2.3.9. Existing package, icon, privacy and native checks
-remain; macOS is a preview with its documented startup prerequisites.
+All affected Windows x64, Linux x64/ARM64 and macOS ARM64 preview packages are
+built from the same canonical source. Windows upgrade acceptance uses previous
+public version 2.3.11. Existing icon, privacy, package and native gates remain.
