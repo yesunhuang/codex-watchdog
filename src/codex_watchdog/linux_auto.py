@@ -1,6 +1,7 @@
 """Persistent Linux mode composed from the existing exact-thread owner/service."""
 
 from contextlib import ExitStack, nullcontext
+from dataclasses import replace
 import json
 from pathlib import Path
 import signal
@@ -239,7 +240,12 @@ class LinuxAutoWatchdog:
         lifecycle={"status":"UNKNOWN","notifications":()}
         binding=getattr(item["owner"],"binding",None)
         if binding is not None and hasattr(service,"_lifecycle_state"):
-            lifecycle=service._lifecycle_state(binding.workspace(binding.load()))
+            workspace = binding.workspace(binding.load())
+            from .linux_attachment import native_reattachment_at
+            attached_at = native_reattachment_at(binding.codex_home, workspace)
+            if attached_at is not None:
+                workspace = replace(workspace, attachment_at=attached_at)
+            lifecycle=service._lifecycle_state(workspace)
         probe = service.remote_control.probe(target, token)
         if probe.get("status") != "ok":
             raise ControlError(probe.get("reason", "control_probe_failed"))

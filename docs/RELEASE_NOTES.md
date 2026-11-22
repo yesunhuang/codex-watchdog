@@ -1,16 +1,18 @@
-# Codex WatchDog 2.3.12
+# Codex WatchDog 2.3.13
 
-Fix automatic discovery of newly created VS Code Codex conversations when the
-extension emits fresh-creation metadata instead of a resume-success event.
-Current-generation active history attachment and matching typed creation
-evidence remain separate from ownership. Selection still requires one exact
-live window and its independently verified same-user held native writer.
+Fix inactive lifecycle state surviving a genuine reopen of an existing Codex
+conversation. A verified current-owner resume or fresh-creation event now
+reactivates that original conversation once. On Linux, a newly attached exact
+editor writer can supply its immutable kernel birth as the activation signal.
+Repeated discovery, stable writer presence and daemon restart never refresh
+activity, create repeated activation greetings or replay dormant-period work.
 
-Existing resume and legacy owner/follower paths are preserved. Bare activity,
-ambiguous or malformed identities, follower evidence, stale generations and
-released or different writers remain rejected. Saved settings, secure stores,
-routes, grants, queues and delivery reservations are preserved without replay.
+Current-generation, same-user writer, unique ownership and ambiguity/follower
+checks remain enforced. Saved settings, original sessions, provider routes,
+grants, queues and delivery reservations are preserved. The macOS strict writer
+reader also drops an unsupported lsof option while preserving lock attribution,
+resource/process-generation checks and bounded work.
 
-All affected Windows x64, Linux x64/ARM64 and macOS ARM64 preview packages are
-built from the same canonical source. Windows upgrade acceptance uses previous
-public version 2.3.11. Existing icon, privacy, package and native gates remain.
+All affected Windows x64, Linux x64/ARM64 and macOS ARM64 preview packages use one
+canonical source. Windows upgrade acceptance uses previous public2.3.12; package,
+privacy, embedded icon and native preservation checks remain required.

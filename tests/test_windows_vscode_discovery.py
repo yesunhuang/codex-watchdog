@@ -549,6 +549,13 @@ def test_new_format_history_attachment_recovers_exact_session(tmp_path, cli):
     item = fixture.windows[1]
     assert tracked(snapshot)[item["repo"].name] == (
         item["session"], HISTORY_ATTACHED_SOURCE if cli else FALLBACK_SOURCE)
+    selected = next(w for w in snapshot.effective_workspaces if w.session_id == item["session"])
+    # The real resolver/final native fallback, not only the parser, must carry
+    # the successful resume event to lifecycle without persisting that proof.
+    # This synthetic Windows collector injects utc_ms for both CLI and fallback.
+    expected = (item["spawn_ms"] + 60) / 1000
+    assert selected.attachment_at == expected
+    assert "attachment_at" not in selected.to_dict()
     assert_healthy(snapshot, fixture, (2, 3),
                    "codex_state_vscode_window_cache_owner" if cli else FALLBACK_SOURCE)
 
@@ -659,6 +666,10 @@ def test_fresh_conversation_creation_recovers_exact_session(tmp_path, cli):
     item = fixture.windows[1]
     assert tracked(snapshot)[item["repo"].name] == (
         item["session"], HISTORY_ATTACHED_SOURCE if cli else FALLBACK_SOURCE)
+    selected = next(w for w in snapshot.effective_workspaces if w.session_id == item["session"])
+    expected = (item["spawn_ms"] + 80) / 1000
+    assert selected.attachment_at == expected
+    assert "attachment_at" not in selected.to_dict()
     assert_healthy(snapshot, fixture, (2, 3),
                    "codex_state_vscode_window_cache_owner" if cli else FALLBACK_SOURCE)
 

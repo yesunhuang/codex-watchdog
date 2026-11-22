@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import ctypes
 import errno
 import json
@@ -346,23 +346,97 @@ def _session_routing_step(
     it, and callers reset it with every other state at each spawn. Unrelated
     non-routing lines leave it unchanged but can never arm it.
     """
+    step, armed, _fresh = _session_routing_event(line, state, armed)
+    return step, armed
+
+
+# Typed successful resume: anchored like the creation event, so a quoted
+# ``maybe_resume_success`` inside another message is never a reopen.
+_RESUME_EVENT = re.compile(
+    rb"^[0-9TZ:+\-., ]*(?:\[[^\]\s=]*\]\s+)*"
+    rb"\[extension-app-server-manager\] maybe_resume_success(?=\s)"
+)
+_LOCAL_LOG_STAMP = re.compile(
+    rb"^([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3})\s")
+
+
+def _local_log_seconds(line: bytes) -> Optional[float]:
+    """VS Code's local ``YYYY-MM-DD HH:MM:SS.mmm`` prefix as epoch seconds.
+
+    Same local-time semantics as the Windows ``local_log_time_ms``; anything
+    else (missing, malformed, out of range) is ``None`` and proves nothing.
+    """
+    match = _LOCAL_LOG_STAMP.match(line)
+    if match is None:
+        return None
+    stamp = match.group(1)
+    try:
+        parsed = time.strptime(stamp[:19].decode("ascii"), "%Y-%m-%d %H:%M:%S")
+        return (int(time.mktime(parsed)) * 1000 + int(stamp[20:23])) / 1000.0
+    except (ValueError, OverflowError, UnicodeDecodeError):
+        return None
+
+
+def _resume_attachment_event(line: bytes, step: RoutingState) -> bool:
+    """An exact typed successful resume that attached this thread's owner."""
+    role, active, attached = step
+    if (_RESUME_EVENT.match(line) is None or active is False
+            or line.count(b"maybe_resume_success") != 1
+            or line.count(b"assignedStreamRole") > 1 or line.count(_ATTACHMENT_KEY) > 1
+            or not (attached and role is None or role == "owner")):
+        return False
+    conversations = _CONVERSATION_FIELD.findall(line)
+    threads = _THREAD_FIELD.findall(line)
+    return (line.count(b"conversationId") == 1 and line.count(b"threadId") == 1
+            and len(conversations) == 1 and threads == conversations)
+
+
+def _attachment_proof_holds(step: RoutingState) -> bool:
+    """A later routing state still compatible with an earlier attachment."""
+    role, active, attached = step
+    return active is not False and (role == "owner" or (role is None and attached))
+
+
+def _session_routing_event(
+    line: bytes, state: RoutingState, armed: bool,
+) -> Tuple[Optional[RoutingState], bool, bool]:
+    """``_session_routing_step`` plus whether ``line`` is a fresh attachment.
+
+    Only a typed successful resume of the exact owner/new-format attachment
+    or an armed typed fresh creation qualifies. View polling, role changes,
+    quoted or malformed events never do; they can only keep or clear it.
+    """
     if _CREATED_EVENT.match(line) is not None:
         role, active, _attached = state
         if any(marker in line for marker in _ROUTING_MARKERS):
-            return (None, None, False), False
+            return (None, None, False), False, False
         if not armed:
             # Keep this explicit routing marker even when it cannot initialize
             # an attachment. Otherwise a bare creation (including one after a
             # spawn reset) could fall through to marker-less native recovery.
-            return state, False
+            return state, False, False
         if role is None and active is True and _fresh_creation_identity(line):
             # A history attachment only; never a legacy owner role.
-            return (None, True, True), False
-        return (None, None, False), False
+            return (None, True, True), False, True
+        return (None, None, False), False, False
     step = _routing_transition(line, state)
     if step is None:
-        return None, armed
-    return step, _arms_fresh_creation(line, step)
+        return None, armed, False
+    return step, _arms_fresh_creation(line, step), _resume_attachment_event(line, step)
+
+
+def _update_attachment_proof(
+    proofs: Dict[str, float], session: str, step: Optional[RoutingState],
+    fresh: bool, stamp: Optional[float],
+) -> None:
+    """Shared per-SID attachment-proof bookkeeping for both log parsers."""
+    if step is None:
+        return
+    if fresh and stamp is not None:
+        proofs[session] = stamp
+    elif fresh or not _attachment_proof_holds(step):
+        # An unparseable fresh event proves nothing and supersedes older proof.
+        proofs.pop(session, None)
 
 
 def _history_attached_resolution(
@@ -375,6 +449,7 @@ def _history_attached_resolution(
     writer_process_probe: Callable[[Path], Optional[int]],
     lock_probe: WriterLockProbe,
     work_live: Optional[Callable[[], bool]] = None,
+    attachment_at: Optional[Dict[str, float]] = None,
 ) -> Optional["SessionResolution"]:
     """Select a new-format attached thread only with exact OS writer proof.
 
@@ -414,10 +489,24 @@ def _history_attached_resolution(
     if (writer_process_probe(lock) != pid or not lock_probe(lock)
             or (work_live is not None and not work_live())):
         return refused
-    return SessionResolution("resolved", session, HISTORY_ATTACHED_SOURCE, None)
+    return SessionResolution(
+        "resolved", session, HISTORY_ATTACHED_SOURCE, None,
+        (attachment_at or {}).get(session),
+    )
 
 
-def _codex_log_session_evidence(path: Path, session_ids: Iterable[str]):
+def _codex_log_session_evidence(
+    path: Path, session_ids: Iterable[str], *,
+    attachment_at: Optional[Dict[str, float]] = None,
+):
+    """``(states, markers, attached)``; optionally fills ``attachment_at``.
+
+    ``attachment_at`` (cleared first) receives, per SID, the immutable local
+    log time of its current-generation fresh/reopened exact attachment.
+    """
+    proofs: Dict[str, float] = {}
+    if attachment_at is not None:
+        attachment_at.clear()
     states = {session: (None, None) for session in session_ids
               if _canonical_session_id(session) == session}
     attached: set = set()
@@ -438,14 +527,18 @@ def _codex_log_session_evidence(path: Path, session_ids: Iterable[str]):
                     markers.clear()
                     attached.clear()
                     armed.clear()
+                    proofs.clear()
                     continue
                 matched = conversation.search(line)
                 if matched is None:
                     continue
                 session = matched.group(1).decode("ascii")
                 role, active = states[session]
-                step, is_armed = _session_routing_step(
+                step, is_armed, fresh = _session_routing_event(
                     line, (role, active, session in attached), session in armed)
+                _update_attachment_proof(
+                    proofs, session, step, fresh,
+                    _local_log_seconds(line) if fresh else None)
                 if is_armed:
                     armed.add(session)
                 else:
@@ -460,6 +553,8 @@ def _codex_log_session_evidence(path: Path, session_ids: Iterable[str]):
                 states[session] = (role, active)
     except OSError:
         return dict.fromkeys(states, (None, None)), None, set()
+    if attachment_at is not None:
+        attachment_at.update(proofs)
     return states, markers, attached
 
 
@@ -643,6 +738,10 @@ class SessionResolution:
     session_id: Optional[str]
     source: Optional[str]
     reason: Optional[str]
+    # Transient: immutable local log time of a verified exact fresh/reopened
+    # attachment; only on successful exact-current-owner resolutions. Never
+    # serialized or compared, so routing decisions are unchanged.
+    attachment_at: Optional[float] = field(default=None, compare=False, repr=False)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -690,7 +789,9 @@ class CodexSessionResolver:
         )
         identities = {_path_identity(path) for path in paths}
         loaded, database_status = self._database_candidates(identities)
-        states, markers, attached = _codex_log_session_evidence(codex_log, loaded)
+        attachment_at: Dict[str, float] = {}
+        states, markers, attached = _codex_log_session_evidence(
+            codex_log, loaded, attachment_at=attachment_at)
         database_candidates = {
             session for session in loaded if self.owner_probe(codex_log, session)
         }
@@ -730,6 +831,7 @@ class CodexSessionResolver:
                 loaded, states, attached, window_sessions,
                 [window for window in live_windows if window.codex_log == codex_log],
                 self.codex_home, self.writer_process_probe, self.lock_probe,
+                attachment_at=attachment_at,
             )
             if attachment is not None:
                 return attachment
@@ -761,7 +863,9 @@ class CodexSessionResolver:
                     "codex_state_vscode_active_follower_verified_owner",
                     "vscode_thread_owned_by_another_window",
                 )
-            return SessionResolution("resolved", session, source, None)
+            # Exact current owner of this window's generation only.
+            proof = attachment_at.get(session) if states.get(session, (None,))[0] == "owner" else None
+            return SessionResolution("resolved", session, source, None, proof)
 
         if len(database_candidates) == 1:
             session_id = next(iter(database_candidates))
@@ -1523,6 +1627,10 @@ class VSCodeWorkspaceDiscovery:
         tracked = TrackedWorkspace.create(
             workspace_id, repo_root, resolution.session_id
         )
+        if (resolution.status == "resolved" and resolution.reason is None
+                and resolution.attachment_at is not None):
+            # Transient verified-owner attachment proof; never persisted.
+            tracked = replace(tracked, attachment_at=resolution.attachment_at)
         index = len(windows)
         windows.append(
             DiscoveredWindow(

@@ -6,8 +6,9 @@ resource holder, same-user process generation and exact native thread/repo.
 It creates no control epoch, client, session or native state. A successful
 sample is not idle, uninterrupted ownership, model completion or GUI proof.
 
-Darwin requires lsof's explicit whole-file WRITE lock field. Builds which
-report only an opener or omit lock attribution are unsupported and refuse.
+Darwin requires explicit whole-file WRITE lock attribution, or the independent
+sole-resource-user plus held-FLOCK/current-process-generation proof already used
+by native discovery. A blank lsof field or opener alone is never ownership.
 """
 import ctypes
 import os
@@ -103,7 +104,7 @@ def _darwin_birth(pid):
 
 def _run_lsof(path, pid):
     """Bound the fixed local inspection child, including output before decode."""
-    command = ["/usr/sbin/lsof", "-nP", "-Di", "-a", "-p", str(pid),
+    command = ["/usr/sbin/lsof", "-nP", "-a", "-p", str(pid),
                "-F", "pufDintl", "--", str(path)]
     child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL, close_fds=True,
@@ -159,11 +160,31 @@ def _darwin_holder(path, identity, expected_pid):
         raise NativeInflightError("observed_writer_lock_unavailable")
     file = files[0]
     if (set(file) != {"f", "D", "i", "n", "t", "l"} or not file["f"].isdigit()
-            or file["l"] != "W" or file["t"] != "REG" or file["n"] != str(path)
+            or file["t"] != "REG" or file["n"] != str(path)
             or re.fullmatch(r"0x[0-9a-fA-F]+", file["D"]) is None
             or not file["i"].isdigit() or int(file["D"], 16) != identity.st_dev
             or int(file["i"]) != identity.st_ino):
         raise NativeInflightError("observed_writer_lock_unavailable")
+    if file["l"] != "W":
+        # Apple's shipped lsof can report a blank lock field for an actual
+        # native FLOCK. It remains unknown unless the independent, unscoped
+        # resource reader proves ONE opener, the exact held lock, same-user
+        # libproc birth and repeated resource/generation equality. Never infer
+        # ownership from this PID-restricted lsof query alone.
+        if file["l"] != " ":
+            raise NativeInflightError("observed_writer_lock_unavailable")
+        from .writer_process import _darwin_resource_process
+        try:
+            birth = _darwin_birth(expected_pid)
+            if (_darwin_resource_process(path) != expected_pid
+                    or _darwin_birth(expected_pid) != birth):
+                raise ValueError("resource_owner_not_proven")
+            after = _lock_identity(path, "darwin")
+            if ((after.st_dev, after.st_ino, after.st_uid, after.st_mode)
+                    != (identity.st_dev, identity.st_ino, identity.st_uid, identity.st_mode)):
+                raise ValueError("resource_generation_changed")
+        except (OSError, ValueError):
+            raise NativeInflightError("observed_writer_lock_unavailable") from None
     return expected_pid
 
 

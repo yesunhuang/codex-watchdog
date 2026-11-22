@@ -284,6 +284,33 @@ def test_darwin_openers_without_explicit_exact_write_lock_are_not_owners(rig, mo
         with pytest.raises(NativeInflightError): observed._darwin_holder(rig.lock, rig.lock.stat(), PID)
 
 
+@pytest.mark.parametrize("fault", [None, "absent", "other_pid", "unknown", "generation", "resource"])
+def test_darwin_blank_field_needs_independent_resource_lock_and_birth_proof(rig, monkeypatch, fault):
+    # Blank is not proof: an independently bounded all-opener/held-FLOCK reader
+    # must positively attribute the exact current resource to this same birth.
+    monkeypatch.setattr(observed, "_run_lsof", lambda *args: lsof_data(rig).replace(b"lW", b"l "))
+    births = iter(["darwin:1790000000:123456", "darwin:1790000000:" +
+                   ("123457" if fault == "generation" else "123456")])
+    monkeypatch.setattr(observed, "_darwin_birth", lambda pid: next(births))
+    calls = []
+    def independent(path):
+        calls.append(path)
+        if fault == "unknown": raise ValueError("resource_not_proven")
+        return None if fault == "absent" else PID + 1 if fault == "other_pid" else PID
+    monkeypatch.setattr(writer_process, "_darwin_resource_process", independent)
+    identity = rig.lock.stat()
+    if fault == "resource":
+        monkeypatch.setattr(observed, "_lock_identity", lambda *args: SimpleNamespace(
+            st_dev=identity.st_dev, st_ino=identity.st_ino + 1,
+            st_uid=identity.st_uid, st_mode=identity.st_mode))
+    if fault is None:
+        assert observed._darwin_holder(rig.lock, identity, PID) == PID
+    else:
+        with pytest.raises(NativeInflightError):
+            observed._darwin_holder(rig.lock, identity, PID)
+    assert calls == [rig.lock]
+
+
 @pytest.mark.parametrize("fault", [None, "timeout", "overflow", "nonzero"])
 def test_lsof_child_has_fixed_args_timeout_and_predecode_output_cap(rig, monkeypatch, fault):
     events, reads = [], []
@@ -296,7 +323,8 @@ def test_lsof_child_has_fixed_args_timeout_and_predecode_output_cap(rig, monkeyp
     def kill(): events.append("kill"); state[0] = -9
     child = SimpleNamespace(stdout=pipe, wait=wait, poll=lambda: state[0], kill=kill)
     def create(args, **kwargs):
-        assert args == ["/usr/sbin/lsof", "-nP", "-Di", "-a", "-p", str(PID),
+        # Apple's lsof4.91 rejects -D; retain all exact PID/lock field limits.
+        assert args == ["/usr/sbin/lsof", "-nP", "-a", "-p", str(PID),
             "-F", "pufDintl", "--", str(rig.lock)]
         assert kwargs["stderr"] == observed.subprocess.DEVNULL
         assert set(kwargs["env"]) == {"PATH", "LC_ALL", "LANG"}

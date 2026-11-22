@@ -5,8 +5,29 @@ import time
 from .models import sha256_text
 from .notifications import NotificationEvent, notification_workspace_label
 from .relay import RelayTarget
-from .session_activity import SessionActivity, hello_claim_key
+from .session_activity import TTL_SECONDS, SessionActivity, _timestamp, hello_claim_key
 from .session_routes import SessionRoutes
+
+
+def _attachment_activity(workspace, activity_store):
+    """The transient discovery attachment proof, if it is valid current activity.
+
+    Discovery or the selected Linux observer sets ``attachment_at`` only after
+    exact current-writer proof; persisted/manual state carries none. Malformed,
+    future or already-stale (>= the 72h policy) proof is ignored rather than
+    failing independent observation, using SessionActivity's validation.
+    """
+    value = getattr(workspace, "attachment_at", None)
+    if value is None:
+        return None
+    try:
+        value = _timestamp(value, "attachment_at")
+        now = activity_store._now()
+    except (TypeError, ValueError, OSError):
+        return None
+    if value > now or now - value >= TTL_SECONDS:
+        return None
+    return value
 
 
 class SessionLifecycle:
@@ -32,6 +53,13 @@ class SessionLifecycle:
             if request is not None:enrollment_at=max(enrollment_at or 0,request)
         except (OSError,ValueError):
             pass  # Optional intent uncertainty leaves independent work alone.
+        attachment = _attachment_activity(workspace, activity_store)
+        if attachment is not None:
+            # A verified exact fresh/reopened attachment is one immutable event:
+            # SessionActivity reactivates a dormant session only when it is newer
+            # than the persisted last activity, so a repeated event (also after a
+            # restart) never refreshes activity, bumps generation or resends Hello.
+            enrollment_at = max(enrollment_at or 0, attachment)
         state = activity_store.observe(workspace.session_id,
             genuine_at=signals.get("genuine_at"), enrollment_at=enrollment_at,
             turn_active=signals.get("turn_active"), queue_active=signals.get("queue_active"),

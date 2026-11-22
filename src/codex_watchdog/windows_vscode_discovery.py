@@ -27,7 +27,7 @@ start position between snapshots), never guessed.
 from __future__ import annotations
 
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 import ctypes
 import json
 import ntpath
@@ -50,7 +50,8 @@ from .workspace_discovery import (
     _canonical_session_id,
     _history_attached_resolution,
     _path_identity,
-    _session_routing_step,
+    _session_routing_event,
+    _update_attachment_proof,
 )
 
 
@@ -226,6 +227,9 @@ class CodexLogGeneration:
     markers: FrozenSet[str]
     # New-format history attachments; never a legacy owner role.
     attached: FrozenSet[str] = frozenset()
+    # Per SID: immutable local log time (epoch seconds) of the current
+    # generation's exact fresh/reopened attachment, per the shared rules.
+    attachment_at: Dict[str, float] = field(default_factory=dict)
 
 
 def _lines(data: bytes, base: int) -> Iterator[Tuple[int, bytes]]:
@@ -777,18 +781,23 @@ class WindowsNativeCollector:
         markers = set()
         attached = set()
         armed = set()  # Generation-local fresh-creation precondition per SID.
+        proofs: Dict[str, float] = {}
         spawn: Optional[Tuple[int, bytes]] = None
         for offset, line in _lines(data, base):
             if _SPAWN in line:
                 states, markers, attached, armed = {}, set(), set(), set()
+                proofs = {}
                 spawn = (offset, line.rstrip(b"\r\n"))
                 continue
             session = _conversation(line)
             if session is None:
                 continue
             role, active = states.get(session, (None, None))
-            step, is_armed = _session_routing_step(
+            step, is_armed, fresh = _session_routing_event(
                 line, (role, active, session in attached), session in armed)
+            stamp = self._stamp(line) if fresh else None
+            _update_attachment_proof(
+                proofs, session, step, fresh, None if stamp is None else stamp / 1000.0)
             if is_armed:
                 armed.add(session)
             else:
@@ -806,7 +815,7 @@ class WindowsNativeCollector:
             self._stamp(spawn[1]) if spawn is not None else None,
             spawn[0] if spawn is not None else None,
             spawn[1] if spawn is not None else b"",
-            states, frozenset(markers), frozenset(attached),
+            states, frozenset(markers), frozenset(attached), proofs,
         )
 
     def codex_generation(self, codex_log: Path, budget: WorkBudget) -> Optional[CodexLogGeneration]:
@@ -1326,7 +1335,7 @@ class WindowsVSCodeLiveWindowIndex(VSCodeLiveWindowIndex):
                 loaded, states, evidence.attached, window_sessions if complete else None,
                 [window for window in live_windows if window.codex_log == codex_log],
                 resolver.codex_home, resolver.writer_process_probe, resolver.lock_probe,
-                budget.live,
+                budget.live, attachment_at=evidence.attachment_at,
             )
             if attachment is not None:
                 return attachment
@@ -1351,7 +1360,10 @@ class WindowsVSCodeLiveWindowIndex(VSCodeLiveWindowIndex):
                 return SessionResolution(
                     "resolved", session, _FOLLOWER_SOURCE,
                     "vscode_thread_owned_by_another_window")
-            return SessionResolution("resolved", session, source, None)
+            # Exact current owner of this window's generation only.
+            proof = (evidence.attachment_at.get(session)
+                     if states[session][0] == "owner" else None)
+            return SessionResolution("resolved", session, source, None, proof)
 
         if len(candidates) == 1:
             session = next(iter(candidates))
@@ -1438,21 +1450,32 @@ class WindowsVSCodeLiveWindowIndex(VSCodeLiveWindowIndex):
         # A replacement window/app generation or a competing owner can appear
         # while the old host/app still drain with their lock: repeat the current
         # generations and the complete selection right before the final checks.
+        reselected: List[SessionResolution] = []
         changed = self._current_selection(
-            proof, session, window_state_database, live_windows, session_resolver, budget)
+            proof, session, window_state_database, live_windows, session_resolver, budget,
+            reselected)
         if changed is not None:
             return refuse(changed)
         if not self._identity_current(proof):
             return refuse("identity_changed")
         if not self._writer_matches(lock, proof):
             return refuse("writer_changed")
-        return SessionResolution("resolved", session, FALLBACK_SOURCE, None)
+        # Attachment proof only after every check above, and only when the
+        # admitted generation and its fresh re-selection carry the same event.
+        attachment = evidence.attachment_at.get(session)
+        if not reselected or reselected[0].attachment_at != attachment:
+            attachment = None
+        return SessionResolution("resolved", session, FALLBACK_SOURCE, None, attachment)
 
     def _current_selection(
         self, proof: WindowsNativeProof, session: str, database: Path,
         live_windows: Sequence[LiveVSCodeWindow], resolver, budget: WorkBudget,
+        reselected: Optional[List[SessionResolution]] = None,
     ) -> Optional[str]:
-        """Fresh generation fingerprints and complete owner selection, or a reason."""
+        """Fresh generation fingerprints and complete owner selection, or a reason.
+
+        On success the fresh selection is appended to ``reselected`` if given.
+        """
         collector = self.collector
         if not collector.app_generation_current(proof):
             return "app_generation_changed"
@@ -1490,6 +1513,8 @@ class WindowsVSCodeLiveWindowIndex(VSCodeLiveWindowIndex):
         if (selection.session_id != session or selection.reason is not None
                 or selection.source == _FOLLOWER_SOURCE):
             return "budget_deferred" if budget.reason else "selection_changed"
+        if reselected is not None:
+            reselected.append(selection)
         return None
 
     def _writer_matches(self, lock: Path, proof: WindowsNativeProof) -> bool:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path
@@ -98,6 +98,11 @@ class TrackedWorkspace:
     session_id: str
     execution_locality: str
     registered_at: str
+    # Transient, discovery-only proof: the immutable local Codex.log timestamp
+    # (epoch seconds) of a verified exact fresh/reopened attachment of this
+    # session by its current owner. Never persisted, serialized or compared;
+    # manual/persisted registrations always carry ``None``.
+    attachment_at: Optional[float] = field(default=None, compare=False, repr=False)
 
     @classmethod
     def create(
