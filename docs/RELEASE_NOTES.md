@@ -1,18 +1,19 @@
-# Codex WatchDog 2.3.13
+# Codex WatchDog 2.3.14
 
-Fix inactive lifecycle state surviving a genuine reopen of an existing Codex
-conversation. A verified current-owner resume or fresh-creation event now
-reactivates that original conversation once. On Linux, a newly attached exact
-editor writer can supply its immutable kernel birth as the activation signal.
-Repeated discovery, stable writer presence and daemon restart never refresh
-activity, create repeated activation greetings or replay dormant-period work.
+Fix a relay race in which a valid reply consumed its one-shot ticket before
+finding that the local native-owner fence was busy. Slack human and authorized
+bot replies, Feishu/Lark and OneBot now acquire that fence before admission and
+hold it through dispatch. A busy unclaimed reply can defer without losing its
+poll position; healthy active parents continue making bounded progress.
 
-Current-generation, same-user writer, unique ownership and ambiguity/follower
-checks remain enforced. Saved settings, original sessions, provider routes,
-grants, queues and delivery reservations are preserved. The macOS strict writer
-reader also drops an unsupported lsof option while preserving lock attribution,
-resource/process-generation checks and bounded work.
+Fix Git wake eligibility after a genuine conversation reactivation. Activation
+no longer records the outstanding upstream tip as attempted without dispatch.
+The normal current-tip scheduler and durable exact claims still decide whether
+a wake can occur. Previously attempted or uncertain effects remain terminal;
+there is no history replay, backlog scan, session replacement or state reset.
 
-All affected Windows x64, Linux x64/ARM64 and macOS ARM64 preview packages use one
-canonical source. Windows upgrade acceptance uses previous public2.3.12; package,
-privacy, embedded icon and native preservation checks remain required.
+Saved profiles, provider credentials, routes, grants, queues and original native
+writers remain preserved. All affected Windows x64, Linux x64/ARM64 and macOS
+ARM64 preview packages use the same canonical source. Windows upgrade acceptance
+uses immediately previous public 2.3.13, with package/privacy, embedded-icon and
+native preservation checks retained.

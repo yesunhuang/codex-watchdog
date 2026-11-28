@@ -23,7 +23,7 @@ from .control_state import ControlError, control_read_json
 from .remote_control import RemoteControlClient
 from .notifications import NotificationEvent
 from .slack_presentation import slack_message_with_host
-from .relay import ExactThreadRelay, ReplyResult as SlackReplyResult
+from .relay import ExactThreadRelay, ReplyResult as SlackReplyResult, native_reply_guarded
 from .relay_authority import relay_guarded, relay_ack_guarded, sender_guarded
 
 
@@ -452,6 +452,12 @@ class SlackReplyRelay(ExactThreadRelay):
                 previous=previous,
             )
 
+        return self._admit_human_reply(mapping, stable_event_id, channel_id,
+                                       thread_ts, user_id, text, message_ts)
+
+    @native_reply_guarded
+    def _admit_human_reply(self, mapping, stable_event_id, channel_id,
+                           thread_ts, user_id, text, message_ts):
         # Ordinary message relay. Admission callback atomically verifies target and ticket for
         # both admins and delegates.
         instruction_id = "slack:" + sha256_text(stable_event_id)[:40]
@@ -631,8 +637,6 @@ class SlackReplyRelay(ExactThreadRelay):
 
     def _handle_bot_instruction(self, event, event_id, team_id, app_id, from_poll):
         from .slack_bot_identity import BotVerificationDeferred, event_principal, parse_bot_instruction
-        from .slack_bot_acl import BotRequestReused
-        from .slack_bot_receipts import BotReceiptContext
         command = parse_bot_instruction(event)
         if command is None:
             return SlackReplyResult("ignored_bot_or_subtype", delivery_status="bot_not_instruction")
@@ -649,6 +653,20 @@ class SlackReplyRelay(ExactThreadRelay):
             principal = self._get_bot_verifier().bot(event.get("user"))
             if event_principal(event, context.team_id, principal) is not True:
                 return SlackReplyResult("bot_ignored", delivery_status="bot_identity_mismatch")
+        except (StoreBusyError, BotVerificationDeferred):
+            return SlackReplyResult("deferred")
+        except Exception as exc:
+            return SlackReplyResult("bot_rejected", error_sha256=self._error_digest(exc))
+        return self._admit_bot_reply(mapping, event, event_id, context, principal,
+                                     request_id, prompt, channel, parent, timestamp)
+
+    @native_reply_guarded
+    def _admit_bot_reply(self, mapping, event, event_id, context, principal,
+                         request_id, prompt, channel, parent, timestamp):
+        from .slack_bot_identity import BotVerificationDeferred
+        from .slack_bot_acl import BotRequestReused
+        from .slack_bot_receipts import BotReceiptContext
+        try:
             event_key = self._event_key(event, event_id)
             message_key = channel + "\0" + timestamp
             fingerprint = sha256_text(json.dumps(dict(

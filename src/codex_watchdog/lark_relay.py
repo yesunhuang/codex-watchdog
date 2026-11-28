@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from .lark_mapping import LarkThreadStore
 from .lark_transport import LarkApi, LarkConnection, LarkTransportError, valid_id
 from .models import MAX_PROMPT_CHARS, sha256_text
-from .relay import ExactThreadRelay, ReplyResult, _DELIVERED_STATES
+from .relay import ExactThreadRelay, ReplyResult, _DELIVERED_STATES, native_reply_guarded
 from .relay_authority import relay_guarded, relay_ack_guarded, sender_guarded
 from .storage import FileLock, StoreBusyError
 
@@ -212,6 +212,17 @@ class LarkReplyRelay(ExactThreadRelay):
                 return self.binding.command(operation, event_key=event_key, chat_id=chat_id,
                     parent_id=mapping.message_id, user_id=open_id, text=text,
                     message_id=message_id, created_at=created_at)
+            return self._admit_reply(mapping, header, message, chat_id, open_id,
+                                     text, event_key, fingerprint, message_id)
+        except StoreBusyError:
+            return ReplyResult("deferred")
+        except Exception as exc:
+            return ReplyResult("rejected_state_or_collision", error_sha256=self._error_digest(exc))
+
+    @native_reply_guarded
+    def _admit_reply(self, mapping, header, message, chat_id, open_id,
+                     text, event_key, fingerprint, message_id):
+        try:
             message_key = chat_id + "\0" + message_id
             instruction_id = "lark:" + sha256_text(self.config.scope + "\0" + message_key)[:40]
             # Always pass admission callback; it atomically verifies target and ticket for both

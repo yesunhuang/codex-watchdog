@@ -740,9 +740,9 @@ class MvpWatchdogService:
                 observation_path,state_path,status="completed",stop_count=stop_count,stop_audit_id=stop_audit_id)
         head_oid = git.get("head_oid")
         remote_oid = git.get("upstream_oid")
-        if lifecycle.get("activated"):
-            state.update(last_attempted_remote_oid=remote_oid,last_remote_oid=remote_oid,
-                         pending_remote_oid=None,pending_instruction_id=None)
+        # Reactivation restores Git eligibility; it is not a delivery attempt.
+        # Preserve actual attempted tips/claims, and let the ordinary current-tip
+        # dispatcher admit an outstanding, never-attempted update once.
         wake = probe.get("wake") if isinstance(probe.get("wake"), dict) else None
         raw_git_blockers = git.get("blockers")
         if not isinstance(raw_git_blockers, (list, tuple)):
@@ -1400,11 +1400,9 @@ class MvpWatchdogService:
             # the queued turn, where task context is available.
             remote_trigger: Optional[str] = None
             remote_oid = current.upstream_oid
-            if lifecycle.get("activated"):
-                # A new tracking generation starts at the current Git boundary;
-                # reactivation does not enqueue changes from a dormant interval.
-                state.update(last_attempted_remote_oid=remote_oid,last_remote_oid=remote_oid,
-                             pending_remote_oid=None,pending_remote_detected_at=None)
+            # A genuine activation is not proof that Codex received this tip.
+            # Retain the actual attempt boundary and existing durable claims;
+            # normal one-tip admission/dedup handles any outstanding update.
             attempted = state.get("last_attempted_remote_oid",
                                   state.get("pending_remote_oid") or state.get("last_remote_oid"))
             if remote_oid is not None and not dormant:

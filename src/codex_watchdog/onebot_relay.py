@@ -6,7 +6,7 @@ import time
 from .lark_mapping import LarkThreadStore
 from .models import MAX_PROMPT_CHARS, sha256_text
 from .onebot_transport import OneBotConnection, OneBotError, identifier
-from .relay import ExactThreadRelay, ReplyResult, _DELIVERED_STATES
+from .relay import ExactThreadRelay, ReplyResult, _DELIVERED_STATES, native_reply_guarded
 from .relay_authority import relay_guarded, sender_guarded
 from .storage import FileLock, StoreBusyError
 
@@ -234,6 +234,15 @@ class OneBotReplyRelay(ExactThreadRelay):
                     event_key="onebot-control:" + value["chat_id"] + ":" + value["message_id"],
                     chat_id=value["chat_id"], parent_id=value["reply_to"], user_id=value["user_id"],
                     text=value["text"], message_id=value["message_id"], created_at=created_at)
+            return self._admit_reply(mapping, payload, value, user_id)
+        except StoreBusyError:
+            return ReplyResult("deferred")
+        except Exception:
+            return ReplyResult("rejected_state_or_collision")
+
+    @native_reply_guarded
+    def _admit_reply(self, mapping, payload, value, user_id):
+        try:
             identity = {key: value[key] for key in ("chat_id", "message_id", "reply_to", "user_id")}
             identity.update(text_sha256=sha256_text(value["text"]), target=mapping.target.to_dict())
             fingerprint = sha256_text(json.dumps(identity, sort_keys=True, separators=(",", ":")))

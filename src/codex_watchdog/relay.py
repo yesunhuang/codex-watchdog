@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from contextlib import ExitStack
+from functools import wraps
 import json
 from pathlib import Path
 import re
@@ -189,6 +191,34 @@ class ReplyResult:
             "duplicate": self.duplicate,
             "error_sha256": self.error_sha256,
         }
+
+
+def native_reply_guarded(method):
+    """Acquire an uncoordinated local owner's fence before consuming a ticket.
+
+    Keep the lexical hold through claim and dispatch. A busy observer can then
+    defer a never-claimed reply, without making an uncertain effect replayable.
+    Coordinated/remote targets retain their existing authoritative relay path.
+    """
+    @wraps(method)
+    def guarded(self, mapping, *args, **kwargs):
+        from .control_context import effect_guard
+        from .control_state import ControlError
+        target = mapping.target
+        home = getattr(self.queue_dispatcher, "codex_home", None)
+        with ExitStack() as scope:
+            try:
+                if (target.execution_locality == "process_local" and home is not None
+                        and not (control_root(home) / target.thread_id / "owner.json").exists()):
+                    scope.enter_context(effect_guard(home, target.thread_id, "queue"))
+            except ControlError:
+                # No provider claim or external attempt has happened. The poller
+                # retains this parent's unread position and rotates fairly.
+                return ReplyResult("deferred", target.workspace_id,
+                                   delivery_status="native_owner_busy_before_admission")
+            # Deliberately do not catch post-claim failures as safe deferrals.
+            return method(self, mapping, *args, **kwargs)
+    return guarded
 
 
 class ExactThreadRelay:
